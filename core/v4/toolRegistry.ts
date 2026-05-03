@@ -8,9 +8,8 @@
  *      `AidenAgent` invokes when the model emits tool calls.
  *
  * Wrappers in `tools/v4/<toolset>/` register themselves here at boot via
- * `tools/v4/index.ts::registerReadOnlyTools()`. Phase 7 ships read-only
- * tools only; write/execute tools land in Phase 8 once the approval engine
- * is in place.
+ * `tools/v4/index.ts::registerReadOnlyTools()` (Phase 7) and
+ * `registerWriteTools()` (Phase 8).
  *
  * The registry is intentionally dumb: no validation logic, no policy
  * enforcement, no scheduling. Those concerns live in `AidenAgent`,
@@ -21,7 +20,7 @@
  * risk metadata (`category`, `mutates`) so Phase 9 can gate tool calls
  * without scanning the wrapper bodies.
  *
- * Status: PHASE 7.
+ * Status: PHASE 8.
  */
 
 import type {
@@ -32,6 +31,7 @@ import type {
 import type { AidenPaths } from './paths';
 import type { SessionManager } from './sessionManager';
 import type { MemoryManager } from './memoryManager';
+import type { ProcessRegistry } from './processRegistry';
 
 /**
  * Risk profile for a tool. Used by the Phase 9 approval engine to decide
@@ -51,6 +51,14 @@ export interface ToolContext {
   /** Memory manager — currently unused (memory loads via prompt snapshot)
    *  but plumbed through so Phase 9 memory-write tools can hook in. */
   memory?: MemoryManager;
+  /** Process registry shared across `process_*` tools (Phase 8). */
+  processes?: ProcessRegistry;
+  /** Which terminal backend `shell_exec` should route to. Phase 9
+   *  populates this from session/policy; defaults to `'local'`. */
+  terminalBackend?: 'local' | 'docker';
+  /** Override the default Docker image for the docker backend.
+   *  Phase 8 default is `node:22-alpine`. */
+  dockerImage?: string;
   /** Optional structured logger. Wrappers call this for diagnostic output. */
   log?: (level: 'info' | 'warn' | 'error', msg: string) => void;
 }
