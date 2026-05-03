@@ -19,12 +19,12 @@
  * Hermes reference: hermes_cli/auth.py — Credential / RefreshableCredential.
  */
 
-import { promises as fs, constants as fsConstants } from 'node:fs';
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 
 import { ApiMode, CredentialSource } from './types';
 import { ProviderError } from './errors';
+import { resolveAidenPaths } from '../../core/v4/paths';
 
 /**
  * Exact on-disk shape of `auth.json`.  Modes that don't go through this
@@ -252,16 +252,12 @@ export class CredentialResolver {
   }
 }
 
-/** Default platform path for auth.json. Phase 4 hardcodes; future: paths.ts. */
+/**
+ * Default platform path for auth.json — delegates to core/v4/paths.ts as
+ * the single source of truth (Phase 6 migration).
+ */
 export function defaultAuthJsonPath(): string {
-  if (process.platform === 'win32') {
-    const localAppData = process.env.LOCALAPPDATA;
-    const base = localAppData && localAppData.length > 0
-      ? localAppData
-      : path.join(os.homedir(), 'AppData', 'Local');
-    return path.join(base, 'aiden', 'auth.json');
-  }
-  return path.join(os.homedir(), '.aiden', 'auth.json');
+  return resolveAidenPaths().authJson;
 }
 
 function entryToSource(entry: AuthJsonEntry): CredentialSource {

@@ -3,8 +3,140 @@
  *
  * Cross-platform path constants for Aiden user data.
  *
- * Status: SCAFFOLDING — implementation lands in Phase 3 (see docs/v4.0.0-architecture.md)
- * Hermes reference: hermes-agent/hermes_constants.py
+ * Layout (per docs/v4.0.0-architecture.md "Cross-platform strategy"):
+ *
+ *   Windows : %LOCALAPPDATA%\aiden\
+ *             (fallback %USERPROFILE%\AppData\Local\aiden\ when LOCALAPPDATA
+ *              is unset, e.g. cygwin/MINGW shells without env passthrough)
+ *   Linux   : ~/.aiden/
+ *   macOS   : ~/Library/Application Support/aiden/
+ *
+ * `AIDEN_HOME` env var overrides everything (single source of truth, used
+ * for tests, Docker overlays, multi-profile workflows). When set we never
+ * touch the platform-specific defaults.
+ *
+ * Hermes reference: hermes_constants.py::get_hermes_home(). Hermes uses
+ * `~/.hermes` on every platform (no Windows native support); Aiden treats
+ * native Windows paths as a first-class moat.
  */
 
-export {}; // make this a module
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+
+/**
+ * Resolved on-disk paths for the Aiden user-data root and every subpath
+ * the v4 runtime touches.  Members are absolute paths.
+ */
+export interface AidenPaths {
+  /** Aiden user-data root. Platform-specific unless overridden via AIDEN_HOME. */
+  root: string;
+  /** SQLite session/message database (Phase 6+). */
+  sessionsDb: string;
+  /** OAuth + API key store (managed by CredentialResolver, Phase 4+). */
+  authJson: string;
+  /** User-editable config (Phase 6+). */
+  configYaml: string;
+  /** Secret env file (Phase 6+). */
+  envFile: string;
+  /** Identity prompt slot #1 (Phase 9+). */
+  soulMd: string;
+  /** Agent's curated environment notes (Phase 6+). */
+  memoryMd: string;
+  /** User profile / preferences (Phase 6+). */
+  userMd: string;
+  /** root/skills/ — bundled + user skills. */
+  skillsDir: string;
+  /**
+   * root/sessions/ — legacy file-based session jsonl directory.  Phase 6+
+   * persists messages to sessions.db; this dir may remain empty but the
+   * path is exposed for migration tooling and aiden doctor.
+   */
+  sessionsDir: string;
+  /** root/plugins/ — third-party plugins. */
+  pluginsDir: string;
+  /** root/logs/ — auto-redacted runtime logs. */
+  logsDir: string;
+  /** root/.bundled_manifest — sha map of skills shipped with the package. */
+  bundledManifest: string;
+}
+
+export interface ResolveAidenPathsOptions {
+  /**
+   * Hard override for the root.  When provided, every returned path is
+   * computed from this directory and AIDEN_HOME / platform defaults are
+   * ignored.  Tests use this for isolation.
+   */
+  rootOverride?: string;
+}
+
+/** Compute the Aiden user-data root without computing the rest of the layout. */
+export function resolveAidenRoot(opts: ResolveAidenPathsOptions = {}): string {
+  if (opts.rootOverride && opts.rootOverride.length > 0) {
+    return path.resolve(opts.rootOverride);
+  }
+
+  const fromEnv = process.env.AIDEN_HOME;
+  if (fromEnv && fromEnv.trim().length > 0) {
+    return path.resolve(fromEnv.trim());
+  }
+
+  const home = os.homedir();
+  switch (process.platform) {
+    case 'win32': {
+      const localAppData = process.env.LOCALAPPDATA;
+      const base =
+        localAppData && localAppData.length > 0
+          ? localAppData
+          : path.join(home, 'AppData', 'Local');
+      return path.join(base, 'aiden');
+    }
+    case 'darwin':
+      return path.join(home, 'Library', 'Application Support', 'aiden');
+    case 'linux':
+    default:
+      // Unknown POSIX-likes (freebsd, openbsd, etc.) fall through to ~/.aiden
+      // — same convention Hermes uses.
+      return path.join(home, '.aiden');
+  }
+}
+
+/** Build the full set of paths from a (possibly overridden) root. */
+export function resolveAidenPaths(opts: ResolveAidenPathsOptions = {}): AidenPaths {
+  const root = resolveAidenRoot(opts);
+  return {
+    root,
+    sessionsDb: path.join(root, 'sessions.db'),
+    authJson: path.join(root, 'auth.json'),
+    configYaml: path.join(root, 'config.yaml'),
+    envFile: path.join(root, '.env'),
+    soulMd: path.join(root, 'SOUL.md'),
+    memoryMd: path.join(root, 'memories', 'MEMORY.md'),
+    userMd: path.join(root, 'memories', 'USER.md'),
+    skillsDir: path.join(root, 'skills'),
+    sessionsDir: path.join(root, 'sessions'),
+    pluginsDir: path.join(root, 'plugins'),
+    logsDir: path.join(root, 'logs'),
+    bundledManifest: path.join(root, '.bundled_manifest'),
+  };
+}
+
+/**
+ * Create every directory in `paths` that should exist on disk.  Idempotent —
+ * existing dirs are left alone.  Files (sessionsDb, authJson, configYaml,
+ * envFile, the .md files, bundledManifest) are NOT pre-created — owners
+ * create them lazily on first write.
+ */
+export async function ensureAidenDirsExist(paths: AidenPaths): Promise<void> {
+  const dirs = [
+    paths.root,
+    paths.skillsDir,
+    paths.sessionsDir,
+    paths.pluginsDir,
+    paths.logsDir,
+    path.dirname(paths.memoryMd), // root/memories/
+  ];
+  for (const dir of dirs) {
+    await fs.mkdir(dir, { recursive: true });
+  }
+}
