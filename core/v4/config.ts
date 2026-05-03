@@ -1,10 +1,262 @@
 /**
  * core/v4/config.ts — Aiden v4.0.0
  *
- * config.yaml + .env + auth.json with hot reload.
+ * config.yaml parser + ConfigProvider implementation.
  *
- * Status: SCAFFOLDING — implementation lands in Phase 3 (see docs/v4.0.0-architecture.md)
- * Hermes reference: hermes-agent/hermes_cli/config.py
+ * Replaces the Phase 5 stub used by RuntimeResolver. Behaviour:
+ *
+ * - Loads `config.yaml` from `paths.configYaml`. Missing file → defaults.
+ * - YAML parsed via `js-yaml` (already a transitive dep, now direct).
+ * - `${ENV_VAR}` interpolation runs at `get()` / `getValue()` time.
+ *   Unset vars are left as `${X}` so callers can detect-and-fail rather
+ *   than silently use empty strings (Hermes pattern, _expand_env_vars).
+ * - Schema is permissive: unknown top-level keys log a warning and are
+ *   preserved on disk so a future Aiden version can pick them up.
+ * - `set()` mutates the in-memory copy; persistence is `save()`.
+ * - `reload()` re-reads the file and reports whether anything changed,
+ *   feeding the hot-reload check (full filesystem watch lands Phase 13).
+ *
+ * Status: PHASE 6.
+ *
+ * Hermes reference: hermes_cli/config.py (_expand_env_vars, load_config,
+ * save_config). Aiden trims hot-reload + the `aiden config` slash
+ * commands to Phase 13 — only the parser surface is needed now.
  */
 
-export {}; // make this a module
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import yaml from 'js-yaml';
+
+import type { AidenPaths } from './paths';
+import type { ConfigProvider } from '../../providers/v4/runtimeResolver';
+
+export type ApprovalMode = 'manual' | 'smart' | 'off';
+
+export interface AidenConfig {
+  model: {
+    provider: string;
+    modelId: string;
+    context_length?: number;
+  };
+  agent: {
+    max_turns: number;
+    approval_mode: ApprovalMode;
+    personalities?: Record<string, string>;
+  };
+  display: {
+    skin: string;
+    streaming: boolean;
+  };
+  providers?: Record<
+    string,
+    { apiKey?: string; baseUrl?: string } & Record<string, unknown>
+  >;
+  memory: {
+    provider: string;
+  };
+  /**
+   * Forward-compatibility bucket: any unknown top-level keys land here so
+   * round-trip save() doesn't drop user-managed fields.
+   */
+  [extra: string]: unknown;
+}
+
+export const DEFAULT_CONFIG: AidenConfig = {
+  model: {
+    provider: 'anthropic',
+    modelId: 'claude-opus-4-7',
+  },
+  agent: {
+    max_turns: 90,
+    approval_mode: 'manual',
+  },
+  display: {
+    skin: 'default',
+    streaming: true,
+  },
+  memory: {
+    provider: 'default',
+  },
+};
+
+const KNOWN_KEYS = new Set([
+  'model',
+  'agent',
+  'display',
+  'providers',
+  'memory',
+]);
+
+const ENV_REF_RE = /\$\{([^}]+)\}/g;
+
+/** Recursively interpolate `${VAR}` against `process.env`, leaving misses literal. */
+function expandEnvVars(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return value.replace(ENV_REF_RE, (whole, name: string) => {
+      const v = process.env[name];
+      return v !== undefined ? v : whole;
+    });
+  }
+  if (Array.isArray(value)) return value.map(expandEnvVars);
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = expandEnvVars(v);
+    }
+    return out;
+  }
+  return value;
+}
+
+function deepClone<T>(v: T): T {
+  return JSON.parse(JSON.stringify(v)) as T;
+}
+
+function getDotted(obj: unknown, key: string): unknown {
+  const parts = key.split('.');
+  let cur: unknown = obj;
+  for (const p of parts) {
+    if (!cur || typeof cur !== 'object' || Array.isArray(cur)) return undefined;
+    cur = (cur as Record<string, unknown>)[p];
+  }
+  return cur;
+}
+
+function setDotted(obj: Record<string, unknown>, key: string, value: unknown): void {
+  const parts = key.split('.');
+  let cur = obj;
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    const p = parts[i];
+    const next = cur[p];
+    if (!next || typeof next !== 'object' || Array.isArray(next)) {
+      cur[p] = {};
+    }
+    cur = cur[p] as Record<string, unknown>;
+  }
+  cur[parts[parts.length - 1]] = value;
+}
+
+export class ConfigManager implements ConfigProvider {
+  private cfg: AidenConfig = deepClone(DEFAULT_CONFIG);
+  private rawText: string | null = null;
+
+  constructor(private readonly paths: AidenPaths) {}
+
+  /** Read config.yaml from disk and merge over the defaults. */
+  async load(): Promise<AidenConfig> {
+    let raw: string;
+    try {
+      raw = await fs.readFile(this.paths.configYaml, 'utf8');
+    } catch (err: unknown) {
+      if (
+        err instanceof Error &&
+        (err as NodeJS.ErrnoException).code === 'ENOENT'
+      ) {
+        this.cfg = deepClone(DEFAULT_CONFIG);
+        this.rawText = null;
+        return this.cfg;
+      }
+      throw err;
+    }
+    this.rawText = raw;
+    this.cfg = parseAndMerge(raw);
+    return this.cfg;
+  }
+
+  /** Persist the in-memory config back to disk (creates the directory). */
+  async save(config?: AidenConfig): Promise<void> {
+    if (config) this.cfg = config;
+    await fs.mkdir(path.dirname(this.paths.configYaml), { recursive: true });
+    const dumped = yaml.dump(this.cfg, { lineWidth: 120, noRefs: true });
+    await fs.writeFile(this.paths.configYaml, dumped, 'utf8');
+    this.rawText = dumped;
+  }
+
+  /**
+   * ConfigProvider — used by RuntimeResolver to fetch
+   * `providers.{id}.apiKey` and similar dotted keys. Returns the env-
+   * expanded string value, or undefined when missing / not a string.
+   */
+  get(key: string): string | undefined {
+    const v = getDotted(this.cfg, key);
+    if (v === undefined || v === null) return undefined;
+    if (typeof v === 'string') {
+      const expanded = expandEnvVars(v);
+      return typeof expanded === 'string' ? expanded : undefined;
+    }
+    return undefined;
+  }
+
+  /** Typed getter with default fallback. */
+  getValue<T = unknown>(key: string, defaultValue?: T): T | undefined {
+    const v = getDotted(this.cfg, key);
+    if (v === undefined || v === null) return defaultValue;
+    return expandEnvVars(v) as T;
+  }
+
+  /** Set a dotted key; persistence happens on save(). */
+  set(key: string, value: unknown): void {
+    setDotted(this.cfg as Record<string, unknown>, key, value);
+  }
+
+  /** Re-read from disk. Returns true when the parsed config differs. */
+  async reload(): Promise<boolean> {
+    const previous = JSON.stringify(this.cfg);
+    await this.load();
+    return JSON.stringify(this.cfg) !== previous;
+  }
+
+  /** Read access to the merged config (for tests + diagnostic surfaces). */
+  snapshot(): AidenConfig {
+    return deepClone(this.cfg);
+  }
+}
+
+function parseAndMerge(raw: string): AidenConfig {
+  let parsed: unknown = {};
+  try {
+    parsed = yaml.load(raw) ?? {};
+  } catch (err) {
+    // Surface a clearer error than js-yaml's stack — config.yaml is
+    // user-edited, so a syntax error must be visible.
+    throw new Error(
+      `Failed to parse config.yaml: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return deepClone(DEFAULT_CONFIG);
+  }
+
+  const out = deepClone(DEFAULT_CONFIG) as AidenConfig;
+  const userObj = parsed as Record<string, unknown>;
+
+  for (const [k, v] of Object.entries(userObj)) {
+    if (!KNOWN_KEYS.has(k)) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[config] Unknown top-level key '${k}' in config.yaml — preserved verbatim. ` +
+          'Ignore if this is from a newer Aiden version.',
+      );
+      out[k] = v;
+      continue;
+    }
+    if (
+      v &&
+      typeof v === 'object' &&
+      !Array.isArray(v) &&
+      out[k] &&
+      typeof out[k] === 'object' &&
+      !Array.isArray(out[k])
+    ) {
+      out[k] = {
+        ...(out[k] as Record<string, unknown>),
+        ...(v as Record<string, unknown>),
+      };
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}

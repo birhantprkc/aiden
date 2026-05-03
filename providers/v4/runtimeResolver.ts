@@ -5,7 +5,7 @@
  *
  * Walks the credential precedence chain:
  *   1. `apiKeyOverride` (CLI arg)
- *   2. `config.get('providers.{id}.apiKey')` (config.yaml — stub for Phase 5)
+ *   2. `config.get('providers.{id}.apiKey')` (config.yaml — Phase 6+ via ConfigManager)
  *   3. `process.env[entry.apiKeyEnvVar]`
  *   4. `credentialResolver.getCredentialsForMode(apiMode)` (auth.json OAuth)
  *   5. Local providers (ollama) — no credentials needed
@@ -43,7 +43,11 @@ import { AnthropicAdapter } from './anthropicAdapter';
 import { CodexResponsesAdapter } from './codexResponsesAdapter';
 import { OllamaPromptToolsAdapter } from './ollamaPromptToolsAdapter';
 
-/** Stub for Phase 6+ config.yaml parser. */
+/**
+ * Minimal interface RuntimeResolver consumes from the config layer. The
+ * Phase 6 `core/v4/config.ts::ConfigManager` is the production
+ * implementation; tests typically pass an inline `{ get: () => ... }`.
+ */
 export interface ConfigProvider {
   get(key: string): string | undefined;
 }
@@ -57,7 +61,7 @@ export interface ResolveOptions {
   baseUrlOverride?: string;
   /** Reserved for `aiden doctor` diagnostics — currently unused. */
   credentialSourceHint?: 'cli' | 'config' | 'env' | 'auth.json' | 'default';
-  /** Optional config provider (Phase 6+); Phase 5 leaves this undefined. */
+  /** Optional config provider — typically a Phase 6 `ConfigManager`. */
   config?: ConfigProvider;
 }
 
@@ -200,7 +204,7 @@ export class RuntimeResolver {
       return { apiKey: options.apiKeyOverride, source: 'cli' };
     }
 
-    // 2. Config provider (stub for Phase 5).
+    // 2. Config provider (Phase 6 ConfigManager or test stub).
     if (options.config) {
       const fromConfig = options.config.get(`providers.${entry.id}.apiKey`);
       if (fromConfig && fromConfig.length > 0) {
