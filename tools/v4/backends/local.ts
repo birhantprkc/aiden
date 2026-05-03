@@ -1,10 +1,124 @@
 /**
- * tools/v4/backends/local.ts — Aiden v4.0.0
+ * tools/v4/backends/local.ts — local terminal backend.
  *
- * Local terminal backend.
+ * Spawns a child process on the host. Cross-platform: PowerShell on
+ * Windows, bash on POSIX. Streams stdout/stderr to the optional
+ * `log` callback while collecting the full text for the return value.
  *
- * Status: SCAFFOLDING — implementation lands in Phase 4 (see docs/v4.0.0-architecture.md)
- * Hermes reference: hermes-agent/tools/environments/local.py
+ * Phase 8 has no shell-injection guards — Phase 9's approval engine
+ * sits in front of `shell_exec` and inspects the command before it
+ * reaches this backend.
+ *
+ * Hermes reference: hermes-agent/tools/environments/local.py.
  */
 
-export {}; // make this a module
+import { spawn } from 'node:child_process';
+
+export interface ShellExecArgs {
+  command: string;
+  cwd?: string;
+  env?: Record<string, string>;
+  timeoutMs?: number;
+  captureOutput?: boolean;
+}
+
+export interface ShellExecResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+  timedOut: boolean;
+  backend: 'local' | 'docker';
+}
+
+const DEFAULT_TIMEOUT = 30_000;
+
+export interface LocalBackendCallbacks {
+  log?: (level: 'info' | 'warn' | 'error', msg: string) => void;
+}
+
+export async function localBackendExecute(
+  args: ShellExecArgs,
+  cb: LocalBackendCallbacks = {},
+): Promise<ShellExecResult> {
+  const command = args.command.trim();
+  if (!command) {
+    return {
+      exitCode: -1,
+      stdout: '',
+      stderr: 'empty command',
+      durationMs: 0,
+      timedOut: false,
+      backend: 'local',
+    };
+  }
+
+  const isWin = process.platform === 'win32';
+  const start = Date.now();
+  const timeoutMs = args.timeoutMs ?? DEFAULT_TIMEOUT;
+  const capture = args.captureOutput ?? true;
+
+  return new Promise<ShellExecResult>((resolve) => {
+    const child = isWin
+      ? spawn('powershell.exe', ['-NoProfile', '-Command', command], {
+          cwd: args.cwd,
+          env: { ...process.env, ...(args.env ?? {}) },
+        })
+      : spawn('bash', ['-lc', command], {
+          cwd: args.cwd,
+          env: { ...process.env, ...(args.env ?? {}) },
+        });
+
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+
+    if (capture) {
+      child.stdout?.on('data', (b: Buffer) => {
+        const s = b.toString();
+        stdout += s;
+        cb.log?.('info', s.slice(0, 200));
+      });
+      child.stderr?.on('data', (b: Buffer) => {
+        const s = b.toString();
+        stderr += s;
+        cb.log?.('warn', s.slice(0, 200));
+      });
+    } else {
+      child.stdout?.resume();
+      child.stderr?.resume();
+    }
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill('SIGTERM'); } catch { /* ignore */ }
+      setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch { /* ignore */ }
+      }, 2000);
+    }, timeoutMs);
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      resolve({
+        exitCode: -1,
+        stdout,
+        stderr: stderr || err.message,
+        durationMs: Date.now() - start,
+        timedOut,
+        backend: 'local',
+      });
+    });
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({
+        exitCode: typeof code === 'number' ? code : -1,
+        stdout,
+        stderr,
+        durationMs: Date.now() - start,
+        timedOut,
+        backend: 'local',
+      });
+    });
+  });
+}
