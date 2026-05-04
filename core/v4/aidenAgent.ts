@@ -45,6 +45,10 @@ import type {
   SkillProposalCallbacks,
   SkillTeacherTraceEntry,
 } from '../../moat/skillTeacher';
+import type { PromptBuilder, PromptBuilderOptions } from './promptBuilder';
+import type { ContextCompressor, CompressionResult } from './contextCompressor';
+import type { AuxiliaryClient } from './auxiliaryClient';
+import type { PromptCaching } from './promptCaching';
 
 /**
  * Tool executor — runs a single tool call and returns the result.
@@ -104,6 +108,25 @@ export interface AidenAgentOptions {
   /** Phase 12: lookup function for tool→toolset mapping (used by
    *  SkillTeacher to compute toolset diversity for proposals). */
   resolveToolset?: (toolName: string) => string | undefined;
+  // ── Phase 13: Context layers ───────────────────────────────────────
+  /** Phase 13: assembles slot-ordered system prompt at session start. */
+  promptBuilder?: PromptBuilder;
+  /** Phase 13: options passed to PromptBuilder.build() — frozen for the session. */
+  promptBuilderOptions?: PromptBuilderOptions;
+  /** Phase 13: auto-summarises conversation when context utilisation crosses threshold. */
+  contextCompressor?: ContextCompressor;
+  /** Phase 13: cheap-LLM router. Surfaced on the result for /usage diagnostics. */
+  auxiliaryClient?: AuxiliaryClient;
+  /** Phase 13: anthropic prefix-cache marker manager. */
+  promptCaching?: PromptCaching;
+  /** Phase 13: providerId for compression + caching lookups. Defaults to ''. */
+  providerId?: string;
+  /** Phase 13: modelId for compression lookup. Defaults to ''. */
+  modelId?: string;
+  /** Phase 13: append "you have N turns remaining" snippet to last tool result when remaining ≤ 30%. Default true. */
+  iterationBudgetInjection?: boolean;
+  /** Phase 13: fired each time the compressor runs successfully. */
+  onCompression?: (event: CompressionResult) => void;
 }
 
 export interface AidenAgentResult {
@@ -126,6 +149,10 @@ export interface AidenAgentResult {
   honestyFindings?: HonestyFinding[];
   /** Phase 12: name of the skill SkillTeacher created this turn (if any). */
   skillCreated?: string;
+  /** Phase 13: number of times ContextCompressor fired during this conversation. */
+  compressionEvents: number;
+  /** Phase 13: AuxiliaryClient.getUsage() snapshot at end of run. */
+  auxiliaryUsage: Record<string, { inputTokens: number; outputTokens: number; calls: number }>;
 }
 
 const DEFAULT_MAX_TURNS = 90;
@@ -147,6 +174,19 @@ export class AidenAgent {
   private readonly skillTeacherCallbacks?: SkillProposalCallbacks;
   private readonly resolveVerifiedFlag?: AidenAgentOptions['resolveVerifiedFlag'];
   private readonly resolveToolset?: AidenAgentOptions['resolveToolset'];
+  // Phase 13
+  private readonly promptBuilder?: PromptBuilder;
+  private readonly promptBuilderOptions?: PromptBuilderOptions;
+  private readonly contextCompressor?: ContextCompressor;
+  private readonly auxiliaryClient?: AuxiliaryClient;
+  private readonly promptCaching?: PromptCaching;
+  private readonly providerId: string;
+  private readonly modelId: string;
+  private readonly iterationBudgetInjection: boolean;
+  private readonly onCompression?: AidenAgentOptions['onCompression'];
+  /** Cached system prompt — frozen after first build for session-long prefix cache. */
+  private cachedSystemPrompt: string | null = null;
+  private compressionEvents = 0;
 
   constructor(options: AidenAgentOptions) {
     this.provider = options.provider;
@@ -163,10 +203,38 @@ export class AidenAgent {
     this.skillTeacherCallbacks = options.skillTeacherCallbacks;
     this.resolveVerifiedFlag = options.resolveVerifiedFlag;
     this.resolveToolset = options.resolveToolset;
+    // Phase 13
+    this.promptBuilder = options.promptBuilder;
+    this.promptBuilderOptions = options.promptBuilderOptions;
+    this.contextCompressor = options.contextCompressor;
+    this.auxiliaryClient = options.auxiliaryClient;
+    this.promptCaching = options.promptCaching;
+    this.providerId = options.providerId ?? '';
+    this.modelId = options.modelId ?? '';
+    this.iterationBudgetInjection = options.iterationBudgetInjection ?? true;
+    this.onCompression = options.onCompression;
   }
 
   async runConversation(initialMessages: Message[]): Promise<AidenAgentResult> {
-    const messages: Message[] = [...initialMessages];
+    // ── Phase 13: Build (or reuse cached) system prompt at session start ──
+    let messages: Message[] = [...initialMessages];
+    if (this.promptBuilder && this.promptBuilderOptions) {
+      if (this.cachedSystemPrompt === null) {
+        this.cachedSystemPrompt = await this.promptBuilder.build(
+          this.promptBuilderOptions,
+        );
+      }
+      // Prepend only if no leading system message already covers it. Tests
+      // and integrations may pass their own; we don't want to double-stuff.
+      const hasSys = messages.length > 0 && messages[0].role === 'system';
+      if (!hasSys) {
+        messages = [
+          { role: 'system', content: this.cachedSystemPrompt },
+          ...messages,
+        ];
+      }
+    }
+
     let turnCount = 0;
     let toolCallCount = 0;
     let fallbackActivated = false;
@@ -212,10 +280,36 @@ export class AidenAgent {
         this.onBudgetWarning?.('warning', turnCount, this.maxTurns);
       }
 
+      // ── Phase 13: ContextCompressor pre-call check ──────────────
+      if (this.contextCompressor && this.providerId && this.modelId) {
+        const trigger = this.contextCompressor.shouldCompress(
+          messages,
+          this.providerId,
+          this.modelId,
+        );
+        if (trigger.shouldCompress) {
+          const result = await this.contextCompressor.compress(
+            messages,
+            this.providerId,
+            this.modelId,
+          );
+          if (!result.refused && !result.error) {
+            messages = result.compressedMessages;
+            this.compressionEvents += 1;
+            this.onCompression?.(result);
+          }
+        }
+      }
+
+      // ── Phase 13: PromptCaching markers (Anthropic only) ─────────
+      const dispatchMessages = this.promptCaching && this.providerId
+        ? this.promptCaching.applyMarkers(messages, this.providerId)
+        : messages;
+
       let output: ProviderCallOutput;
       try {
         output = await this.provider.call({
-          messages,
+          messages: dispatchMessages,
           tools: activeTools,
         });
       } catch (err) {
@@ -271,6 +365,7 @@ export class AidenAgent {
 
       // Dispatch tool calls sequentially. Parallel execution
       // (Hermes _execute_tool_calls_concurrent) is deferred to v4.1.
+      const toolMessages: Message[] = [];
       for (const call of output.toolCalls) {
         toolCallCount += 1;
         this.onToolCall?.(call, 'before');
@@ -301,12 +396,31 @@ export class AidenAgent {
             ? result.result
             : JSON.stringify(result.result);
 
-        messages.push({
+        toolMessages.push({
           role: 'tool',
           toolCallId: call.id,
           content: toolContent,
         });
       }
+
+      // ── Phase 13: Iteration budget injection ───────────────────
+      // When ≤30% of budget remains, append a pressure note to the
+      // last tool result so the LLM literally sees it on its next turn.
+      if (this.iterationBudgetInjection && toolMessages.length > 0) {
+        const remaining = this.maxTurns - turnCount;
+        const remainingFraction = remaining / this.maxTurns;
+        if (remainingFraction <= 0.3 && remaining >= 0) {
+          const last = toolMessages[toolMessages.length - 1];
+          const note =
+            `\n\n[iteration budget: ${remaining} of ${this.maxTurns} turns remaining — wrap up soon]`;
+          toolMessages[toolMessages.length - 1] = {
+            ...last,
+            content: last.content + note,
+          };
+        }
+      }
+
+      messages.push(...toolMessages);
     }
 
     // Budget exhausted — return partial result. The last assistant message
@@ -407,6 +521,8 @@ export class AidenAgent {
       finishReason: args.finishReason,
       totalUsage: args.totalUsage,
       toolCallTrace: args.toolCallTrace,
+      compressionEvents: this.compressionEvents,
+      auxiliaryUsage: this.auxiliaryClient?.getUsage() ?? {},
       ...(honestyFindings ? { honestyFindings } : {}),
       ...(skillCreated ? { skillCreated } : {}),
     };
