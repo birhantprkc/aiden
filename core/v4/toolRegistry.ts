@@ -32,6 +32,11 @@ import type { AidenPaths } from './paths';
 import type { SessionManager } from './sessionManager';
 import type { MemoryManager } from './memoryManager';
 import type { ProcessRegistry } from './processRegistry';
+import type { ApprovalEngine } from '../../moat/approvalEngine';
+import type { SSRFProtection } from '../../moat/ssrfProtection';
+import type { TirithScanner } from '../../moat/tirithScanner';
+import type { MemoryGuard } from '../../moat/memoryGuard';
+import { classifyCommand } from '../../moat/dangerousPatterns';
 
 /**
  * Risk profile for a tool. Used by the Phase 9 approval engine to decide
@@ -59,6 +64,17 @@ export interface ToolContext {
   /** Override the default Docker image for the docker backend.
    *  Phase 8 default is `node:22-alpine`. */
   dockerImage?: string;
+  /** Phase 9: approval engine. When present, every `mutates: true`
+   *  handler is gated through it before `execute` runs. */
+  approvalEngine?: ApprovalEngine;
+  /** Phase 9: SSRF check for any tool whose category is `network`. */
+  ssrfProtection?: SSRFProtection;
+  /** Phase 9: content scanner. `shell_exec` runs commands through it
+   *  before dispatching. */
+  tirithScanner?: TirithScanner;
+  /** Phase 9: memory write verification. Memory tool wrappers call
+   *  through this. */
+  memoryGuard?: MemoryGuard;
   /** Optional structured logger. Wrappers call this for diagnostic output. */
   log?: (level: 'info' | 'warn' | 'error', msg: string) => void;
 }
@@ -147,8 +163,77 @@ export class ToolRegistry {
           error: `Tool "${call.name}" is not registered`,
         };
       }
+
+      const args = call.arguments ?? {};
+
+      // ── Phase 9 layer A: SSRF check for network tools ─────────
+      if (handler.category === 'network' && context.ssrfProtection) {
+        const url =
+          typeof args.url === 'string'
+            ? args.url
+            : typeof args.query === 'string'
+            ? args.query
+            : '';
+        if (url && /^https?:/i.test(url)) {
+          const ssrf = await context.ssrfProtection.check(url);
+          if (ssrf.blocked) {
+            return {
+              id: call.id,
+              name: call.name,
+              result: null,
+              error: `URL blocked: ${ssrf.reason}`,
+            };
+          }
+        }
+      }
+
+      // ── Phase 9 layer B: tirith scan for shell_exec ───────────
+      if (call.name === 'shell_exec' && context.tirithScanner) {
+        const command =
+          typeof args.command === 'string' ? args.command : '';
+        if (command) {
+          const findings = context.tirithScanner.scanCommand(command);
+          const dangerous = findings.find((f) => f.severity === 'dangerous');
+          if (dangerous) {
+            return {
+              id: call.id,
+              name: call.name,
+              result: null,
+              error: `Tirith blocked: ${dangerous.description}`,
+            };
+          }
+        }
+      }
+
+      // ── Phase 9 layer C: approval engine for mutating tools ───
+      if (handler.mutates && context.approvalEngine) {
+        // Pre-classify shell_exec commands so smart-mode has a tier.
+        let riskTier: 'safe' | 'caution' | 'dangerous' | undefined;
+        let reason: string | undefined;
+        if (call.name === 'shell_exec' && typeof args.command === 'string') {
+          const c = classifyCommand(args.command);
+          riskTier = c.tier;
+          reason = c.reason;
+        }
+        const allowed = await context.approvalEngine.checkApproval({
+          toolName: call.name,
+          category: handler.category,
+          args,
+          riskTier,
+          reason,
+        });
+        if (!allowed) {
+          return {
+            id: call.id,
+            name: call.name,
+            result: null,
+            error: 'Tool execution denied by approval engine',
+          };
+        }
+      }
+
       try {
-        const result = await handler.execute(call.arguments ?? {}, context);
+        const result = await handler.execute(args, context);
         return { id: call.id, name: call.name, result };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
