@@ -31,6 +31,7 @@ import type { ToolRegistry } from '../../core/v4/toolRegistry';
 import type { SkillLoader } from '../../core/v4/skillLoader';
 import type { RuntimeResolver } from '../../providers/v4/runtimeResolver';
 import type { ConfigManager } from '../../core/v4/config';
+import type { PersonalityManager } from '../../core/v4/personality';
 import { ModelMetadata } from '../../core/v4/modelMetadata';
 import type { Message } from '../../providers/v4/types';
 import {
@@ -79,6 +80,9 @@ export interface ChatSessionOptions {
 
   /** Phase 16b.3: resolved Aiden user-data paths (forwarded to /identity). */
   paths?: import('../../core/v4/paths').AidenPaths;
+
+  /** Phase 16b.4: personality overlay manager (forwarded to /personality + /debug-prompt). */
+  personalityManager?: PersonalityManager;
 
   /** Optional: resume an existing session id. */
   resumeSessionId?: string;
@@ -228,6 +232,8 @@ export class ChatSession implements ChatSessionLike {
             auxiliaryClient: this.opts.auxiliaryClient,
             fallbackAdapter: this.opts.fallbackAdapter ?? null,
             paths: this.opts.paths,
+            personalityManager: this.opts.personalityManager,
+            agent: this.opts.agent,
           });
           if (result.exit) break;
           if (result.clearHistory) this.history = [];
