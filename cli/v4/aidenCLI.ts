@@ -49,8 +49,24 @@ import { SkillLoader } from '../../core/v4/skillLoader';
 import { SkillCommands } from '../../core/v4/skillCommands';
 import { AidenAgent } from '../../core/v4/aidenAgent';
 import { AuxiliaryClient } from '../../core/v4/auxiliaryClient';
+import { MemoryManager } from '../../core/v4/memoryManager';
 
 import { ApprovalEngine } from '../../moat/approvalEngine';
+import {
+  PlannerGuard,
+  type PlannerGuardMode,
+} from '../../moat/plannerGuard';
+import {
+  HonestyEnforcement,
+  type HonestyMode,
+} from '../../moat/honestyEnforcement';
+import {
+  SkillTeacher,
+  type SkillTeacherTier,
+} from '../../moat/skillTeacher';
+import { MemoryGuard } from '../../moat/memoryGuard';
+import { SSRFProtection } from '../../moat/ssrfProtection';
+import { TirithScanner } from '../../moat/tirithScanner';
 
 import { CredentialResolver } from '../../providers/v4/credentialResolver';
 import { RuntimeResolver } from '../../providers/v4/runtimeResolver';
@@ -59,6 +75,41 @@ import { registerAllTools } from '../../tools/v4';
 import { setupMcpFromConfig } from '../../tools/v4/mcpSetup';
 
 import { createSkillCommandHandler } from './commands/skillCommandHandler';
+
+/** Valid PlannerGuard mode values for CLI/config validation. */
+const PLANNER_GUARD_MODES: readonly PlannerGuardMode[] = [
+  'off',
+  'rule_based',
+  'llm_classified',
+];
+/** Valid HonestyEnforcement mode values. */
+const HONESTY_MODES: readonly HonestyMode[] = ['off', 'detect', 'enforce'];
+/** Valid SkillTeacher tier values. */
+const SKILL_TEACHER_TIERS: readonly SkillTeacherTier[] = [
+  'off',
+  'tier_3_propose',
+  'tier_4_auto',
+];
+
+/**
+ * Coerce a config-or-CLI string into a known mode value. Falls back to the
+ * default and emits a warning when the input is recognised-but-invalid. The
+ * `warn` sink is injectable so tests don't see noise.
+ */
+function coerceMode<T extends string>(
+  raw: unknown,
+  valid: readonly T[],
+  fallback: T,
+  label: string,
+  warn: (msg: string) => void,
+): T {
+  if (typeof raw !== 'string' || !raw) return fallback;
+  if ((valid as readonly string[]).includes(raw)) return raw as T;
+  warn(
+    `Invalid ${label} '${raw}' — falling back to '${fallback}' (valid: ${valid.join(', ')})`,
+  );
+  return fallback;
+}
 
 const VERSION = '4.0.0';
 
@@ -92,6 +143,18 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     .option('--yolo', 'Skip approval prompts (YOLO mode)')
     .option('--provider <id>', 'Override provider id')
     .option('--model <id>', 'Override model id')
+    .option(
+      '--planner-guard <mode>',
+      'PlannerGuard mode: off | rule_based | llm_classified',
+    )
+    .option(
+      '--honesty <mode>',
+      'HonestyEnforcement mode: off | detect | enforce',
+    )
+    .option(
+      '--skill-teacher <tier>',
+      'SkillTeacher tier: off | tier_3_propose | tier_4_auto',
+    )
     .action(async () => {
       const cliOpts = program.opts();
       if (opts.runChatHook) {
@@ -202,7 +265,24 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
 
 // ─── Default action: interactive chat ─────────────────────────────────
 
-async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void> {
+/**
+ * Phase 16b: full-runtime bootstrap. Builds every subsystem the chat REPL
+ * needs — provider adapter, tool registry, all 6 moat layers, AidenAgent,
+ * command registry. Returns a tagged object the caller can either feed
+ * straight into a `ChatSession` (the REPL path) or inspect (test path).
+ *
+ * `cliOpts` carries the parsed commander flags (provider/model overrides,
+ * --yolo, --planner-guard, --honesty, --skill-teacher). `opts.pathsOverride`
+ * lets tests redirect `~/.aiden/` to a temp dir.
+ *
+ * The function does NOT start the REPL or print boot output — that's the
+ * caller's job. It DOES read config + run the setup wizard if the install
+ * is fresh, because both happen before the moat layers can be parameterised.
+ */
+export async function buildAgentRuntime(
+  cliOpts: any,
+  opts: MainOptions,
+): Promise<AgentRuntime> {
   const paths = opts.pathsOverride ?? resolveAidenPaths();
   await ensureAidenDirsExist(paths);
 
@@ -240,6 +320,7 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
 
   const skin = new SkinEngine();
   const display = new Display({ skin });
+  const warnSink = (msg: string) => display.warn(msg);
 
   // Resolver + adapter.
   const credentialResolver = new CredentialResolver(paths.authJson);
@@ -259,8 +340,14 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
   const toolRegistry = new ToolRegistry();
   registerAllTools(toolRegistry);
 
-  // Skill loader.
+  // Memory + skill loader.
+  const memoryManager = new MemoryManager(paths);
   const skillLoader = new SkillLoader(paths);
+
+  // ── Phase 9 moat (stateless / wraps memory) ──────────────────────────
+  const memoryGuard = new MemoryGuard(memoryManager);
+  const ssrfProtection = new SSRFProtection();
+  const tirithScanner = new TirithScanner();
 
   // Approval engine.
   const approvalEngine = new ApprovalEngine(
@@ -270,14 +357,15 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
 
   // Auxiliary client (compression / risk-assessment cheap LLM). Default to
   // the same provider/model as the main loop — the resolver hands the
-  // auxiliary client a separately-configured cheap model later (Phase 16).
+  // auxiliary client a separately-configured cheap model later (v4.1).
   const auxiliaryClient = new AuxiliaryClient({
     defaultProvider: providerId,
     defaultModel: modelId,
     resolver: { resolve: (o) => resolver.resolve(o) },
   });
 
-  // CLI callbacks.
+  // CLI callbacks. Approval engine is stitched up after construction
+  // because `callbacks.promptApproval` is a bound method.
   const callbacks = new CliCallbacks({
     display,
     auxiliaryClient,
@@ -294,31 +382,114 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
   );
   const mcpClient = mcpResult.client ?? null;
 
-  // Phase 12 moat layers: skipped at REPL boot for Phase 14c. The agent
-  // still functions correctly without them; PlannerGuard/Honesty/SkillTeacher
-  // wiring lands in Phase 16 polish once the bootstrap data is settled.
+  // ── Phase 12 moat: resolve modes from config + CLI flags ─────────────
+  const plannerGuardMode = coerceMode<PlannerGuardMode>(
+    cliOpts.plannerGuard ??
+      config.getValue<string>('agent.planner_guard_mode', 'rule_based'),
+    PLANNER_GUARD_MODES,
+    'rule_based',
+    'planner_guard_mode',
+    warnSink,
+  );
+  const honestyMode = coerceMode<HonestyMode>(
+    cliOpts.honesty ??
+      config.getValue<string>('agent.honesty_mode', 'enforce'),
+    HONESTY_MODES,
+    'enforce',
+    'honesty_mode',
+    warnSink,
+  );
+  const skillTeacherTier = coerceMode<SkillTeacherTier>(
+    cliOpts.skillTeacher ??
+      config.getValue<string>('agent.skill_teacher_tier', 'tier_3_propose'),
+    SKILL_TEACHER_TIERS,
+    'tier_3_propose',
+    'skill_teacher_tier',
+    warnSink,
+  );
 
-  // Build agent. Tool executor wired with conservative context: SSRF and
-  // approval engine; SkillsHub-driven `skill_view` toolset activation
-  // is handled by ToolRegistry's executor itself.
+  // PlannerGuard — pre-loop tool subset classifier. llm_classified mode
+  // routes through the main provider adapter; we don't have a separate
+  // cheap-classifier adapter at REPL boot (auxiliaryClient wraps but
+  // doesn't expose its underlying adapter). Pass adapter only when the
+  // mode actually needs it so the rule_based path stays purely local.
+  const plannerGuard = new PlannerGuard(
+    toolRegistry,
+    plannerGuardMode,
+    plannerGuardMode === 'llm_classified' ? adapter : undefined,
+  );
+
+  // HonestyEnforcement — post-loop trace inspector.
+  const honestyEnforcement = new HonestyEnforcement(honestyMode);
+
+  // SkillTeacher needs a `skill_manage` handler closure. We can't reach
+  // into the ToolRegistry's bound executor here because that closure
+  // bakes in a ToolContext we don't have until later — instead, we defer
+  // to the registry's handler directly. SkillTeacher passes
+  // `(action, args) => execute({action, ...args}, {})` so the wrapper sees
+  // its argument shape. The skillManage handler accepts an empty context
+  // because every action it performs is paths-relative and `paths` is
+  // injected at handler-construction time (Phase 10 wiring).
+  const skillManageHandler = toolRegistry.get('skill_manage');
+  const skillManageProxy = {
+    async execute(args: Record<string, unknown>, _ctx: unknown) {
+      if (!skillManageHandler) {
+        throw new Error('skill_manage handler not registered');
+      }
+      // Build a ToolContext mirror so skill_manage has the bits it needs.
+      return skillManageHandler.execute(args, {
+        cwd: process.cwd(),
+        paths,
+        skillLoader,
+      } as any);
+    },
+  };
+  const skillTeacher = new SkillTeacher(
+    skillLoader,
+    skillManageProxy,
+    skillTeacherTier,
+    undefined,
+    (name) => toolRegistry.get(name),
+  );
+
+  // ── Tool executor with full Phase 9 + 10 context ─────────────────────
+  const toolExecutor = toolRegistry.buildExecutor({
+    cwd: process.cwd(),
+    paths,
+    sessions: sessionManager,
+    memory: memoryManager,
+    memoryGuard,
+    approvalEngine,
+    ssrfProtection,
+    tirithScanner,
+    skillLoader,
+  });
+
+  // Resolve verified-flag from memory tool results (Phase 9 wrappers
+  // surface `{ ok, verified, ... }`).
+  const resolveVerifiedFlag = (r: { result?: unknown }) => {
+    const v = (r.result as { verified?: boolean })?.verified;
+    return typeof v === 'boolean' ? v : undefined;
+  };
+  const resolveToolset = (name: string) =>
+    toolRegistry.get(name)?.toolset;
+
+  // ── Build agent with all moat layers attached ────────────────────────
   const agent = new AidenAgent({
     provider: adapter,
     tools: toolRegistry.getSchemas(),
-    toolExecutor: toolRegistry.buildExecutor({
-      cwd: process.cwd(),
-      paths,
-      sessions: sessionManager,
-      memory: {} as any, // memoryManager not yet wired at REPL — Phase 16
-      memoryGuard: undefined as any,
-      approvalEngine,
-      ssrfProtection: undefined as any,
-      tirithScanner: undefined as any,
-      skillLoader,
-    } as any),
+    toolExecutor,
     maxTurns: config.getValue<number>('agent.max_turns', 90)!,
     auxiliaryClient,
+    plannerGuard,
+    honestyEnforcement,
+    skillTeacher,
     onCompression: callbacks.onCompression,
     onBudgetWarning: callbacks.onBudgetWarning,
+    onPlannerGuardDecision: callbacks.onPlannerGuardDecision,
+    skillTeacherCallbacks: { promptUser: callbacks.promptSkillProposal },
+    resolveVerifiedFlag,
+    resolveToolset,
     providerId,
     modelId,
   });
@@ -348,38 +519,116 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     display.dim(`(skill commands unavailable: ${(err as Error).message})`);
   }
 
-  // Boot the chat session.
-  const sessionOpts = {
-    agent,
-    display,
-    commandRegistry,
-    callbacks,
+  return {
+    paths,
+    config,
+    store,
     sessionManager,
-    auxiliaryClient,
-    approvalEngine,
-    mcpClient: mcpClient ?? undefined,
     skin,
+    display,
+    resolver,
+    adapter,
     toolRegistry,
     skillLoader,
-    resolver,
-    config,
-    initialProviderId: providerId,
-    initialModelId: modelId,
+    memoryManager,
+    memoryGuard,
+    ssrfProtection,
+    tirithScanner,
+    approvalEngine,
+    auxiliaryClient,
+    callbacks,
+    plannerGuard,
+    honestyEnforcement,
+    skillTeacher,
+    plannerGuardMode,
+    honestyMode,
+    skillTeacherTier,
+    agent,
+    commandRegistry,
+    mcpClient,
+    providerId,
+    modelId,
     resumeSessionId,
+  };
+}
+
+/**
+ * Phase 16b: shape returned by `buildAgentRuntime`. Tests inspect these
+ * fields to verify wiring without booting the REPL.
+ */
+export interface AgentRuntime {
+  paths: AidenPaths;
+  config: ConfigManager;
+  store: SessionStore;
+  sessionManager: SessionManager;
+  skin: SkinEngine;
+  display: Display;
+  resolver: RuntimeResolver;
+  adapter: any;
+  toolRegistry: ToolRegistry;
+  skillLoader: SkillLoader;
+  memoryManager: MemoryManager;
+  memoryGuard: MemoryGuard;
+  ssrfProtection: SSRFProtection;
+  tirithScanner: TirithScanner;
+  approvalEngine: ApprovalEngine;
+  auxiliaryClient: AuxiliaryClient;
+  callbacks: CliCallbacks;
+  plannerGuard: PlannerGuard;
+  honestyEnforcement: HonestyEnforcement;
+  skillTeacher: SkillTeacher;
+  plannerGuardMode: PlannerGuardMode;
+  honestyMode: HonestyMode;
+  skillTeacherTier: SkillTeacherTier;
+  agent: AidenAgent;
+  commandRegistry: CommandRegistry;
+  mcpClient: ReturnType<typeof setupMcpFromConfig> extends Promise<infer R>
+    ? R extends { client: infer C }
+      ? C
+      : null
+    : null;
+  providerId: string;
+  modelId: string;
+  resumeSessionId: string | undefined;
+}
+
+async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void> {
+  const runtime = await buildAgentRuntime(cliOpts, opts);
+
+  const sessionOpts = {
+    agent: runtime.agent,
+    display: runtime.display,
+    commandRegistry: runtime.commandRegistry,
+    callbacks: runtime.callbacks,
+    sessionManager: runtime.sessionManager,
+    auxiliaryClient: runtime.auxiliaryClient,
+    approvalEngine: runtime.approvalEngine,
+    mcpClient: runtime.mcpClient ?? undefined,
+    skin: runtime.skin,
+    toolRegistry: runtime.toolRegistry,
+    skillLoader: runtime.skillLoader,
+    resolver: runtime.resolver,
+    config: runtime.config,
+    initialProviderId: runtime.providerId,
+    initialModelId: runtime.modelId,
+    resumeSessionId: runtime.resumeSessionId,
     yoloMode: !!cliOpts.yolo,
   };
 
   if (cliOpts.tui) {
     await runTuiMode({
       sessionOpts: sessionOpts as any,
-      skinName: config.getValue<string>('display.skin', 'default') ?? 'default',
+      skinName:
+        runtime.config.getValue<string>('display.skin', 'default') ?? 'default',
     });
   } else {
     const session = new ChatSession(sessionOpts as any);
     await session.run();
   }
-  if (mcpClient) await mcpClient.closeAll().catch(() => undefined);
-  store.close?.();
+  if (runtime.mcpClient) {
+    await runtime.mcpClient.closeAll().catch(() => undefined);
+  }
+  runtime.store.close?.();
 }
 
 // ─── setup ─────────────────────────────────────────────────────────────
