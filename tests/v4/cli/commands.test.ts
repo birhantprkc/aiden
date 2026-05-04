@@ -57,10 +57,11 @@ function makeCtx(over: Record<string, unknown> = {}) {
 }
 
 describe('barrel exports', () => {
-  it('allCommands has 17 entries with unique names', () => {
-    expect(allCommands.length).toBe(17);
+  it('allCommands has 18 entries with unique names', () => {
+    // Phase 16b.3 added /identity (17 → 18).
+    expect(allCommands.length).toBe(18);
     const names = new Set(allCommands.map((c) => c.name));
-    expect(names.size).toBe(17);
+    expect(names.size).toBe(18);
   });
 
   it('every command exposes name, description, category', () => {

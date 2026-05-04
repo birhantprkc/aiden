@@ -77,6 +77,9 @@ export interface ChatSessionOptions {
   /** Phase 16b.1: optional FallbackAdapter for /providers diagnostics. */
   fallbackAdapter?: import('../../core/v4/providerFallback').FallbackAdapter | null;
 
+  /** Phase 16b.3: resolved Aiden user-data paths (forwarded to /identity). */
+  paths?: import('../../core/v4/paths').AidenPaths;
+
   /** Optional: resume an existing session id. */
   resumeSessionId?: string;
   /** Pre-loaded history when resuming. */
@@ -224,6 +227,7 @@ export class ChatSession implements ChatSessionLike {
             mcpClient: this.opts.mcpClient,
             auxiliaryClient: this.opts.auxiliaryClient,
             fallbackAdapter: this.opts.fallbackAdapter ?? null,
+            paths: this.opts.paths,
           });
           if (result.exit) break;
           if (result.clearHistory) this.history = [];

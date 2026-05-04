@@ -41,6 +41,7 @@ import {
   ensureAidenDirsExist,
   type AidenPaths,
 } from '../../core/v4/paths';
+import { ensureSoulMdSeeded } from '../../core/v4/soulSeed';
 import { ConfigManager } from '../../core/v4/config';
 import { SessionStore } from '../../core/v4/sessionStore';
 import { SessionManager } from '../../core/v4/sessionManager';
@@ -330,6 +331,10 @@ export async function buildAgentRuntime(
 ): Promise<AgentRuntime> {
   const paths = opts.pathsOverride ?? resolveAidenPaths();
   await ensureAidenDirsExist(paths);
+
+  // Phase 16b.3: first-run SOUL.md seed. Hermes-style idempotent write — if
+  // the user already has a SOUL.md (even one byte), we never touch it.
+  await ensureSoulMdSeeded(paths).catch(() => undefined);
 
   // Phase 16b.1: first-run / self-heal copy of bundled skills. No-op
   // when the user's skills dir is already populated.
@@ -702,6 +707,7 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     resumeSessionId: runtime.resumeSessionId,
     yoloMode: !!cliOpts.yolo,
     fallbackAdapter: runtime.fallbackAdapter,
+    paths: runtime.paths,
   };
 
   if (cliOpts.tui) {

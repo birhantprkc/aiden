@@ -23,6 +23,7 @@ import { verbose } from './verbose';
 import { clear } from './clear';
 import { quit } from './quit';
 import { providers } from './providers';
+import { identity } from './identity';
 
 export {
   help,
@@ -42,6 +43,7 @@ export {
   clear,
   quit,
   providers,
+  identity,
 };
 
 /** All built-in system commands, in canonical order. */
@@ -51,6 +53,7 @@ export const allCommands: SlashCommand[] = [
   model,
   providers,
   personality,
+  identity,
   save,
   title,
   compress,

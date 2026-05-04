@@ -30,6 +30,11 @@ import type { AidenPaths } from './paths';
 import type { ConfigManager } from './config';
 import type { MemorySnapshot } from './memoryProvider';
 import type { ToolSchema } from '../../providers/v4/types';
+// Phase 16b.3: when SOUL.md is missing/unreadable at slot-1 build time, fall
+// back to the same bundled identity that `ensureSoulMdSeeded` writes on first
+// run. Keeping the two strings identical means the in-memory fallback can't
+// drift from the on-disk template.
+import { DEFAULT_SOUL_MD as DEFAULT_IDENTITY } from '../../cli/v4/defaultSoul';
 
 export interface PromptSlot {
   name: string;
@@ -77,10 +82,6 @@ export function shouldInjectLlama33ToolHint(modelId: string | undefined): boolea
   if (!modelId) return false;
   return /llama-?3\.3/i.test(modelId);
 }
-
-const DEFAULT_IDENTITY =
-  'You are Aiden, a careful, honest AI assistant. Use tools when they help, ' +
-  'admit uncertainty when you have it, and prefer brevity over filler.';
 
 function detectPlatform(): 'windows' | 'linux' | 'macos' {
   const p = os.platform();

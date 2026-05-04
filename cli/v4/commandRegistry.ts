@@ -24,6 +24,7 @@ import type { AuxiliaryClient } from '../../core/v4/auxiliaryClient';
 import type { SkillsHub } from '../../core/v4/skillsHub';
 import type { Message } from '../../providers/v4/types';
 import type { PersonalityManager } from '../../core/v4/personality';
+import type { AidenPaths } from '../../core/v4/paths';
 
 /**
  * Lightweight session abstraction commands consume. The full chat REPL
@@ -66,6 +67,8 @@ export interface SlashCommandContext {
   personalityManager?: PersonalityManager;
   /** Phase 16b.1: present when a multi-slot fallback chain is wired. */
   fallbackAdapter?: import('../../core/v4/providerFallback').FallbackAdapter | null;
+  /** Phase 16b.3: resolved Aiden user-data paths — needed by `/identity` to read SOUL.md. */
+  paths?: AidenPaths;
 }
 
 /** Result produced by a command handler. */
