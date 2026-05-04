@@ -141,11 +141,73 @@ describe('/model', () => {
   });
 });
 
-describe('/personality (stub)', () => {
-  it('prints Phase 16 message', async () => {
+describe('/personality', () => {
+  function fakeManager(opts: {
+    list?: any[];
+    current?: string;
+    setOk?: boolean;
+    setReason?: string;
+  } = {}) {
+    let current = opts.current ?? 'default';
+    return {
+      list: async () =>
+        opts.list ?? [
+          { name: 'default', description: 'No overlay', source: 'bundled' },
+          { name: 'concise', description: 'Short responses', source: 'bundled' },
+        ],
+      getCurrent: () => current,
+      setCurrent: async (name: string) => {
+        if (opts.setOk === false) {
+          return { ok: false, reason: opts.setReason ?? `Unknown personality '${name}'` };
+        }
+        current = name;
+        return { ok: true };
+      },
+    };
+  }
+
+  it('lists available personalities when called bare', async () => {
+    const { ctx, output } = makeCtx({ personalityManager: fakeManager() });
+    await personality.handler(ctx as any);
+    const out = output();
+    expect(out).toMatch(/Active personality: default/);
+    expect(out).toMatch(/concise/);
+    expect(out).toMatch(/Short responses/);
+  });
+
+  it('marks the active personality with an asterisk', async () => {
+    const { ctx, output } = makeCtx({
+      personalityManager: fakeManager({ current: 'concise' }),
+    });
+    await personality.handler(ctx as any);
+    expect(output()).toMatch(/\*\s+concise/);
+  });
+
+  it('switches personality when given a known name', async () => {
+    const mgr = fakeManager();
+    const { ctx, output } = makeCtx({
+      personalityManager: mgr,
+      rawArgs: 'concise',
+    });
+    await personality.handler(ctx as any);
+    expect(mgr.getCurrent()).toBe('concise');
+    expect(output()).toMatch(/Personality: concise/);
+  });
+
+  it('prints an actionable error when target is unknown', async () => {
+    const { ctx, output } = makeCtx({
+      personalityManager: fakeManager({ setOk: false, setReason: "Unknown personality 'ghost'" }),
+      rawArgs: 'ghost',
+    });
+    await personality.handler(ctx as any);
+    expect(output()).toMatch(/ghost/);
+    expect(output()).toMatch(/Run \/personality/);
+  });
+
+  it('warns when no PersonalityManager is wired', async () => {
     const { ctx, output } = makeCtx();
     await personality.handler(ctx as any);
-    expect(output()).toMatch(/Phase 16/);
+    expect(output()).toMatch(/not wired/i);
   });
 });
 
@@ -303,6 +365,33 @@ describe('/skin', () => {
     expect(skinEngine.getActive().name).toBe('monochrome');
     expect(output()).toMatch(/Skin: monochrome/);
   });
+
+  it('reload re-reads the active skin from disk', async () => {
+    const skinEngine = new SkinEngine({ forceMono: true });
+    const reloadSpy = vi.spyOn(skinEngine, 'reload');
+    const { ctx, output } = makeCtx({ skin: skinEngine, rawArgs: 'reload' });
+    await skin.handler(ctx as any);
+    expect(reloadSpy).toHaveBeenCalled();
+    expect(output()).toMatch(/Skin reloaded/);
+  });
+
+  it('reports an actionable error when reload fails', async () => {
+    const skinEngine = new SkinEngine({ forceMono: true });
+    vi.spyOn(skinEngine, 'reload').mockRejectedValueOnce(new Error('bad yaml'));
+    const { ctx, output } = makeCtx({ skin: skinEngine, rawArgs: 'reload' });
+    await skin.handler(ctx as any);
+    expect(output()).toMatch(/reload failed/i);
+    expect(output()).toMatch(/yaml/);
+  });
+
+  it('rejects an unknown skin name with an actionable error', async () => {
+    const skinEngine = new SkinEngine({ forceMono: true });
+    const before = skinEngine.getActive().name;
+    const { ctx, output } = makeCtx({ skin: skinEngine, rawArgs: 'totally-fake' });
+    await skin.handler(ctx as any);
+    expect(skinEngine.getActive().name).toBe(before);
+    expect(output()).toMatch(/Unknown skin/);
+  });
 });
 
 describe('/skills', () => {
@@ -329,11 +418,70 @@ describe('/reload-mcp', () => {
   });
 });
 
-describe('/reasoning (stub)', () => {
-  it('prints Phase 16 stub line', async () => {
+describe('/reasoning', () => {
+  function fakeCfg(initial?: string) {
+    let stored = initial;
+    let saved = 0;
+    return {
+      get: () => undefined,
+      getValue: (_key: string, fallback?: any) => stored ?? fallback,
+      set: (_key: string, v: string) => {
+        stored = v;
+      },
+      save: async () => {
+        saved += 1;
+      },
+      // Test-only helpers (not on real ConfigManager).
+      _read: () => stored,
+      _saves: () => saved,
+    };
+  }
+
+  it('shows the current effort when called bare', async () => {
+    const cfg = fakeCfg('high');
+    const { ctx, output } = makeCtx({ config: cfg });
+    await reasoning.handler(ctx as any);
+    expect(output()).toMatch(/Reasoning effort: high/);
+  });
+
+  it('defaults to medium when no value is stored', async () => {
+    const cfg = fakeCfg();
+    const { ctx, output } = makeCtx({ config: cfg });
+    await reasoning.handler(ctx as any);
+    expect(output()).toMatch(/Reasoning effort: medium/);
+  });
+
+  it('accepts low/medium/high and persists to config', async () => {
+    for (const value of ['low', 'medium', 'high'] as const) {
+      const cfg = fakeCfg();
+      const { ctx, output } = makeCtx({ config: cfg, rawArgs: value });
+      await reasoning.handler(ctx as any);
+      expect(cfg._read()).toBe(value);
+      expect(cfg._saves()).toBe(1);
+      expect(output()).toMatch(new RegExp(`set to ${value}`));
+    }
+  });
+
+  it("normalizes 'med' to 'medium'", async () => {
+    const cfg = fakeCfg();
+    const { ctx } = makeCtx({ config: cfg, rawArgs: 'med' });
+    await reasoning.handler(ctx as any);
+    expect(cfg._read()).toBe('medium');
+  });
+
+  it('rejects invalid values with an actionable error', async () => {
+    const cfg = fakeCfg();
+    const { ctx, output } = makeCtx({ config: cfg, rawArgs: 'extreme' });
+    await reasoning.handler(ctx as any);
+    expect(cfg._read()).toBeUndefined();
+    expect(output()).toMatch(/Invalid effort/);
+    expect(output()).toMatch(/low\|medium\|high/);
+  });
+
+  it('warns when the config manager is not wired', async () => {
     const { ctx, output } = makeCtx();
     await reasoning.handler(ctx as any);
-    expect(output()).toMatch(/Phase 16/);
+    expect(output()).toMatch(/not wired/i);
   });
 });
 

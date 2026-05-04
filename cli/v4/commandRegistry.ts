@@ -23,6 +23,7 @@ import type { McpClient } from '../../core/v4/mcpClient';
 import type { AuxiliaryClient } from '../../core/v4/auxiliaryClient';
 import type { SkillsHub } from '../../core/v4/skillsHub';
 import type { Message } from '../../providers/v4/types';
+import type { PersonalityManager } from '../../core/v4/personality';
 
 /**
  * Lightweight session abstraction commands consume. The full chat REPL
@@ -62,6 +63,7 @@ export interface SlashCommandContext {
   mcpClient?: McpClient;
   auxiliaryClient?: AuxiliaryClient;
   skillsHub?: SkillsHub;
+  personalityManager?: PersonalityManager;
 }
 
 /** Result produced by a command handler. */
@@ -111,6 +113,9 @@ function splitArgs(rest: string): { rawArgs: string; args: string[] } {
 export class CommandRegistry {
   private readonly commands = new Map<string, SlashCommand>();
   private readonly aliasIndex = new Map<string, string>();
+  /** Most-recent-first names. Capped to RECENT_LIMIT entries. */
+  private readonly recent: string[] = [];
+  private static readonly RECENT_LIMIT = 8;
 
   register(cmd: SlashCommand): void {
     if (!cmd.name || cmd.name.includes(' ')) {
@@ -222,32 +227,114 @@ export class CommandRegistry {
 
     const raw = (await cmd.handler(fullCtx)) as SlashCommandResult | void;
     const result: SlashCommandResult = raw ? raw : {};
+    this.recordRecent(cmd.name);
     return { handled: true, exit: result.exit, clearHistory: result.clearHistory };
   }
 
   /**
-   * Autocomplete data feed for 14c's dropdown. `prefix` is the user's
-   * partial input (with or without leading `/`). Matches against canonical
-   * names (and aliases). Hidden commands are excluded.
+   * Autocomplete data feed. Three-tier matching (Phase 16):
+   *   1. name / alias starts with query
+   *   2. name contains query (substring)
+   *   3. description contains query
+   * Each tier is sorted alphabetically. When the prefix is empty, recent
+   * commands are surfaced first, then alphabetical order. Hidden commands
+   * are always excluded.
    */
   filter(prefix: string): SlashCommand[] {
     let p = (prefix ?? '').trim();
     if (p.startsWith('/')) p = p.slice(1);
-    const lower = p.toLowerCase();
-    const out: SlashCommand[] = [];
-    const seen = new Set<string>();
-    for (const cmd of this.commands.values()) {
-      if (cmd.hidden) continue;
-      const nameMatches = cmd.name.toLowerCase().startsWith(lower);
-      const aliasMatches =
-        cmd.aliases?.some((a) => a.toLowerCase().startsWith(lower)) ?? false;
-      if (nameMatches || aliasMatches) {
-        if (!seen.has(cmd.name)) {
-          out.push(cmd);
-          seen.add(cmd.name);
-        }
+    const query = p.toLowerCase();
+    const visible = this.list({ includeHidden: false });
+
+    if (!query) {
+      // No filter — surface recent first, then the rest alphabetically.
+      const recentSet = new Set(this.recent);
+      const recentCmds: SlashCommand[] = [];
+      for (const name of this.recent) {
+        const cmd = this.commands.get(name);
+        if (cmd && !cmd.hidden) recentCmds.push(cmd);
+      }
+      const remainder = visible.filter((c) => !recentSet.has(c.name));
+      return [...recentCmds, ...remainder];
+    }
+
+    const tier1: SlashCommand[] = [];
+    const tier2: SlashCommand[] = [];
+    const tier3: SlashCommand[] = [];
+    const claimed = new Set<string>();
+
+    for (const cmd of visible) {
+      const nameLower = cmd.name.toLowerCase();
+      const aliasStarts = cmd.aliases?.some((a) => a.toLowerCase().startsWith(query)) ?? false;
+      if (nameLower.startsWith(query) || aliasStarts) {
+        tier1.push(cmd);
+        claimed.add(cmd.name);
+        continue;
+      }
+      if (nameLower.includes(query)) {
+        tier2.push(cmd);
+        claimed.add(cmd.name);
+        continue;
+      }
+      if (cmd.description.toLowerCase().includes(query)) {
+        tier3.push(cmd);
+        claimed.add(cmd.name);
       }
     }
-    return out.sort((a, b) => a.name.localeCompare(b.name));
+    const sorter = (a: SlashCommand, b: SlashCommand) =>
+      a.name.localeCompare(b.name);
+    return [
+      ...tier1.sort(sorter),
+      ...tier2.sort(sorter),
+      ...tier3.sort(sorter),
+    ];
+  }
+
+  /**
+   * Track a command invocation. Most-recent-first, deduped, capped to
+   * RECENT_LIMIT. Unknown names are ignored. (Phase 16.)
+   */
+  recordRecent(commandName: string): void {
+    if (!this.commands.has(commandName)) return;
+    const existing = this.recent.indexOf(commandName);
+    if (existing !== -1) this.recent.splice(existing, 1);
+    this.recent.unshift(commandName);
+    if (this.recent.length > CommandRegistry.RECENT_LIMIT) {
+      this.recent.length = CommandRegistry.RECENT_LIMIT;
+    }
+  }
+
+  /**
+   * Snapshot of recent command invocations (most-recent-first). Excludes
+   * commands that have been unregistered since they were recorded.
+   * (Phase 16.)
+   */
+  getRecent(limit?: number): SlashCommand[] {
+    const cap = limit ?? CommandRegistry.RECENT_LIMIT;
+    const out: SlashCommand[] = [];
+    for (const name of this.recent) {
+      const cmd = this.commands.get(name);
+      if (cmd && !cmd.hidden) {
+        out.push(cmd);
+        if (out.length >= cap) break;
+      }
+    }
+    return out;
+  }
+
+  /** Replace the recent-commands buffer wholesale. Used by persistence loaders. */
+  setRecent(names: string[]): void {
+    this.recent.length = 0;
+    for (const name of names) {
+      if (this.recent.length >= CommandRegistry.RECENT_LIMIT) break;
+      if (!this.commands.has(name)) continue;
+      if (this.recent.includes(name)) continue;
+      this.recent.push(name);
+    }
+  }
+
+  /** Snapshot of recent-command names (most-recent-first), for persistence. */
+  serializeRecent(): string[] {
+    return [...this.recent];
   }
 }
