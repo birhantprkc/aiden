@@ -96,9 +96,60 @@ export interface ChainRunResult<T> {
 }
 
 /**
+ * Phase 16b.3: default per-slot cooldown after a 429.
+ *
+ * Hermes uses 60 minutes (`agent/credential_pool.py::EXHAUSTED_TTL_429_SECONDS`)
+ * because its fleet runs cron + multi-day tasks against the provider's full
+ * reset window. Aiden's REPL is interactive and Groq's free-tier TPM cap
+ * recovers in well under a minute, so a 60-minute freeze would lock a slot
+ * out for the rest of an interactive session pointlessly.
+ *
+ * 60 seconds matches Groq's rolling-window token cap and lets the chain
+ * recover the primary slot mid-session. See
+ * `docs/sprint/hermes-soul-cooldown-audit.md` for the divergence rationale.
+ */
+export const DEFAULT_SLOT_COOLDOWN_MS = 60_000;
+
+/**
+ * Read the slot cooldown duration. Wrapped in a function so tests can stub
+ * the env var; consumers that don't care about the env override (i.e. all
+ * production paths) just get the default.
+ */
+export function resolveSlotCooldownMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env.AIDEN_SLOT_COOLDOWN_MS;
+  if (!raw) return DEFAULT_SLOT_COOLDOWN_MS;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_SLOT_COOLDOWN_MS;
+  return parsed;
+}
+
+/**
+ * Optional per-slot cooldown bookkeeping passed into `runFallbackChain`.
+ * The caller owns the map; the chain reads `cooldownUntil[slotId]` to
+ * decide whether to skip a slot, and writes a fresh cooldown when the
+ * slot 429s. Skipping is purely advisory — the chain will still try the
+ * slot if it's the only one with a key.
+ */
+export interface ChainCooldownState {
+  /** Wall-clock ms timestamp at/after which the slot becomes pickable again. */
+  cooldownUntil: Map<string, number>;
+  /** Cooldown duration applied when a 429 fires. Default 60s. */
+  cooldownMs: number;
+  /** Optional clock for tests. Defaults to `Date.now`. */
+  now?: () => number;
+}
+
+/**
  * Run `requestFn` against each slot in order until one succeeds. Skips
  * slots whose `build()` returns null (no key). On rate-limit errors,
  * advances to the next slot. On any other error, rethrows immediately.
+ *
+ * When `cooldown` is provided, slots in cooldown are skipped on the first
+ * pass — only after every other slot fails do we retry a cooling slot,
+ * matching the spec's "drops slot-1 load 80%+" guidance without ever
+ * making the chain harder to recover from.
  *
  * Throws a `ChainExhaustedError` after the last configured slot fails
  * with a rate-limit error.
@@ -107,26 +158,63 @@ export async function runFallbackChain<T>(
   slots: ProviderSlot[],
   requestFn: (adapter: ProviderAdapter, slot: ProviderSlot) => Promise<T>,
   observers: { onRateLimit?: (slotId: string, err: Error) => void } = {},
+  cooldown?: ChainCooldownState,
 ): Promise<ChainRunResult<T>> {
+  const now = cooldown?.now ?? Date.now;
+
+  // Two passes: first only slots whose cooldown has expired, then any
+  // remaining cooling slots as a last resort. Same pattern as Hermes'
+  // _select_unlocked → _available_entries(clear_expired=True) plus the
+  // implicit "fall back to whatever you have" on degraded fleets.
+  const fresh: ProviderSlot[] = [];
+  const cooling: ProviderSlot[] = [];
+  for (const slot of slots) {
+    if (cooldown) {
+      const until = cooldown.cooldownUntil.get(slot.id) ?? 0;
+      if (until > now()) {
+        cooling.push(slot);
+        continue;
+      }
+    }
+    fresh.push(slot);
+  }
+
   let lastErr: Error | null = null;
   let attemptedAny = false;
 
-  for (const slot of slots) {
+  const tryOne = async (slot: ProviderSlot): Promise<ChainRunResult<T> | null> => {
     const adapter = slot.build();
-    if (!adapter) continue;
+    if (!adapter) return null;
     attemptedAny = true;
     try {
       const value = await requestFn(adapter, slot);
+      // Successful call clears any lingering cooldown for the slot.
+      cooldown?.cooldownUntil.delete(slot.id);
       return { slotId: slot.id, value };
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
       if (isRateLimitError(e)) {
         observers.onRateLimit?.(slot.id, e);
+        if (cooldown) {
+          cooldown.cooldownUntil.set(
+            slot.id,
+            now() + cooldown.cooldownMs,
+          );
+        }
         lastErr = e;
-        continue;
+        return null;
       }
       throw e;
     }
+  };
+
+  for (const slot of fresh) {
+    const r = await tryOne(slot);
+    if (r) return r;
+  }
+  for (const slot of cooling) {
+    const r = await tryOne(slot);
+    if (r) return r;
   }
 
   if (!attemptedAny) {
@@ -246,13 +334,19 @@ export function buildDefaultSlots(opts: DefaultSlotsOptions): ProviderSlot[] {
 
 /**
  * Tracks per-slot rate-limit state so `/providers` can render which slots
- * are currently active vs. cooling off. Cooldown is purely advisory — the
- * chain still tries each slot on every call to recover quickly.
+ * are currently active vs. cooling off. Cooldown is enforced at pick time
+ * (Phase 16b.3) — slots in cooldown are skipped on the first pass.
  */
 export interface SlotState {
   rateLimited: boolean;
   /** Wall-clock ms when the slot last rate-limited. */
   lastRateLimitAt: number | null;
+  /**
+   * Phase 16b.3: wall-clock ms at/after which this slot is pickable again.
+   * Null when the slot is not in cooldown. Display this minus `Date.now()`
+   * in `/providers` as a remaining countdown.
+   */
+  cooldownUntil: number | null;
   /** Total successful calls observed for this slot. */
   successCount: number;
   /** Total rate-limit events observed for this slot. */
@@ -272,6 +366,10 @@ export class FallbackAdapter implements ProviderAdapter {
   readonly apiMode: ProviderAdapter['apiMode'];
   private readonly slots: ProviderSlot[];
   private readonly state: Map<string, SlotState> = new Map();
+  /** Phase 16b.3: cooldown deadlines shared with `runFallbackChain`. */
+  private readonly cooldownUntil: Map<string, number> = new Map();
+  private readonly cooldownMs: number;
+  private readonly nowFn: () => number;
   private lastSuccessfulSlot: string | null = null;
   private readonly onRateLimit?: (slotId: string, err: Error) => void;
   private readonly onFallback?: (
@@ -285,15 +383,22 @@ export class FallbackAdapter implements ProviderAdapter {
     slots: ProviderSlot[];
     onRateLimit?: (slotId: string, err: Error) => void;
     onFallback?: (fromSlotId: string, toSlotId: string) => void;
+    /** Phase 16b.3: override cooldown duration for tests. */
+    cooldownMs?: number;
+    /** Phase 16b.3: clock injection for deterministic tests. */
+    now?: () => number;
   }) {
     this.apiMode = opts.apiMode;
     this.slots = opts.slots;
     this.onRateLimit = opts.onRateLimit;
     this.onFallback = opts.onFallback;
+    this.cooldownMs = opts.cooldownMs ?? resolveSlotCooldownMs();
+    this.nowFn = opts.now ?? Date.now;
     for (const s of opts.slots) {
       this.state.set(s.id, {
         rateLimited: false,
         lastRateLimitAt: null,
+        cooldownUntil: null,
         successCount: 0,
         rateLimitCount: 0,
       });
@@ -316,16 +421,23 @@ export class FallbackAdapter implements ProviderAdapter {
           const s = this.state.get(slotId);
           if (s) {
             s.rateLimited = true;
-            s.lastRateLimitAt = Date.now();
+            s.lastRateLimitAt = this.nowFn();
+            s.cooldownUntil = this.nowFn() + this.cooldownMs;
             s.rateLimitCount += 1;
           }
           this.onRateLimit?.(slotId, err);
         },
       },
+      {
+        cooldownUntil: this.cooldownUntil,
+        cooldownMs: this.cooldownMs,
+        now: this.nowFn,
+      },
     );
     const s = this.state.get(result.slotId);
     if (s) {
       s.rateLimited = false;
+      s.cooldownUntil = null;
       s.successCount += 1;
     }
     this.lastSuccessfulSlot = result.slotId;
@@ -341,21 +453,37 @@ export class FallbackAdapter implements ProviderAdapter {
       keyPresent: boolean;
       keyTail: string | null;
       state: SlotState;
+      /** Remaining cooldown in seconds (0 when not cooling). Phase 16b.3. */
+      cooldownRemainingSec: number;
       active: boolean;
     }>;
     activeSlotId: string | null;
+    /** Phase 16b.3: configured cooldown duration in seconds. */
+    cooldownSec: number;
   } {
+    const now = this.nowFn();
     return {
-      slots: this.slots.map((s) => ({
-        id: s.id,
-        providerId: s.providerId,
-        modelId: s.modelId,
-        keyPresent: s.keyPresent,
-        keyTail: s.keyTail,
-        state: this.state.get(s.id)!,
-        active: s.id === this.lastSuccessfulSlot,
-      })),
+      slots: this.slots.map((s) => {
+        const st = this.state.get(s.id)!;
+        // Re-sync state.cooldownUntil from the shared map — tests can
+        // mutate cooldownUntil through the chain, and we want /providers
+        // to reflect the same source of truth.
+        const until = this.cooldownUntil.get(s.id) ?? st.cooldownUntil ?? 0;
+        const remainingSec =
+          until > now ? Math.ceil((until - now) / 1000) : 0;
+        return {
+          id: s.id,
+          providerId: s.providerId,
+          modelId: s.modelId,
+          keyPresent: s.keyPresent,
+          keyTail: s.keyTail,
+          state: { ...st, cooldownUntil: until > now ? until : null },
+          cooldownRemainingSec: remainingSec,
+          active: s.id === this.lastSuccessfulSlot,
+        };
+      }),
       activeSlotId: this.lastSuccessfulSlot,
+      cooldownSec: Math.round(this.cooldownMs / 1000),
     };
   }
 }

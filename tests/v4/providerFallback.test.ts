@@ -12,6 +12,8 @@ import {
   FallbackAdapter,
   ChainExhaustedError,
   maskKey,
+  resolveSlotCooldownMs,
+  DEFAULT_SLOT_COOLDOWN_MS,
   type ProviderSlot,
 } from '../../core/v4/providerFallback';
 import type { ProviderAdapter } from '../../providers/v4/types';
@@ -266,3 +268,218 @@ function okStub(): ProviderAdapter {
     }),
   };
 }
+
+// ─── Phase 16b.3: per-slot cooldown ─────────────────────────────────────
+describe('resolveSlotCooldownMs', () => {
+  it('returns the default when AIDEN_SLOT_COOLDOWN_MS is unset', () => {
+    expect(resolveSlotCooldownMs({})).toBe(DEFAULT_SLOT_COOLDOWN_MS);
+    expect(DEFAULT_SLOT_COOLDOWN_MS).toBe(60_000);
+  });
+  it('honours a valid override', () => {
+    expect(resolveSlotCooldownMs({ AIDEN_SLOT_COOLDOWN_MS: '15000' })).toBe(15000);
+  });
+  it('falls back to the default for invalid values', () => {
+    expect(resolveSlotCooldownMs({ AIDEN_SLOT_COOLDOWN_MS: 'nope' })).toBe(
+      DEFAULT_SLOT_COOLDOWN_MS,
+    );
+    expect(resolveSlotCooldownMs({ AIDEN_SLOT_COOLDOWN_MS: '-5' })).toBe(
+      DEFAULT_SLOT_COOLDOWN_MS,
+    );
+  });
+});
+
+describe('runFallbackChain cooldown skip', () => {
+  function makeSlot(id: string, build: () => ProviderAdapter | null): ProviderSlot {
+    return {
+      id,
+      providerId: id,
+      modelId: 'm',
+      keyPresent: true,
+      keyTail: '1234',
+      build,
+    };
+  }
+  const okAdapter: ProviderAdapter = {
+    apiMode: 'chat_completions',
+    call: async () => ({
+      content: 'ok',
+      toolCalls: [],
+      finishReason: 'stop',
+      usage: { inputTokens: 0, outputTokens: 0 },
+    }),
+  };
+  const rl: ProviderAdapter = {
+    apiMode: 'chat_completions',
+    call: async () => {
+      throw new Error('429 too many requests');
+    },
+  };
+
+  it('skips a slot whose cooldown has not yet expired and uses the next fresh slot first', async () => {
+    let nowMs = 1_000_000;
+    const cooldownUntil = new Map<string, number>([['a', nowMs + 30_000]]);
+    const cooldown = {
+      cooldownUntil,
+      cooldownMs: 60_000,
+      now: () => nowMs,
+    };
+    const slots = [makeSlot('a', () => okAdapter), makeSlot('b', () => okAdapter)];
+    const r = await runFallbackChain(
+      slots,
+      (a) => a.call({ messages: [], tools: [] }),
+      {},
+      cooldown,
+    );
+    // 'a' is in cooldown, so even though okAdapter would succeed, the
+    // chain MUST pick 'b' on the fresh-slot pass.
+    expect(r.slotId).toBe('b');
+  });
+
+  it('writes a fresh cooldown deadline when a slot 429s', async () => {
+    let nowMs = 2_000_000;
+    const cooldownUntil = new Map<string, number>();
+    const cooldown = {
+      cooldownUntil,
+      cooldownMs: 60_000,
+      now: () => nowMs,
+    };
+    const slots = [makeSlot('a', () => rl), makeSlot('b', () => okAdapter)];
+    await runFallbackChain(
+      slots,
+      (a) => a.call({ messages: [], tools: [] }),
+      {},
+      cooldown,
+    );
+    expect(cooldownUntil.get('a')).toBe(nowMs + 60_000);
+    // 'b' succeeded — it must NOT be in cooldown.
+    expect(cooldownUntil.get('b')).toBeUndefined();
+  });
+
+  it('falls back to a cooling slot when every fresh slot is rate-limited', async () => {
+    // Both slots are configured but slot 'a' is in cooldown and slot 'b'
+    // immediately 429s. The chain should retry 'a' as a last resort.
+    let nowMs = 3_000_000;
+    let aCalls = 0;
+    const aAdapter: ProviderAdapter = {
+      apiMode: 'chat_completions',
+      call: async () => {
+        aCalls += 1;
+        return {
+          content: 'recovered',
+          toolCalls: [],
+          finishReason: 'stop',
+          usage: { inputTokens: 0, outputTokens: 0 },
+        };
+      },
+    };
+    const cooldownUntil = new Map<string, number>([['a', nowMs + 5_000]]);
+    const cooldown = {
+      cooldownUntil,
+      cooldownMs: 60_000,
+      now: () => nowMs,
+    };
+    const slots = [makeSlot('a', () => aAdapter), makeSlot('b', () => rl)];
+    const r = await runFallbackChain(
+      slots,
+      (a) => a.call({ messages: [], tools: [] }),
+      {},
+      cooldown,
+    );
+    expect(r.slotId).toBe('a');
+    expect(aCalls).toBe(1);
+    // Successful retry clears 'a's cooldown.
+    expect(cooldownUntil.get('a')).toBeUndefined();
+  });
+
+  it('FallbackAdapter exposes cooldown countdown via getDiagnostics', async () => {
+    let nowMs = 4_000_000;
+    const rlSlot: ProviderSlot = {
+      id: 'a',
+      providerId: 'groq',
+      modelId: 'm',
+      keyPresent: true,
+      keyTail: 'aaaa',
+      build: () => rl,
+    };
+    const okSlot: ProviderSlot = {
+      id: 'b',
+      providerId: 'groq',
+      modelId: 'm',
+      keyPresent: true,
+      keyTail: 'bbbb',
+      build: () => okAdapter,
+    };
+    const fa = new FallbackAdapter({
+      apiMode: 'chat_completions',
+      slots: [rlSlot, okSlot],
+      cooldownMs: 60_000,
+      now: () => nowMs,
+    });
+    await fa.call({ messages: [], tools: [] });
+    // Slot 'a' should now be in cooldown ~= 60s.
+    let diag = fa.getDiagnostics();
+    expect(diag.cooldownSec).toBe(60);
+    const aDiag = diag.slots.find((s) => s.id === 'a')!;
+    expect(aDiag.cooldownRemainingSec).toBe(60);
+    expect(aDiag.state.cooldownUntil).toBe(nowMs + 60_000);
+    // Slot 'b' never 429'd.
+    const bDiag = diag.slots.find((s) => s.id === 'b')!;
+    expect(bDiag.cooldownRemainingSec).toBe(0);
+    expect(bDiag.state.cooldownUntil).toBeNull();
+
+    // Advance the virtual clock; remaining countdown should drop.
+    nowMs += 30_000;
+    diag = fa.getDiagnostics();
+    expect(diag.slots.find((s) => s.id === 'a')!.cooldownRemainingSec).toBe(30);
+  });
+
+  it('FallbackAdapter does NOT pick a slot whose cooldown is still active', async () => {
+    let nowMs = 5_000_000;
+    let aCalls = 0;
+    const aOk: ProviderAdapter = {
+      apiMode: 'chat_completions',
+      call: async () => {
+        aCalls += 1;
+        return {
+          content: 'a-result',
+          toolCalls: [],
+          finishReason: 'stop',
+          usage: { inputTokens: 0, outputTokens: 0 },
+        };
+      },
+    };
+    let bCalls = 0;
+    const bOk: ProviderAdapter = {
+      apiMode: 'chat_completions',
+      call: async () => {
+        bCalls += 1;
+        return {
+          content: 'b-result',
+          toolCalls: [],
+          finishReason: 'stop',
+          usage: { inputTokens: 0, outputTokens: 0 },
+        };
+      },
+    };
+    const aSlot: ProviderSlot = {
+      id: 'a', providerId: 'groq', modelId: 'm', keyPresent: true, keyTail: 'a',
+      build: () => aOk,
+    };
+    const bSlot: ProviderSlot = {
+      id: 'b', providerId: 'groq', modelId: 'm', keyPresent: true, keyTail: 'b',
+      build: () => bOk,
+    };
+    const fa = new FallbackAdapter({
+      apiMode: 'chat_completions',
+      slots: [aSlot, bSlot],
+      cooldownMs: 60_000,
+      now: () => nowMs,
+    });
+    // Manually mark 'a' as cooling (e.g. reuse from a previous turn).
+    (fa as any).cooldownUntil.set('a', nowMs + 10_000);
+    const out = await fa.call({ messages: [], tools: [] });
+    expect(out.content).toBe('b-result');
+    expect(aCalls).toBe(0);
+    expect(bCalls).toBe(1);
+  });
+});

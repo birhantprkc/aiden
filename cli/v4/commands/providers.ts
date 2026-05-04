@@ -41,11 +41,17 @@ export const providers: SlashCommand = {
           ? `key ••••${slot.keyTail}`
           : 'key set'
         : 'key unset';
-      const stateBadge = slot.state.rateLimited
-        ? ' [rate-limited]'
-        : slot.keyPresent
-          ? ' [ready]'
-          : '';
+      // Phase 16b.3: cooldown takes precedence over the bare rate-limited
+      // badge — once the slot has a cooldown deadline, the user wants to
+      // see the countdown, not just "rate-limited".
+      let stateBadge = '';
+      if (slot.cooldownRemainingSec > 0) {
+        stateBadge = ` [cooldown ${slot.cooldownRemainingSec}s]`;
+      } else if (slot.state.rateLimited) {
+        stateBadge = ' [rate-limited]';
+      } else if (slot.keyPresent) {
+        stateBadge = ' [ready]';
+      }
       const stats = slot.keyPresent
         ? ` (${slot.state.successCount} ok, ${slot.state.rateLimitCount} 429)`
         : '';
@@ -54,9 +60,11 @@ export const providers: SlashCommand = {
       );
     }
     if (diag.activeSlotId) {
-      ctx.display.dim(`active: ${diag.activeSlotId}`);
+      ctx.display.dim(`active: ${diag.activeSlotId}  ·  cooldown ${diag.cooldownSec}s`);
     } else {
-      ctx.display.dim('(no successful call yet — first user message will pick a slot)');
+      ctx.display.dim(
+        `(no successful call yet — first user message will pick a slot · cooldown ${diag.cooldownSec}s)`,
+      );
     }
     return {};
   },
