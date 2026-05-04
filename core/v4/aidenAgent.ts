@@ -31,6 +31,20 @@ import {
   ProviderAdapter,
   ProviderCallOutput,
 } from '../../providers/v4/types';
+import type {
+  PlannerGuard,
+  PlannerGuardDecision,
+} from '../../moat/plannerGuard';
+import type {
+  HonestyEnforcement,
+  HonestyFinding,
+  HonestyTraceEntry,
+} from '../../moat/honestyEnforcement';
+import type {
+  SkillTeacher,
+  SkillProposalCallbacks,
+  SkillTeacherTraceEntry,
+} from '../../moat/skillTeacher';
 
 /**
  * Tool executor — runs a single tool call and returns the result.
@@ -72,6 +86,24 @@ export interface AidenAgentOptions {
     turn: number,
     max: number,
   ) => void;
+  /** Phase 12: pre-loop tool subset classifier (Aiden moat). */
+  plannerGuard?: PlannerGuard;
+  /** Phase 12: fired with the PlannerGuard decision before the loop runs. */
+  onPlannerGuardDecision?: (decision: PlannerGuardDecision) => void;
+  /** Phase 12: post-loop trace verifier (Aiden moat). */
+  honestyEnforcement?: HonestyEnforcement;
+  /** Phase 12: skill workflow proposer (Aiden moat). */
+  skillTeacher?: SkillTeacher;
+  /** Phase 12: callbacks the SkillTeacher uses when proposing. */
+  skillTeacherCallbacks?: SkillProposalCallbacks;
+  /** Phase 12: per-tool verification flag lookup. Allows the loop to feed
+   *  Honesty's verified-flag check (memory tools) without coupling the
+   *  registry to Honesty. The function receives the just-completed tool
+   *  call's result and returns true/false/undefined. */
+  resolveVerifiedFlag?: (result: ToolCallResult) => boolean | undefined;
+  /** Phase 12: lookup function for tool→toolset mapping (used by
+   *  SkillTeacher to compute toolset diversity for proposals). */
+  resolveToolset?: (toolName: string) => string | undefined;
 }
 
 export interface AidenAgentResult {
@@ -86,6 +118,14 @@ export interface AidenAgentResult {
     inputTokens: number;
     outputTokens: number;
   };
+  /** Phase 12: every tool call this turn, in order, with verified flag
+   *  filled by `resolveVerifiedFlag` (when wired). Always present, even
+   *  if the moat layers are not configured. */
+  toolCallTrace: HonestyTraceEntry[];
+  /** Phase 12: populated when HonestyEnforcement detected failed claims. */
+  honestyFindings?: HonestyFinding[];
+  /** Phase 12: name of the skill SkillTeacher created this turn (if any). */
+  skillCreated?: string;
 }
 
 const DEFAULT_MAX_TURNS = 90;
@@ -100,6 +140,13 @@ export class AidenAgent {
   private readonly fallback?: FallbackStrategy;
   private readonly onToolCall?: AidenAgentOptions['onToolCall'];
   private readonly onBudgetWarning?: AidenAgentOptions['onBudgetWarning'];
+  private readonly plannerGuard?: PlannerGuard;
+  private readonly onPlannerGuardDecision?: AidenAgentOptions['onPlannerGuardDecision'];
+  private readonly honestyEnforcement?: HonestyEnforcement;
+  private readonly skillTeacher?: SkillTeacher;
+  private readonly skillTeacherCallbacks?: SkillProposalCallbacks;
+  private readonly resolveVerifiedFlag?: AidenAgentOptions['resolveVerifiedFlag'];
+  private readonly resolveToolset?: AidenAgentOptions['resolveToolset'];
 
   constructor(options: AidenAgentOptions) {
     this.provider = options.provider;
@@ -109,6 +156,13 @@ export class AidenAgent {
     this.fallback = options.fallback;
     this.onToolCall = options.onToolCall;
     this.onBudgetWarning = options.onBudgetWarning;
+    this.plannerGuard = options.plannerGuard;
+    this.onPlannerGuardDecision = options.onPlannerGuardDecision;
+    this.honestyEnforcement = options.honestyEnforcement;
+    this.skillTeacher = options.skillTeacher;
+    this.skillTeacherCallbacks = options.skillTeacherCallbacks;
+    this.resolveVerifiedFlag = options.resolveVerifiedFlag;
+    this.resolveToolset = options.resolveToolset;
   }
 
   async runConversation(initialMessages: Message[]): Promise<AidenAgentResult> {
@@ -119,6 +173,27 @@ export class AidenAgent {
     let finishReason: 'stop' | 'budget_exhausted' | 'error' = 'stop';
     let finalContent = '';
     const totalUsage = { inputTokens: 0, outputTokens: 0 };
+    const toolCallTrace: HonestyTraceEntry[] = [];
+
+    // ── Phase 12 layer 1: PlannerGuard (pre-loop tool subset) ────────
+    let activeTools: ToolSchema[] = this.tools;
+    if (this.plannerGuard) {
+      const lastUser = lastUserMessage(initialMessages);
+      const decision = await this.plannerGuard.decide(
+        lastUser,
+        initialMessages,
+      );
+      this.onPlannerGuardDecision?.(decision);
+      const allowed = new Set(decision.selectedTools);
+      // Only narrow if the guard actually returned something useful and
+      // we have schemas to filter against.
+      if (allowed.size > 0 && this.tools.length > 0) {
+        const narrowed = this.tools.filter((t) => allowed.has(t.name));
+        // Defensive: never strip everything (preserves the "narrow only"
+        // contract). If filter accidentally empties, keep full list.
+        if (narrowed.length > 0) activeTools = narrowed;
+      }
+    }
 
     const cautionThreshold = Math.floor(this.maxTurns * CAUTION_FRACTION);
     const warningThreshold = Math.floor(this.maxTurns * WARNING_FRACTION);
@@ -141,7 +216,7 @@ export class AidenAgent {
       try {
         output = await this.provider.call({
           messages,
-          tools: this.tools,
+          tools: activeTools,
         });
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
@@ -181,7 +256,7 @@ export class AidenAgent {
       if (!hasToolCalls) {
         finalContent = output.content ?? '';
         finishReason = 'stop';
-        return {
+        return await this.finalize({
           finalContent,
           messages,
           turnCount,
@@ -189,7 +264,9 @@ export class AidenAgent {
           fallbackActivated,
           finishReason,
           totalUsage,
-        };
+          toolCallTrace,
+          aborted: false,
+        });
       }
 
       // Dispatch tool calls sequentially. Parallel execution
@@ -209,6 +286,14 @@ export class AidenAgent {
         }
 
         this.onToolCall?.(call, 'after', result);
+
+        // Phase 12: append to trace BEFORE tool message goes onto history.
+        toolCallTrace.push({
+          name: call.name,
+          result: result.result,
+          error: result.error,
+          verified: this.resolveVerifiedFlag?.(result),
+        });
 
         const toolContent = result.error
           ? `Error: ${result.error}`
@@ -234,7 +319,7 @@ export class AidenAgent {
         break;
       }
     }
-    return {
+    return await this.finalize({
       finalContent,
       messages,
       turnCount,
@@ -242,6 +327,96 @@ export class AidenAgent {
       fallbackActivated,
       finishReason,
       totalUsage,
+      toolCallTrace,
+      aborted: true,
+    });
+  }
+
+  /**
+   * Phase 12: post-loop pass — runs HonestyEnforcement against the trace,
+   * runs SkillTeacher observation, and assembles the final result.
+   *
+   * The two layers compose without coupling: Honesty runs first because it
+   * may rewrite `finalContent` (which SkillTeacher does NOT inspect — it
+   * only looks at the trace + user messages). Layer order matters and is
+   * intentional.
+   */
+  private async finalize(args: {
+    finalContent: string;
+    messages: Message[];
+    turnCount: number;
+    toolCallCount: number;
+    fallbackActivated: boolean;
+    finishReason: 'stop' | 'budget_exhausted' | 'error';
+    totalUsage: { inputTokens: number; outputTokens: number };
+    toolCallTrace: HonestyTraceEntry[];
+    aborted: boolean;
+  }): Promise<AidenAgentResult> {
+    let finalContent = args.finalContent;
+    let honestyFindings: HonestyFinding[] | undefined;
+    let skillCreated: string | undefined;
+
+    // ── Phase 12 layer 2: HonestyEnforcement ──────────────────────
+    if (this.honestyEnforcement && finalContent) {
+      const honesty = await this.honestyEnforcement.check(
+        finalContent,
+        args.messages,
+        args.toolCallTrace,
+      );
+      if (!honesty.passed) {
+        if (honesty.correctedResponse) {
+          finalContent = honesty.correctedResponse;
+        }
+        honestyFindings = honesty.findings;
+      }
+    }
+
+    // ── Phase 12 layer 3: SkillTeacher observation ────────────────
+    if (this.skillTeacher) {
+      const teacherTrace: SkillTeacherTraceEntry[] = args.toolCallTrace.map(
+        (t) => ({
+          name: t.name,
+          args: {},
+          result: t.result,
+          error: t.error,
+          toolset: this.resolveToolset?.(t.name),
+        }),
+      );
+      const proposal = await this.skillTeacher.observeTurn(
+        args.messages,
+        teacherTrace,
+        args.aborted,
+      );
+      if (proposal) {
+        const decision = await this.skillTeacher.handleProposal(
+          proposal,
+          this.skillTeacherCallbacks ?? {},
+        );
+        if (decision.created && decision.skillName) {
+          skillCreated = decision.skillName;
+        }
+      }
+    }
+
+    return {
+      finalContent,
+      messages: args.messages,
+      turnCount: args.turnCount,
+      toolCallCount: args.toolCallCount,
+      fallbackActivated: args.fallbackActivated,
+      finishReason: args.finishReason,
+      totalUsage: args.totalUsage,
+      toolCallTrace: args.toolCallTrace,
+      ...(honestyFindings ? { honestyFindings } : {}),
+      ...(skillCreated ? { skillCreated } : {}),
     };
   }
+}
+
+function lastUserMessage(messages: Message[]): string {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m.role === 'user') return m.content;
+  }
+  return '';
 }
