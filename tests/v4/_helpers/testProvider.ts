@@ -1,5 +1,5 @@
 /**
- * tests/v4/_helpers/testProvider.ts — Aiden v4.0.0 (pre-Phase 16)
+ * tests/v4/_helpers/testProvider.ts — Aiden v4.0.0 (Phase 16b.1)
  *
  * Provider-acquisition helper for integration tests. Replaces the
  * pattern of hardcoding `GROQ_API_KEY` as a skip-guard with a
@@ -10,6 +10,10 @@
  *   2. GROQ_API_KEY_2    — secondary Groq account
  *   3. GROQ_API_KEY_3    — tertiary Groq account
  *   4. TOGETHER_API_KEY  — paid (~$10 sprint budget; use sparingly)
+ *
+ * Phase 16b.1: the chain primitives (`isRateLimitError`, slot builders)
+ * now live in `core/v4/providerFallback.ts` so the runtime path shares
+ * the same logic. This file is a thin test-flavoured wrapper.
  *
  * Tests should call `getTestProvider()`, skip gracefully if it returns
  * null, and wrap the test body in `withRateLimitFallback()` if they
@@ -22,6 +26,11 @@
 
 import { ChatCompletionsAdapter } from '../../../providers/v4/chatCompletionsAdapter';
 import type { ProviderAdapter } from '../../../providers/v4/types';
+import {
+  isRateLimitError as sharedIsRateLimitError,
+  buildDefaultSlots,
+  type ProviderSlot,
+} from '../../../core/v4/providerFallback';
 
 export type TestProviderSource = 'groq' | 'groq2' | 'groq3' | 'together';
 
@@ -43,68 +52,36 @@ export interface TestProviderOptions {
   modelHint?: string;
 }
 
-const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
-const TOGETHER_BASE_URL = 'https://api.together.xyz/v1';
-const DEFAULT_GROQ_MODEL = 'llama-3.3-70b-versatile';
-const DEFAULT_TOGETHER_MODEL = 'meta-llama/Llama-3.3-70B-Instruct-Turbo';
+const adapterFactory = (cfg: {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  providerName: string;
+}): ProviderAdapter =>
+  new ChatCompletionsAdapter({
+    baseUrl: cfg.baseUrl,
+    apiKey: cfg.apiKey,
+    model: cfg.model,
+    providerName: cfg.providerName,
+  });
 
-function buildGroq(
-  source: 'groq' | 'groq2' | 'groq3',
-  apiKey: string,
-  modelHint?: string,
-): TestProvider {
-  const modelId = modelHint ?? process.env.GROQ_TEST_MODEL ?? DEFAULT_GROQ_MODEL;
+function buildSlots(opts: TestProviderOptions = {}): ProviderSlot[] {
+  return buildDefaultSlots({
+    adapterFactory,
+    groqModel: opts.modelHint,
+    togetherModel: opts.modelHint,
+  });
+}
+
+function slotToTestProvider(slot: ProviderSlot): TestProvider | null {
+  const adapter = slot.build();
+  if (!adapter) return null;
   return {
-    providerId: 'groq',
-    modelId,
-    adapter: new ChatCompletionsAdapter({
-      baseUrl: GROQ_BASE_URL,
-      apiKey,
-      model: modelId,
-      providerName: 'groq',
-    }),
-    source,
+    providerId: slot.providerId,
+    modelId: slot.modelId,
+    adapter,
+    source: slot.id as TestProviderSource,
   };
-}
-
-function buildTogether(apiKey: string, modelHint?: string): TestProvider {
-  const modelId =
-    modelHint ?? process.env.TOGETHER_TEST_MODEL ?? DEFAULT_TOGETHER_MODEL;
-  return {
-    providerId: 'together',
-    modelId,
-    adapter: new ChatCompletionsAdapter({
-      baseUrl: TOGETHER_BASE_URL,
-      apiKey,
-      model: modelId,
-      providerName: 'together',
-    }),
-    source: 'together',
-  };
-}
-
-function tryGroq(opts: TestProviderOptions): TestProvider | null {
-  const k = process.env.GROQ_API_KEY;
-  if (!k) return null;
-  return buildGroq('groq', k, opts.modelHint);
-}
-
-function tryGroq2(opts: TestProviderOptions): TestProvider | null {
-  const k = process.env.GROQ_API_KEY_2;
-  if (!k) return null;
-  return buildGroq('groq2', k, opts.modelHint);
-}
-
-function tryGroq3(opts: TestProviderOptions): TestProvider | null {
-  const k = process.env.GROQ_API_KEY_3;
-  if (!k) return null;
-  return buildGroq('groq3', k, opts.modelHint);
-}
-
-function tryTogether(opts: TestProviderOptions): TestProvider | null {
-  const k = process.env.TOGETHER_API_KEY;
-  if (!k) return null;
-  return buildTogether(k, opts.modelHint);
 }
 
 /**
@@ -116,22 +93,24 @@ function tryTogether(opts: TestProviderOptions): TestProvider | null {
 export async function getTestProvider(
   opts: TestProviderOptions = {},
 ): Promise<TestProvider | null> {
+  const slots = buildSlots(opts);
   if (opts.preferTogether) {
-    return (
-      tryTogether(opts) ??
-      tryGroq(opts) ??
-      tryGroq2(opts) ??
-      tryGroq3(opts) ??
-      null
-    );
+    // Reverse default order: try together first, then groq tiers.
+    const reordered = [
+      slots.find((s) => s.id === 'together')!,
+      ...slots.filter((s) => s.id !== 'together'),
+    ];
+    for (const s of reordered) {
+      const tp = slotToTestProvider(s);
+      if (tp) return tp;
+    }
+    return null;
   }
-  return (
-    tryGroq(opts) ??
-    tryGroq2(opts) ??
-    tryGroq3(opts) ??
-    tryTogether(opts) ??
-    null
-  );
+  for (const s of slots) {
+    const tp = slotToTestProvider(s);
+    if (tp) return tp;
+  }
+  return null;
 }
 
 /**
@@ -148,22 +127,16 @@ export async function withRateLimitFallback<T>(
 ): Promise<T | null> {
   if (!initialProvider) return null;
 
+  const slots = buildSlots();
   const seen = new Set<TestProviderSource>([initialProvider.source]);
   const chain: TestProvider[] = [initialProvider];
 
-  // Append each remaining tier in default order (groq → groq2 → groq3
-  // → together), excluding the one we already started with.
-  const remainingBuilders: Array<() => TestProvider | null> = [
-    () => tryGroq({}),
-    () => tryGroq2({}),
-    () => tryGroq3({}),
-    () => tryTogether({}),
-  ];
-  for (const build of remainingBuilders) {
-    const p = build();
-    if (p && !seen.has(p.source)) {
-      chain.push(p);
-      seen.add(p.source);
+  for (const s of slots) {
+    if (seen.has(s.id as TestProviderSource)) continue;
+    const tp = slotToTestProvider(s);
+    if (tp) {
+      chain.push(tp);
+      seen.add(tp.source);
     }
   }
 
@@ -193,26 +166,5 @@ export async function withRateLimitFallback<T>(
   return null;
 }
 
-/**
- * Loose 429 / rate-limit detector. Matches:
- *   - `ProviderRateLimitError` instances (constructor name check)
- *   - error messages containing '429', 'rate limit', 'rate-limit',
- *     'rate_limit', 'too many requests'
- * Tests can also flag a custom error by setting `(err as any).rateLimit = true`.
- */
-export function isRateLimitError(err: unknown): boolean {
-  if (!err) return false;
-  const e = err as { message?: string; name?: string; rateLimit?: unknown };
-  if (e.rateLimit === true) return true;
-  if (typeof e.name === 'string' && e.name.toLowerCase().includes('ratelimit')) {
-    return true;
-  }
-  const msg = (e.message ?? '').toLowerCase();
-  return (
-    msg.includes('429') ||
-    msg.includes('rate limit') ||
-    msg.includes('rate-limit') ||
-    msg.includes('rate_limit') ||
-    msg.includes('too many requests')
-  );
-}
+/** Re-export the shared rate-limit detector. */
+export const isRateLimitError = sharedIsRateLimitError;
