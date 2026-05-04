@@ -43,6 +43,8 @@ import { sessionSearchTool } from './sessions/sessionSearch';
 import { sessionListTool } from './sessions/sessionList';
 
 import { skillsListTool } from './skills/skillsList';
+import { skillViewTool } from './skills/skillView';
+import { skillManageTool } from './skills/skillManage';
 import { makeLookupToolSchema } from './skills/lookupToolSchema';
 
 import { systemInfoTool } from './system/systemInfo';
@@ -85,6 +87,7 @@ export function registerReadOnlyTools(registry: ToolRegistry): void {
   registry.register(sessionListTool);
 
   registry.register(skillsListTool);
+  registry.register(skillViewTool);
 
   registry.register(systemInfoTool);
   registry.register(nowPlayingTool);
@@ -127,6 +130,10 @@ export function registerWriteTools(registry: ToolRegistry): void {
   registry.register(memoryAddTool);
   registry.register(memoryReplaceTool);
   registry.register(memoryRemoveTool);
+
+  // Phase 10: skill_manage — mutating, also goes through the approval
+  // engine. skills_list / skill_view stay in registerReadOnlyTools.
+  registry.register(skillManageTool);
 }
 
 /** Register every v4 tool. Most callers want this. */
@@ -158,6 +165,8 @@ export { browserCloseTool } from './browser/browserClose';
 export { sessionSearchTool } from './sessions/sessionSearch';
 export { sessionListTool } from './sessions/sessionList';
 export { skillsListTool } from './skills/skillsList';
+export { skillViewTool } from './skills/skillView';
+export { skillManageTool } from './skills/skillManage';
 export { makeLookupToolSchema } from './skills/lookupToolSchema';
 export { systemInfoTool } from './system/systemInfo';
 export { nowPlayingTool } from './system/nowPlaying';

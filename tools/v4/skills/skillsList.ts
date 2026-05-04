@@ -1,13 +1,14 @@
 /**
- * tools/v4/skills/skillsList.ts — `skills_list` Phase-7 stub.
+ * tools/v4/skills/skillsList.ts — `skills_list` tool.
  *
- * Phase 9 (skill loader + Skill Hub) will return the real list of
- * available skills with their `triggers` so the agent can decide
- * whether to invoke one. For Phase 7 we return a placeholder
- * payload so the tool registers and the LLM gets a stable shape
- * to learn against.
+ * Progressive-disclosure level 0: agent sees name + description for
+ * every installed skill (~3k tokens for 75 bundled skills). The
+ * agent then decides whether to drill down via `skill_view`.
  *
- * Status: PHASE 7 STUB.  TODO(phase-9): wire to `core/v4/skillsHub.ts`.
+ * Wraps `SkillLoader.list()` and decorates with the bundled
+ * manifest's `userModified` flag (when available).
+ *
+ * Status: PHASE 10.
  */
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
@@ -16,7 +17,7 @@ export const skillsListTool: ToolHandler = {
   schema: {
     name: 'skills_list',
     description:
-      'List available skills (named workflows the agent can invoke). Returns skill names, triggers, and short descriptions.',
+      'List every installed skill with name + description (progressive-disclosure level 0). Use this first to find a skill, then call skill_view to read it.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -25,11 +26,35 @@ export const skillsListTool: ToolHandler = {
   category: 'read',
   mutates: false,
   toolset: 'skills',
-  async execute() {
+  async execute(_args, ctx) {
+    if (!ctx.skillLoader) {
+      return {
+        success: true,
+        skills: [],
+        note: 'No skill loader configured for this session.',
+      };
+    }
+    const summaries = await ctx.skillLoader.list();
+    if (ctx.skillManifest) {
+      for (const s of summaries) {
+        try {
+          s.userModified = await ctx.skillManifest.isUserModified(s.name);
+        } catch {
+          s.userModified = undefined;
+        }
+      }
+    }
     return {
       success: true,
-      skills: [],
-      note: 'Skill discovery lands in Phase 9 (Skill Hub + skill loader). The empty list keeps the schema stable so the model can rely on the shape.',
+      count: summaries.length,
+      skills: summaries.map((s) => ({
+        name: s.name,
+        description: s.description,
+        version: s.version,
+        category: s.category,
+        trustLevel: s.trustLevel,
+        userModified: s.userModified ?? null,
+      })),
     };
   },
 };

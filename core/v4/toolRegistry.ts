@@ -37,6 +37,8 @@ import type { SSRFProtection } from '../../moat/ssrfProtection';
 import type { TirithScanner } from '../../moat/tirithScanner';
 import type { MemoryGuard } from '../../moat/memoryGuard';
 import { classifyCommand } from '../../moat/dangerousPatterns';
+import type { SkillLoader } from './skillLoader';
+import type { BundledManifest } from './skillBundledManifest';
 
 /**
  * Risk profile for a tool. Used by the Phase 9 approval engine to decide
@@ -75,6 +77,11 @@ export interface ToolContext {
   /** Phase 9: memory write verification. Memory tool wrappers call
    *  through this. */
   memoryGuard?: MemoryGuard;
+  /** Phase 10: skill loader for `skills_list` / `skill_view`. */
+  skillLoader?: SkillLoader;
+  /** Phase 10: bundled manifest for `skills_list` userModified flag
+   *  and for `skill_manage` writes to track user-modification state. */
+  skillManifest?: BundledManifest;
   /** Optional structured logger. Wrappers call this for diagnostic output. */
   log?: (level: 'info' | 'warn' | 'error', msg: string) => void;
 }
