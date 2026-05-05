@@ -86,6 +86,28 @@ describe('ensureSoulMdSeeded', () => {
     expect(content).toMatch(/<keep_going>/);
   });
 
+  it('Phase 16h: silent-upgrades the 16g default to current', async () => {
+    // User had 16g installed → SOUL.md is the 16g default. Boot 16h
+    // should silent-upgrade so the new media-search guidance lands
+    // without prompting.
+    const { PREVIOUS_BUNDLED_SOULS } = await import(
+      '../../cli/v4/defaultSoul'
+    );
+    expect(PREVIOUS_BUNDLED_SOULS.length).toBeGreaterThanOrEqual(2);
+    const root = await makeTempRoot();
+    const paths = resolveAidenPaths({ rootOverride: root });
+    await ensureAidenDirsExist(paths);
+    // Index 1 is the 16g snapshot.
+    await fs.writeFile(paths.soulMd, PREVIOUS_BUNDLED_SOULS[1], 'utf8');
+    const result = await ensureSoulMdSeeded(paths);
+    expect(result.outcome).toBe('upgraded');
+    const content = await fs.readFile(paths.soulMd, 'utf8');
+    expect(content).toBe(DEFAULT_SOUL_MD);
+    // Sanity: new content has the media-search guidance.
+    expect(content).toMatch(/skill_view\(media-search\)/);
+    expect(content).toMatch(/NEVER search verbatim "popular song"/);
+  });
+
   it('Phase 16g: preserves user-edited content + emits notice', async () => {
     const root = await makeTempRoot();
     const paths = resolveAidenPaths({ rootOverride: root });
