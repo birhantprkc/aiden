@@ -400,8 +400,15 @@ export class AidenAgent {
     const toolCallTrace: HonestyTraceEntry[] = [];
 
     // ── Phase 12 layer 1: PlannerGuard (pre-loop tool subset) ────────
+    // Phase 16f Task 5: reset PlannerGuard.activeToolsets before each
+    // user-turn decide() so a skill_view from a prior turn doesn't keep
+    // forcing browser/web tools into unrelated next turns. The agent owns
+    // the per-turn lifecycle; the planner stays stateless across turns.
+    // Skills needing persistent toolset activation should re-fire
+    // skill_view per turn (the metadata is in the system prompt).
     let activeTools: ToolSchema[] = this.tools;
     if (this.plannerGuard) {
+      this.plannerGuard.resetActivation();
       const lastUser = lastUserMessage(initialMessages);
       const decision = await this.plannerGuard.decide(
         lastUser,

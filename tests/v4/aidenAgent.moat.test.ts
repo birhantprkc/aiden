@@ -132,6 +132,40 @@ describe('AidenAgent — PlannerGuard wiring', () => {
     const decision = onDecision.mock.calls[0][0];
     expect(decision.selectedTools).toContain('web_search');
   });
+
+  it('3a. agent resets PlannerGuard.activeToolsets per runConversation (Phase 16f Task 5)', async () => {
+    // Prove no carryover: a skill that activated the `web` toolset in
+    // a prior turn should not force web_search into a totally
+    // unrelated next turn ("remember concise answers"). Without the
+    // reset, activeToolsets persists across runConversation calls.
+    const guard = new PlannerGuard(registry, 'rule_based');
+    // Pre-condition: with web activated, guard would include web_search
+    // even on an unrelated message.
+    guard.activateToolsets(['web']);
+    expect(
+      (await guard.decide('hello', [])).selectedTools,
+    ).toContain('web_search');
+
+    // Now a fresh runConversation. Agent must clear activation before
+    // calling decide; new turn's selection should NOT include web tools
+    // because "remember concise answers" doesn't trigger web rules.
+    const provider = new MockProviderAdapter([
+      MockProviderAdapter.stop('saved'),
+    ]);
+    const agent = new AidenAgent({
+      provider,
+      toolExecutor: okExecutor,
+      tools: ALL_SCHEMAS,
+      plannerGuard: guard,
+    });
+    await agent.runConversation([
+      userMsg('remember that I prefer concise answers'),
+    ]);
+    const toolsSeen = provider.capturedInputs[0].tools.map((t) => t.name);
+    expect(toolsSeen).not.toContain('web_search');
+    // memory_add IS expected — "remember" matches the memory rule.
+    expect(toolsSeen).toContain('memory_add');
+  });
 });
 
 describe('AidenAgent — HonestyEnforcement wiring', () => {
