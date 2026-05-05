@@ -1,0 +1,13 @@
+{
+  "manifestVersion": 1,
+  "name": "aiden-plugin-chatgpt-plus",
+  "version": "1.0.0",
+  "author": "Shiva Deore",
+  "description": "Authenticate with your ChatGPT Plus subscription via the OpenAI device-code flow. Adds the 'chatgpt-plus' provider to Aiden's catalog so the agent can call GPT models through your existing ChatGPT subscription. Inference goes through chatgpt.com/backend-api/codex (the Codex Responses API), not api.openai.com.",
+  "kind": "bundled",
+  "tools": [],
+  "skills": [],
+  "providers": ["chatgpt-plus"],
+  "permissions": ["auth-providers", "network"],
+  "requiresEnv": []
+}
