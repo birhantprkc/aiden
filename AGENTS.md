@@ -24,13 +24,32 @@ Single-loop agent replaces planner+responder split. ONE LLM. Tools called inside
 - Phased delivery. Each phase leaves runnable build. Stop and ask if uncertain.
 - No fabrication. No silent workarounds. Stop and report.
 
-### Hermes-audit-first (standing rule, added Phase 16b.3)
-Before solving any UX, prompt, identity, error-handling, or onboarding problem
-in Aiden, the sub-agent MUST first audit how Hermes solves it
-(path: `C:\Users\shiva\references\hermes-agent`). Output a 1-page audit doc
-under `docs/sprint/` with file refs (`path:line`) and an explicit decision per
-topic — copy / adapt / diverge with reason. Only then write code. The audit
-itself is part of the deliverable; phases that skip it must be redone.
+### Hermes-first rule (non-negotiable)
+
+When anything in Aiden doesn't work as expected or needs new functionality —
+UX, prompts, identity, errors, onboarding, tool behavior, browser automation,
+memory, sessions, MCP, providers, fallback chains, streaming, security gates,
+plugins, OAuth, cron, gateway, voice, ACP, delegation, ANY functional surface —
+the agent MUST audit how Hermes solves it before writing code.
+
+Reference: `C:\Users\shiva\references\hermes-agent` (read-only, graphify-mapped).
+
+Process for every fix or new feature:
+1. Reproduce/scope the problem in Aiden.
+2. Find the equivalent surface in Hermes:
+   - `graphify query "<topic keywords>"`
+   - Read the relevant Hermes source
+3. Output a 1-page audit at `docs/sprint/hermes-<topic>-audit.md`:
+   - File refs (`path:line`) for each Hermes pattern
+   - 2–3 line summary of Hermes's approach
+   - Decision: copy / adapt / diverge with explicit reason
+4. Only then implement.
+
+If Hermes does NOT solve the problem, document that in the audit and proceed
+with original design.
+
+Never reinvent a wheel Hermes already shipped. Every divergence requires a
+written reason. Phases that skip the audit must be redone.
 
 ## Token-efficient working pattern (every phase)
 1. Read previous phase summary: `docs/sprint/phase-N-1-completed.md`
