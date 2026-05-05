@@ -28,6 +28,7 @@ import { debugPrompt } from './debugPrompt';
 import { streaming } from './streaming';
 import { plugins } from './plugins';
 import { auth } from './auth';
+import { license } from './license';
 
 export {
   help,
@@ -52,6 +53,7 @@ export {
   streaming,
   plugins,
   auth,
+  license,
 };
 
 /** All built-in system commands, in canonical order. */
@@ -73,6 +75,7 @@ export const allCommands: SlashCommand[] = [
   skills,
   plugins,
   auth,
+  license,
   reloadMcp,
   reasoning,
   verbose,
