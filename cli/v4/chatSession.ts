@@ -241,7 +241,12 @@ export class ChatSession implements ChatSessionLike {
             agent: this.opts.agent,
             pluginLoader: this.opts.pluginLoader,
             confirm: async (msg: string) => {
-              const r = await this.opts.promptApi?.readLine(msg);
+              // Phase 17.1: bug — was reading `this.opts.promptApi?` which is
+              // undefined when no override is passed; the chain silently
+              // resolved to undefined → returned false → "Grant cancelled"
+              // before the user could type anything. Use the resolved local
+              // promptApi (which falls back to readline-default) instead.
+              const r = await promptApi.readLine(msg);
               if (typeof r !== 'string') return false;
               return /^(y|yes)$/i.test(r.trim());
             },
