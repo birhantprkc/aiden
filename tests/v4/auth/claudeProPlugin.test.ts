@@ -59,10 +59,17 @@ describe('aiden-plugin-claude-pro: provider shape', () => {
     expect(claudePro.CLAUDE_PRO.authUrl).toBe(
       'https://claude.ai/oauth/authorize',
     );
-    expect(claudePro.CLAUDE_PRO.tokenUrl).toBe(
+    // Phase 18.1: distinct login vs refresh ordering per Hermes.
+    expect(claudePro.CLAUDE_PRO.loginTokenUrl).toBe(
+      'https://console.anthropic.com/v1/oauth/token',
+    );
+    expect(claudePro.CLAUDE_PRO.loginFallbackTokenUrls).toContain(
       'https://platform.claude.com/v1/oauth/token',
     );
-    expect(claudePro.CLAUDE_PRO.fallbackTokenUrls).toContain(
+    expect(claudePro.CLAUDE_PRO.refreshTokenUrl).toBe(
+      'https://platform.claude.com/v1/oauth/token',
+    );
+    expect(claudePro.CLAUDE_PRO.refreshFallbackTokenUrls).toContain(
       'https://console.anthropic.com/v1/oauth/token',
     );
     expect(claudePro.CLAUDE_PRO.scope).toContain('user:inference');

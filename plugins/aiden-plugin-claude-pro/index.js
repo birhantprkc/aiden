@@ -37,8 +37,16 @@ const CLAUDE_PRO = {
 
   clientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
   authUrl: 'https://claude.ai/oauth/authorize',
-  tokenUrl: 'https://platform.claude.com/v1/oauth/token',
-  fallbackTokenUrls: ['https://console.anthropic.com/v1/oauth/token'],
+  // Phase 18.1: distinct LOGIN vs REFRESH ordering, matching Hermes.
+  //   login   — anthropic_adapter.py:1016 hits console.anthropic.com only
+  //             (no fallback in Hermes; Aiden adds platform.claude.com as
+  //             defensive fallback).
+  //   refresh — anthropic_adapter.py:785-788 tries platform.claude.com
+  //             first, falls back to console.anthropic.com.
+  loginTokenUrl: 'https://console.anthropic.com/v1/oauth/token',
+  loginFallbackTokenUrls: ['https://platform.claude.com/v1/oauth/token'],
+  refreshTokenUrl: 'https://platform.claude.com/v1/oauth/token',
+  refreshFallbackTokenUrls: ['https://console.anthropic.com/v1/oauth/token'],
   redirectUri: 'https://console.anthropic.com/oauth/code/callback',
   scope: 'org:create_api_key user:profile user:inference',
   apiMode: 'anthropic_messages',
@@ -97,8 +105,8 @@ function buildProvider(authHelpers) {
         result = await authHelpers.runCopyPasteFlow(
           {
             authUrl: CLAUDE_PRO.authUrl,
-            tokenUrl: CLAUDE_PRO.tokenUrl,
-            fallbackTokenUrls: CLAUDE_PRO.fallbackTokenUrls,
+            tokenUrl: CLAUDE_PRO.loginTokenUrl,
+            fallbackTokenUrls: CLAUDE_PRO.loginFallbackTokenUrls,
             clientId: CLAUDE_PRO.clientId,
             redirectUri: CLAUDE_PRO.redirectUri,
             scope: CLAUDE_PRO.scope,
@@ -151,8 +159,8 @@ function buildProvider(authHelpers) {
 
     async refresh(refreshToken) {
       return authHelpers.refreshTokens(refreshToken, {
-        tokenUrl: CLAUDE_PRO.tokenUrl,
-        fallbackTokenUrls: CLAUDE_PRO.fallbackTokenUrls,
+        tokenUrl: CLAUDE_PRO.refreshTokenUrl,
+        fallbackTokenUrls: CLAUDE_PRO.refreshFallbackTokenUrls,
         clientId: CLAUDE_PRO.clientId,
         formEncoded: true,
         extraHeaders: userAgentHeader(),
