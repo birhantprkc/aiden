@@ -250,6 +250,8 @@ export class ChatSession implements ChatSessionLike {
               if (typeof r !== 'string') return false;
               return /^(y|yes)$/i.test(r.trim());
             },
+            // Phase 18: raw text prompt for /auth login OAuth code paste.
+            prompt: (msg: string) => promptApi.readLine(msg),
           });
           if (result.exit) break;
           if (result.clearHistory) this.history = [];

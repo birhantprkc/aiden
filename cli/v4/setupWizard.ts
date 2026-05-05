@@ -35,13 +35,10 @@ import {
   type OAuthUserAgent,
   type OAuthProvider,
 } from '../../core/v4/auth/providerAuth';
-import { resolveBundledPluginsDir } from '../../core/v4/plugins/pluginBundledRestore';
 import {
-  runCopyPasteFlow,
-  runDeviceCodeFlow,
-  refreshTokens,
-  generatePkce,
-} from '../../core/v4/auth/oauthFlow';
+  loadOAuthProvider,
+  openOAuthBrowserUrl,
+} from './auth/loadProvider';
 
 export interface ProviderOption {
   id: string;
@@ -243,15 +240,8 @@ async function defaultPrompts(): Promise<PromptIO> {
 }
 
 // ─── Phase 18: OAuth helper plumbing for the wizard ─────────────────────
-// Used when the user picks claude-pro / chatgpt-plus (kind: 'pro'). Lazy-
-// requires the plugin's exported `buildProvider` so the wizard module
-// stays free of plugin imports at load time. This is the SAME flow runner
-// /auth login (Task 5) consumes — single entry point.
-const PRO_PLUGIN_DIRS: Record<string, string> = {
-  'claude-pro': 'aiden-plugin-claude-pro',
-  'chatgpt-plus': 'aiden-plugin-chatgpt-plus',
-};
-
+// loadOAuthProvider + openOAuthBrowserUrl live in cli/v4/auth/loadProvider.ts
+// so /auth login (Task 5) and the wizard share one implementation.
 const PRO_EXPLAINERS: Record<string, string> = {
   'claude-pro':
     'This connects your Claude Pro / Max subscription. No API charges, no API key needed.',
@@ -259,42 +249,11 @@ const PRO_EXPLAINERS: Record<string, string> = {
     'This connects your ChatGPT Plus subscription. No API charges, no API key needed.',
 };
 
-/** Helpers bundle plugins call through to (matches PluginContext.auth). */
-const PLUGIN_AUTH_HELPERS = {
-  runCopyPasteFlow,
-  runDeviceCodeFlow,
-  refreshTokens,
-  generatePkce,
-};
-
 /** Build an OAuthUserAgent from the wizard's PromptIO + Display. */
 function wizardUserAgent(prompts: PromptIO, display: Display): OAuthUserAgent {
   return {
     log: (line: string) => display.write(line + '\n'),
-    async openBrowser(url: string) {
-      // Intentionally minimal — same approach as Hermes's
-      // anthropic_adapter.py:1067 (best-effort webbrowser.open). On Windows
-      // we use child_process.spawn('cmd.exe', ['/c', 'start', '', url]) to
-      // avoid the same shell-quoting issue Phase 16f fixed for open_url.
-      const platform = process.platform;
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const { spawn } = require('node:child_process');
-        if (platform === 'win32') {
-          spawn('cmd.exe', ['/c', 'start', '""', url], {
-            detached: true,
-            stdio: 'ignore',
-          }).unref();
-        } else if (platform === 'darwin') {
-          spawn('open', [url], { detached: true, stdio: 'ignore' }).unref();
-        } else {
-          spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
-        }
-      } catch {
-        // No browser → user copies the URL manually. The flow logs it
-        // already so this isn't fatal.
-      }
-    },
+    openBrowser: openOAuthBrowserUrl,
     async prompt(question: string) {
       return prompts.input(question);
     },
@@ -302,33 +261,6 @@ function wizardUserAgent(prompts: PromptIO, display: Display): OAuthUserAgent {
       return new Promise<void>((r) => setTimeout(r, ms));
     },
   };
-}
-
-/**
- * Lazy-require the plugin's exported buildProvider for an OAuth provider id.
- * Throws when the plugin isn't shipped (developer error — bundled plugins
- * should always be present).
- */
-async function loadOAuthProvider(providerId: string): Promise<OAuthProvider> {
-  const dirName = PRO_PLUGIN_DIRS[providerId];
-  if (!dirName) {
-    throw new Error(`Unknown OAuth provider: ${providerId}`);
-  }
-  const bundledDir = await resolveBundledPluginsDir();
-  if (!bundledDir) {
-    throw new Error(
-      `Bundled plugins dir not found — Aiden installation may be corrupted.`,
-    );
-  }
-  const entry = path.join(bundledDir, dirName, 'index.js');
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const mod = require(entry);
-  if (typeof mod.buildProvider !== 'function') {
-    throw new Error(
-      `Plugin ${dirName} does not export buildProvider() — Phase 18 contract violated`,
-    );
-  }
-  return mod.buildProvider(PLUGIN_AUTH_HELPERS);
 }
 
 /** Determine whether the wizard should auto-fire (config.yaml absent). */

@@ -90,6 +90,14 @@ export interface SlashCommandContext {
    * yes/no prompt.
    */
   confirm?: (message: string) => Promise<boolean>;
+  /**
+   * Phase 18: raw text input hook used by /auth login during the OAuth
+   * copy-paste flow (the user pastes the authorization code from the
+   * provider's callback page). Returns the raw line; consumer trims as
+   * needed. Tests inject a mock; the chat REPL plumbs the same readline
+   * the prompt API uses for free-form input.
+   */
+  prompt?: (question: string) => Promise<string>;
 }
 
 /** Result produced by a command handler. */

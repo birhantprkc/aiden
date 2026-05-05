@@ -27,6 +27,7 @@ import { identity } from './identity';
 import { debugPrompt } from './debugPrompt';
 import { streaming } from './streaming';
 import { plugins } from './plugins';
+import { auth } from './auth';
 
 export {
   help,
@@ -50,6 +51,7 @@ export {
   debugPrompt,
   streaming,
   plugins,
+  auth,
 };
 
 /** All built-in system commands, in canonical order. */
@@ -70,6 +72,7 @@ export const allCommands: SlashCommand[] = [
   skin,
   skills,
   plugins,
+  auth,
   reloadMcp,
   reasoning,
   verbose,
