@@ -190,7 +190,12 @@ export async function runCopyPasteFlow(
   const [code, pastedState] = pasted.split('#', 2);
   const state = pastedState ?? '';
 
-  const body = urlencode({
+  // Phase 18.1: per Hermes verbatim (anthropic_adapter.py:1092-1109), the
+  // LOGIN token exchange is JSON-only — the Phase 18 audit incorrectly
+  // recorded "form-encoded works; JSON also accepted." Refresh stays
+  // form-encoded (refreshTokens helper below; matches Hermes refresh path
+  // anthropic_adapter.py:760-821).
+  const body = JSON.stringify({
     grant_type: 'authorization_code',
     client_id: cfg.clientId,
     code,
@@ -205,7 +210,7 @@ export async function runCopyPasteFlow(
     const { status, text } = await postForTokens(
       url,
       body,
-      'application/x-www-form-urlencoded',
+      'application/json',
       cfg.extraHeaders ?? {},
       fetchImpl,
       cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -269,12 +274,21 @@ export async function runDeviceCodeFlow(
   const minPollSec = cfg.minPollSeconds ?? 3;
   const timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
+  // Phase 18.1: Accept: application/json on every device-code request,
+  // matching Hermes (hermes_cli/auth.py:2264 `httpx.Client(headers={"Accept":
+  // "application/json"})`). Most servers default to JSON anyway, but the
+  // explicit header is the parity gap we close.
+  const dcHeaders = {
+    Accept: 'application/json',
+    ...(cfg.extraHeaders ?? {}),
+  };
+
   // Step 1: usercode
   const codeReq = await postForTokens(
     userCodeEndpoint,
     JSON.stringify({ client_id: cfg.clientId }),
     'application/json',
-    cfg.extraHeaders ?? {},
+    dcHeaders,
     fetchImpl,
     timeoutMs,
   );
@@ -311,7 +325,7 @@ export async function runDeviceCodeFlow(
       pollEndpoint,
       JSON.stringify({ device_auth_id: deviceAuthId, user_code: userCode }),
       'application/json',
-      cfg.extraHeaders ?? {},
+      dcHeaders,
       fetchImpl,
       timeoutMs,
     );
@@ -349,7 +363,7 @@ export async function runDeviceCodeFlow(
       code_verifier: codeVerifier,
     }),
     'application/x-www-form-urlencoded',
-    cfg.extraHeaders ?? {},
+    dcHeaders,
     fetchImpl,
     timeoutMs,
   );

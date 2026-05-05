@@ -93,11 +93,13 @@ describe('runCopyPasteFlow', () => {
     expect(r.refreshToken).toBe('R');
     expect(r.expiresInSeconds).toBe(3600);
     expect(captures[0].url).toBe(cfg.tokenUrl);
-    expect(captures[0].body).toContain('grant_type=authorization_code');
-    expect(captures[0].body).toContain('code=AUTHCODE');
-    expect(captures[0].body).toContain('state=STATE_VAL');
-    expect(captures[0].body).toContain('client_id=TEST_CLIENT');
-    expect(captures[0].body).toMatch(/code_verifier=[A-Za-z0-9_-]+/);
+    // Phase 18.1: login body is JSON (matches Hermes anthropic_adapter.py:1092).
+    const parsed = JSON.parse(captures[0].body);
+    expect(parsed.grant_type).toBe('authorization_code');
+    expect(parsed.code).toBe('AUTHCODE');
+    expect(parsed.state).toBe('STATE_VAL');
+    expect(parsed.client_id).toBe('TEST_CLIENT');
+    expect(parsed.code_verifier).toMatch(/^[A-Za-z0-9_-]+$/);
   });
 
   it('9. empty paste throws cancelled error', async () => {
