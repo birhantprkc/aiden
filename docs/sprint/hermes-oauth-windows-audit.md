@@ -100,6 +100,12 @@ Aiden v4 spec asks for **DPAPI on Windows** for v4.0. Net-new for Aiden vs. Herm
 
 Aiden v4 already has `providers/v4/credentialResolver.ts` (Phase 4) that owns `auth.json` for `anthropic_messages` and `codex_responses` apiModes. Phase 18's OAuth core builds **alongside** this, not replacing it. The new `tokenStore.ts` lives at `core/v4/auth/tokenStore.ts` and writes per-provider files; `credentialResolver.ts` continues to handle the existing apiMode-keyed flow.
 
+**Split of responsibility (locked):**
+- **API keys (long-lived secrets)** → `providers/v4/credentialResolver.ts`. Existing `auth.json` schema, no refresh, env-var or one-shot user-paste flow.
+- **OAuth bearer tokens (rotating, refresh-capable)** → `core/v4/auth/tokenStore.ts`. Per-provider files, machine-bound encryption, refresh hook, expiry tracking.
+
+The two stores never touch the same record. Phase 4's resolver doesn't grow OAuth refresh logic; Phase 18's store doesn't grow plain-API-key handling.
+
 **Decision: Adapt — implement machine-bound encryption with honest doc divergence vs spec's "real DPAPI".** Real DPAPI in v4.1.
 
 ## Callback server (Aiden DEFERS — not applicable)
