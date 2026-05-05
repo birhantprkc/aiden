@@ -168,24 +168,27 @@ export function tryRecoverLegacyToolCall(
 export function parseLegacyFunctionSyntax(
   text: string,
 ): ProviderCallOutput | null {
-  // Llama-3.3 emits two distinct legacy formats when it confuses itself:
-  //   (A) `<function=NAME(JSON)>`            — paren-delimited args
-  //   (B) `<function=NAME JSON</function>`   — XML-tag-delimited args
-  // We handle both. (A) walks balanced parens; (B) walks balanced braces.
-  // Phase 16c.1: variant (B) was the dominant cause of the moat.repl
-  // integration flake — Groq returns 400 `tool_use_failed` and the
-  // adapter has to recover client-side.
-  const reHead = /<function=([A-Za-z0-9_.\-]+)\s*([({])/g;
+  // Llama-3.3 emits three distinct legacy formats when it confuses itself:
+  //   (A) `<function=NAME(JSON)>`              — paren-delimited args
+  //   (B) `<function=NAME JSON</function>`     — XML-tag, brace-delimited
+  //   (C) `<function=NAME [{JSON}]</function>` — XML-tag, single-element
+  //                                              array wrapping the obj
+  // (A) walks balanced parens; (B)/(C) walk balanced braces or brackets.
+  // Phase 16e: variant (C) appeared in 16d smoke run 2 (session_search call)
+  // — same `tool_use_failed` 400 path as (B) but the model wrapped the
+  // single argument object in a JSON array. Unwrap to the first element.
+  const reHead = /<function=([A-Za-z0-9_.\-]+)\s*([({[])/g;
   const calls: ToolCallRequest[] = [];
   let match: RegExpExecArray | null;
   let counter = 0;
   while ((match = reHead.exec(text)) !== null) {
     const name = match[1];
     const opener = match[2];
-    const closer = opener === '(' ? ')' : '}';
-    // For (B) the regex's `{` is the opening brace of the JSON object —
-    // we want to keep it inside argsBody so JSON.parse sees the full
-    // object. For (A) the `(` is delimiter only and is consumed.
+    const closer =
+      opener === '(' ? ')' : opener === '{' ? '}' : ']';
+    // For (B)/(C) the regex's `{` or `[` is the opening of the JSON
+    // structure — we want to keep it inside argsBody so JSON.parse sees
+    // the full value. For (A) the `(` is delimiter only and is consumed.
     let i = opener === '('
       ? match.index + match[0].length
       : match.index + match[0].length - 1;
@@ -193,9 +196,8 @@ export function parseLegacyFunctionSyntax(
     const start = i;
     let inString = false;
     let escape = false;
-    if (opener === '{') {
-      // We're starting at the `{`; consume it and bump depth back to 1
-      // for the brace-walker below.
+    if (opener === '{' || opener === '[') {
+      // Consume the opener; bump depth back to 1 for the walker below.
       i += 1;
     }
     while (i < text.length && depth > 0) {
@@ -216,8 +218,8 @@ export function parseLegacyFunctionSyntax(
       i += 1;
     }
     if (depth !== 0) continue;
-    // For (A) drop the trailing `)`; for (B) keep the trailing `}` since
-    // it's part of the JSON object.
+    // (A) drop the trailing `)`. (B)/(C) keep the trailing closer since
+    // it's part of the JSON value being parsed.
     const argsBody = opener === '('
       ? text.slice(start, i - 1)
       : text.slice(start, i);
@@ -227,6 +229,15 @@ export function parseLegacyFunctionSyntax(
         const parsed = JSON.parse(argsBody);
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
           args = parsed as Record<string, unknown>;
+        } else if (
+          // Variant (C): unwrap single-element array of object.
+          Array.isArray(parsed) &&
+          parsed.length === 1 &&
+          parsed[0] &&
+          typeof parsed[0] === 'object' &&
+          !Array.isArray(parsed[0])
+        ) {
+          args = parsed[0] as Record<string, unknown>;
         }
       } catch {
         // Leave args as {} — the tool dispatcher will error gracefully and

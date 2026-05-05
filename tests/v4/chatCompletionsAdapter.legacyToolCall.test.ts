@@ -109,6 +109,41 @@ describe('parseLegacyFunctionSyntax', () => {
       options: { recursive: true, depth: 2 },
     });
   });
+
+  it('parses array variant <function=name [{...}]</function> (Phase 16e)', () => {
+    // Llama-3.3 occasionally wraps the args in a single-element JSON array.
+    // Triggered in the 16d smoke run 2 with session_search.
+    const text =
+      '<function=session_search [{"query": "user name", "limit": "10"}]</function>';
+    const out = parseLegacyFunctionSyntax(text);
+    expect(out).not.toBeNull();
+    expect(out!.toolCalls).toHaveLength(1);
+    expect(out!.toolCalls[0].name).toBe('session_search');
+    expect(out!.toolCalls[0].arguments).toEqual({
+      query: 'user name',
+      limit: '10',
+    });
+  });
+
+  it('array variant: handles nested objects inside the wrapped element', () => {
+    const text =
+      '<function=fetch [{"url": "https://x.com", "headers": {"Accept": "json"}}]</function>';
+    const out = parseLegacyFunctionSyntax(text);
+    expect(out!.toolCalls[0].arguments).toEqual({
+      url: 'https://x.com',
+      headers: { Accept: 'json' },
+    });
+  });
+
+  it('array variant: multi-element array falls back to {} (we only unwrap singletons)', () => {
+    // When the model emits multiple args in an array, semantics are
+    // ambiguous — drop to empty args and let the tool dispatcher error
+    // with a clear message. Beats guessing.
+    const text =
+      '<function=multi [{"a": 1}, {"b": 2}]</function>';
+    const out = parseLegacyFunctionSyntax(text);
+    expect(out!.toolCalls[0].arguments).toEqual({});
+  });
 });
 
 describe('tryRecoverLegacyToolCall', () => {
