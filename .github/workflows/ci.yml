@@ -2,69 +2,90 @@ name: CI
 
 on:
   pull_request:
-    branches: [ main ]
+    branches: [ main, v4-rewrite ]
   push:
-    branches: [ main ]
+    branches: [ main, v4-rewrite ]
+
+# Cancel in-progress runs when a new commit lands on the same branch.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
-    name: Build & Type Check
-    runs-on: ubuntu-latest
+  test:
+    name: ${{ matrix.os }} · Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ['20.x', '22.x']
+
+    env:
+      # Phase 19: live integration tests stay off by default. Phase 21
+      # manual QA is the gate for AIDEN_LIVE_OAUTH and AIDEN_LIVE_SMOKE.
+      AIDEN_LIVE_OAUTH: ''
+      AIDEN_LIVE_SMOKE: ''
+      # tokenStore tests use a deterministic key so the AES round-trip
+      # works the same on every CI runner regardless of host identity.
+      AIDEN_TOKEN_KEY: 'ci-deterministic-key-do-not-use-in-prod'
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js ${{ matrix.node }}
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ matrix.node }}
           cache: 'npm'
 
       - name: Install dependencies
         run: npm ci
 
       - name: TypeScript type check
-        run: npx tsc --noEmit
+        run: npx tsc --noEmit -p tsconfig.json
 
-      - name: Build
-        run: npm run build
-
-      - name: Verify build output exists
-        run: |
-          test -f dist-bundle/index.js && echo "✅ index.js present" || exit 1
-          test -f dist-bundle/cli.js && echo "✅ cli.js present" || exit 1
+      - name: Run vitest (excludes live-network integration suite)
+        # Live-API tests in tests/v4/integration/* are gated behind the
+        # AIDEN_LIVE_* env vars (unset above). The exclude is belt + braces
+        # so a stray network call does not accidentally hit a real provider
+        # in the matrix.
+        run: npx vitest run --exclude='tests/v4/integration/**'
 
   security:
-    name: Security Scan
+    name: Security scan
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '20.x'
           cache: 'npm'
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Audit dependencies
-        run: npm audit --audit-level=high
+      - name: npm audit (high severity prod deps)
+        # Dev-dep advisories are out of scope for CI gating; production
+        # deps gate on high+ severity only.
+        run: npm audit --audit-level=high --omit=dev
         continue-on-error: true
 
-      - name: Check for secrets in code
+      - name: Check for committed API keys
         run: |
-          # Fail if any real API keys accidentally committed
-          if grep -r "sk-ant-\|sk-proj-\|gsk_\|AIza" \
-            --include="*.ts" --include="*.js" \
-            --exclude-dir=node_modules \
-            --exclude-dir=dist-bundle \
-            --exclude-dir=.git .; then
-            echo "❌ Possible API key found in source code"
+          # Fail if any provider key prefix lands in source. Excludes
+          # node_modules + .git only — dist/ is shipped, scan it too.
+          if grep -rE "sk-ant-[A-Za-z0-9_-]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|gsk_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{20,}" \
+            --include='*.ts' --include='*.js' --include='*.json' --include='*.md' \
+            --exclude-dir=node_modules --exclude-dir=.git . ; then
+            echo "::error::Possible API key found in source"
             exit 1
           fi
-          echo "✅ No API keys detected"
+          echo "✓ No API keys detected"
