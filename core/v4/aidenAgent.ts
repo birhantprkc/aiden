@@ -30,6 +30,7 @@ import {
   ToolCallResult,
   ProviderAdapter,
   ProviderCallOutput,
+  StreamEvent,
 } from '../../providers/v4/types';
 import type {
   PlannerGuard,
@@ -155,6 +156,29 @@ export interface AidenAgentResult {
   auxiliaryUsage: Record<string, { inputTokens: number; outputTokens: number; calls: number }>;
 }
 
+/**
+ * Phase 16c: per-call options for `runConversation`. All fields are
+ * optional — callers that don't pass anything get the existing
+ * non-streaming behaviour. When `stream:true` and the active provider
+ * adapter implements `callStream`, deltas flow through `onDelta` /
+ * `onFirstDelta` / `onToolCallStart` as the SSE arrives. If the adapter
+ * lacks `callStream` we silently fall back to the non-streaming path —
+ * tool-call interleaving and trace structure remain identical.
+ */
+export interface RunConversationOptions {
+  stream?: boolean;
+  /** Fired once per delta event from the adapter. */
+  onDelta?: (text: string) => void;
+  /** Fired exactly once on the first delta of any turn. */
+  onFirstDelta?: () => void;
+  /**
+   * Fired when the model first surfaces a tool call's name during a
+   * streaming turn. The `arguments` object will be empty — use the
+   * post-loop `toolCallTrace` for the parsed values.
+   */
+  onToolCallStart?: (call: ToolCallRequest) => void;
+}
+
 const DEFAULT_MAX_TURNS = 90;
 const CAUTION_FRACTION = 0.7;
 const WARNING_FRACTION = 0.9;
@@ -263,7 +287,10 @@ export class AidenAgent {
     return this.cachedSystemPrompt;
   }
 
-  async runConversation(initialMessages: Message[]): Promise<AidenAgentResult> {
+  async runConversation(
+    initialMessages: Message[],
+    runOpts: RunConversationOptions = {},
+  ): Promise<AidenAgentResult> {
     // ── Phase 13: Build (or reuse cached) system prompt at session start ──
     let messages: Message[] = [...initialMessages];
     if (this.promptBuilder && this.promptBuilderOptions) {
@@ -356,10 +383,20 @@ export class AidenAgent {
 
       let output: ProviderCallOutput;
       try {
-        output = await this.provider.call({
-          messages: dispatchMessages,
-          tools: activeTools,
-        });
+        const wantStream =
+          runOpts.stream === true && typeof this.provider.callStream === 'function';
+        if (wantStream) {
+          output = await this.runStreamingTurn(
+            dispatchMessages,
+            activeTools,
+            runOpts,
+          );
+        } else {
+          output = await this.provider.call({
+            messages: dispatchMessages,
+            tools: activeTools,
+          });
+        }
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         if (!fallbackActivated && this.fallback) {
@@ -492,6 +529,66 @@ export class AidenAgent {
       toolCallTrace,
       aborted: true,
     });
+  }
+
+  /**
+   * Phase 16c: drive the active provider's `callStream` and surface
+   * deltas through `runOpts` callbacks. Returns the assembled
+   * `ProviderCallOutput` from the `done` event so the rest of
+   * `runConversation` is unchanged.
+   *
+   * Mirrors Hermes's "buffer text + suppress on tool_call" semantics
+   * (run_agent.py:6849-6873). Display layer is responsible for
+   * rendering deltas in real time and switching modes when a
+   * `tool_call` event fires; this method just relays.
+   */
+  private async runStreamingTurn(
+    messages: Message[],
+    tools: ToolSchema[],
+    runOpts: RunConversationOptions,
+  ): Promise<ProviderCallOutput> {
+    const stream = this.provider.callStream!({ messages, tools, stream: true });
+    let firstDeltaFired = false;
+    let finalOutput: ProviderCallOutput | null = null;
+    for await (const evt of stream as AsyncIterable<StreamEvent>) {
+      if (evt.type === 'delta') {
+        if (!firstDeltaFired) {
+          firstDeltaFired = true;
+          try {
+            runOpts.onFirstDelta?.();
+          } catch {
+            // Display callbacks must never break the loop.
+          }
+        }
+        try {
+          runOpts.onDelta?.(evt.content);
+        } catch {
+          // Same as above — swallow callback errors.
+        }
+      } else if (evt.type === 'tool_call') {
+        if (!firstDeltaFired) {
+          firstDeltaFired = true;
+          try {
+            runOpts.onFirstDelta?.();
+          } catch {
+            // ignore
+          }
+        }
+        try {
+          runOpts.onToolCallStart?.(evt.toolCall);
+        } catch {
+          // ignore
+        }
+      } else if (evt.type === 'done') {
+        finalOutput = evt.output;
+      }
+    }
+    if (!finalOutput) {
+      throw new Error(
+        `Provider ${this.provider.apiMode} stream ended without a 'done' event`,
+      );
+    }
+    return finalOutput;
   }
 
   /**
