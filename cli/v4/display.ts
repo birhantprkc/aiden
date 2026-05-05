@@ -218,6 +218,63 @@ export class Display {
   printError(message: string, suggestion?: string): void {
     this.out.write(this.error(message, suggestion));
   }
+
+  // ── Phase 16c: streaming surface ─────────────────────────────────────
+  // Tracks whether a streaming "Aiden" header has been written for the
+  // current turn. `streamPartial` writes the header on the first call,
+  // then appends every subsequent delta directly. `streamComplete`
+  // closes the line so the next non-stream `agentTurn`/`info` call
+  // starts on its own line.
+
+  private streamHeaderShown = false;
+  private streamLastEndedNewline = false;
+
+  /**
+   * Append a streamed text fragment. Writes a styled "Aiden" header on
+   * the first call of a turn, then writes raw text directly via the
+   * underlying `write` so token boundaries remain visible. Markdown
+   * rendering is deferred — applying `marked` per-token would render
+   * partial code fences as broken HTML; matches Hermes's pattern of
+   * showing raw streamed text and reformatting on completion only when
+   * the full body is in hand.
+   */
+  streamPartial(text: string): void {
+    if (!text) return;
+    if (!this.streamHeaderShown) {
+      const head = this.skin.applyColors('Aiden', 'agent');
+      this.out.write(`${head}\n`);
+      this.streamHeaderShown = true;
+    }
+    this.out.write(text);
+    this.streamLastEndedNewline = text.endsWith('\n');
+  }
+
+  /**
+   * Mark the end of a streaming turn. Adds a trailing newline if the
+   * stream didn't end with one so the next CLI line doesn't visually
+   * butt up against the model's last token. Resets the per-turn state
+   * so the next `streamPartial` re-emits the header.
+   */
+  streamComplete(): void {
+    if (!this.streamHeaderShown) return;
+    if (!this.streamLastEndedNewline) this.out.write('\n');
+    this.streamHeaderShown = false;
+    this.streamLastEndedNewline = false;
+  }
+
+  /**
+   * Inline tool indicator. Printed between deltas when a tool call
+   * surfaces during streaming so the user sees activity instead of a
+   * stalled cursor. Always lands on its own line — adds a leading
+   * newline if the prior delta ran past column N without one.
+   */
+  streamToolIndicator(name: string): void {
+    const sk = this.skin;
+    const arrow = sk.getActive().glyphs?.arrow ?? '>';
+    const prefix = this.streamLastEndedNewline ? '' : '\n';
+    this.out.write(`${prefix}${sk.applyColors(`${arrow} ${name}…`, 'tool')}\n`);
+    this.streamLastEndedNewline = true;
+  }
 }
 
 let _global: Display | null = null;

@@ -28,7 +28,8 @@ describe('ConfigManager', () => {
     const cfg = await mgr.load();
     expect(cfg.model.provider).toBe(DEFAULT_CONFIG.model.provider);
     expect(cfg.agent.max_turns).toBe(DEFAULT_CONFIG.agent.max_turns);
-    expect(cfg.display.streaming).toBe(true);
+    // Phase 16c: streaming defaults to OFF for v4.0 launch (opt-in via /streaming on).
+    expect(cfg.display.streaming).toBe(false);
     expect(cfg.memory.provider).toBe('default');
   });
 

@@ -72,7 +72,10 @@ export const DEFAULT_CONFIG: AidenConfig = {
   },
   display: {
     skin: 'default',
-    streaming: true,
+    // Phase 16c: opt-in for v4.0 launch. /streaming on flips this; the
+    // chat REPL reads `display.streaming` per turn so the toggle takes
+    // effect immediately without a session restart.
+    streaming: false,
   },
   memory: {
     provider: 'default',

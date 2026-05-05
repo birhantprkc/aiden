@@ -266,16 +266,53 @@ export class ChatSession implements ChatSessionLike {
       ? [...this.history, ...newHistory, userMsg]
       : [...this.history, userMsg];
 
+    // Phase 16c: streaming gated on display.streaming config (default off).
+    // Defensive: tests sometimes pass partial config stubs without the
+    // ConfigManager API; treat that as "streaming disabled".
+    const streamingEnabled =
+      typeof this.opts.config?.getValue === 'function'
+        ? this.opts.config.getValue<boolean>('display.streaming', false) === true
+        : false;
+
     const spinner = this.opts.display.startSpinner('thinking…');
-    try {
-      const result = await this.opts.agent.runConversation(baseHistory);
+    let spinnerStopped = false;
+    let streamingActive = false;
+    const stopSpinnerOnce = (): void => {
+      if (spinnerStopped) return;
+      spinnerStopped = true;
       spinner.stop();
+    };
+
+    try {
+      const result = await this.opts.agent.runConversation(baseHistory, {
+        stream: streamingEnabled,
+        onFirstDelta: streamingEnabled
+          ? () => {
+              stopSpinnerOnce();
+              streamingActive = true;
+            }
+          : undefined,
+        onDelta: streamingEnabled
+          ? (text: string) => {
+              this.opts.display.streamPartial(text);
+            }
+          : undefined,
+        onToolCallStart: streamingEnabled
+          ? (call) => {
+              this.opts.display.streamToolIndicator(call.name);
+            }
+          : undefined,
+      });
+      stopSpinnerOnce();
+      if (streamingActive) this.opts.display.streamComplete();
 
       this.history = result.messages;
       this.totalUsage.inputTokens += result.totalUsage.inputTokens;
       this.totalUsage.outputTokens += result.totalUsage.outputTokens;
 
-      if (result.finalContent) {
+      // When streaming was active and emitted the final content already,
+      // skip the markdown re-render — we'd otherwise duplicate text.
+      if (result.finalContent && !streamingActive) {
         this.opts.display.write(this.opts.display.agentTurn(result.finalContent));
       }
 
@@ -291,7 +328,8 @@ export class ChatSession implements ChatSessionLike {
 
       this.renderStatusLine();
     } catch (err) {
-      spinner.stop();
+      stopSpinnerOnce();
+      if (streamingActive) this.opts.display.streamComplete();
       const msg = (err as Error)?.message ?? String(err);
       this.opts.display.printError(
         msg,
