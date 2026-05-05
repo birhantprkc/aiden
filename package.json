@@ -1,6 +1,10 @@
 {
   "name": "aiden-runtime",
-  "version": "3.19.9",
+  "version": "4.0.0-beta.1",
+  "publishConfig": {
+    "access": "public",
+    "tag": "beta"
+  },
   "description": "Autonomous AI Operating System — Local, Private, Free. Runs on your machine with Ollama.",
   "author": "Taracod <hello@taracod.com>",
   "license": "AGPL-3.0-only",
@@ -53,7 +57,10 @@
     "build:cli": "esbuild cli/aiden.ts --bundle --platform=node --target=node18 --outfile=dist-bundle/cli.js --external:electron --external:cpu-features --external:ssh2 --external:bcrypt --external:playwright --external:playwright-core",
     "prebuild:api": "node scripts/inject-version.js",
     "build:api": "esbuild api/entry.ts --bundle --platform=node --target=node18 --outfile=dist-bundle/index.js --external:electron --external:cpu-features --external:ssh2 --external:bcrypt --external:playwright --external:playwright-core",
-    "prepublishOnly": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build",
+    "typecheck": "tsc --noEmit",
+    "publish:beta": "npm publish --tag beta",
+    "publish:stable": "npm publish --tag latest",
     "postinstall": "node scripts/postinstall.js",
     "start": "node dist-bundle/index.js serve",
     "electron": "electron electron/main.js",
