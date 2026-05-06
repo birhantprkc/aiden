@@ -1,6 +1,6 @@
 ---
 name: defender-quickscan
-description: Windows Defender: scans, threat history, signatures (PowerShell)
+description: "Windows Defender: scans, threat history, signatures (PowerShell)"
 category: windows
 version: 1.0.0
 platform: windows

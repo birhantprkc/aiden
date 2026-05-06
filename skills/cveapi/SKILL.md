@@ -1,6 +1,6 @@
 ---
 name: cveapi
-description: CVE lookup via MITRE + NVD: severity, CVSS, affected products, refs
+description: "CVE lookup via MITRE + NVD: severity, CVSS, affected products, refs"
 category: security
 version: 1.0.0
 license: Apache-2.0

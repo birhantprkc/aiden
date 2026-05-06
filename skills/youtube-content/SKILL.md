@@ -1,6 +1,6 @@
 ---
 name: youtube-content
-description: YouTube: transcripts, audio/video downloads (yt-dlp, transcript-api)
+description: "YouTube: transcripts, audio/video downloads (yt-dlp, transcript-api)"
 category: research
 version: 1.0.0
 origin: aiden

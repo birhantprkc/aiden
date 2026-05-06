@@ -1,6 +1,6 @@
 ---
 name: censys
-description: Censys lookups: hosts, certificates, services on the public internet
+description: "Censys lookups: hosts, certificates, services on the public internet"
 category: security
 version: 1.0.0
 license: Apache-2.0

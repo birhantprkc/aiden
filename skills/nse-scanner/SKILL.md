@@ -1,6 +1,6 @@
 ---
 name: nse-scanner
-description: NSE scans: top gainers/losers, volume surges, 52w highs/lows
+description: "NSE scans: top gainers/losers, volume surges, 52w highs/lows"
 category: india
 version: 1.0.0
 tags: nse, stock, india, scanner, gainers, losers, equity, market, screener

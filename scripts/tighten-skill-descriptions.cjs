@@ -156,7 +156,15 @@ function patchSkillMd(filePath, newDescription) {
   if (descIdx === -1) {
     throw new Error(`no description: line in ${filePath} frontmatter`);
   }
-  const next = `description: ${newDescription}`;
+  // YAML treats an unquoted colon in a scalar as a nested mapping, so
+  // any description containing ':' must be wrapped in double quotes —
+  // otherwise SkillLoader skips the file with "bad indentation of a
+  // mapping entry" (Phase 22 Group D Bug C).
+  const needsQuote = newDescription.includes(':');
+  const valueOut = needsQuote
+    ? '"' + newDescription.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
+    : newDescription;
+  const next = `description: ${valueOut}`;
   if (lines[descIdx] === next) return false;
   lines[descIdx] = next;
   // Preserve trailing newline if original had one.

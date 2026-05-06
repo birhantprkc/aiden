@@ -1,6 +1,6 @@
 ---
 name: virustotal
-description: VirusTotal: check file/URL/domain/IP against 70+ AV engines
+description: "VirusTotal: check file/URL/domain/IP against 70+ AV engines"
 category: security
 version: 1.0.0
 license: Apache-2.0

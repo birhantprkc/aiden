@@ -1,6 +1,6 @@
 ---
 name: taskscheduler
-description: Windows Task Scheduler: create, list, enable, disable, delete (PS)
+description: "Windows Task Scheduler: create, list, enable, disable, delete (PS)"
 category: windows
 version: 1.0.0
 platform: windows

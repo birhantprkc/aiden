@@ -1,6 +1,6 @@
 ---
 name: nse-corporate-actions
-description: NSE corp actions: dividends, bonus, splits, rights, buybacks
+description: "NSE corp actions: dividends, bonus, splits, rights, buybacks"
 category: india
 version: 1.0.0
 tags: nse, corporate-actions, dividend, bonus, split, rights, buyback, india, equity

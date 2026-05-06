@@ -1,6 +1,6 @@
 ---
 name: github-repo-management
-description: GitHub repos: create, clone, fork, archive (gh CLI + git)
+description: "GitHub repos: create, clone, fork, archive (gh CLI + git)"
 category: developer
 version: 1.0.0
 origin: aiden

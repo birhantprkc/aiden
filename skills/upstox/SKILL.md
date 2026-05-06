@@ -1,6 +1,6 @@
 ---
 name: upstox
-description: Upstox API v2: portfolio, market data, orders, P&L (Indian F&O)
+description: "Upstox API v2: portfolio, market data, orders, P&L (Indian F&O)"
 category: india
 version: 1.0.0
 tags: upstox, broker, india, trading, orders, portfolio, equity, fno, market

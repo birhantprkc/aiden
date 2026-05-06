@@ -1,6 +1,6 @@
 ---
 name: powershell-pro
-description: Expert PowerShell: processes, services, WMI, REST, scheduled tasks
+description: "Expert PowerShell: processes, services, WMI, REST, scheduled tasks"
 category: windows
 version: 1.0.0
 platform: windows

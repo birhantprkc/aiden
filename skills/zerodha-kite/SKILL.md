@@ -1,6 +1,6 @@
 ---
 name: zerodha-kite
-description: Zerodha Kite Connect: holdings, positions, orders, live quotes
+description: "Zerodha Kite Connect: holdings, positions, orders, live quotes"
 category: india
 version: 1.0.0
 tags: zerodha, kite, broker, india, trading, orders, holdings, positions, equity, portfolio

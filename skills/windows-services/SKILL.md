@@ -1,6 +1,6 @@
 ---
 name: windows-services
-description: Windows services: list, start, stop, restart, configure (PowerShell)
+description: "Windows services: list, start, stop, restart, configure (PowerShell)"
 category: windows
 version: 1.0.0
 platform: windows

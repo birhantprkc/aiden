@@ -1,6 +1,6 @@
 ---
 name: indian-tax-calc
-description: India tax calc: income, STCG/LTCG, advance tax, TDS (FY 2025-26)
+description: "India tax calc: income, STCG/LTCG, advance tax, TDS (FY 2025-26)"
 category: india
 version: 1.0.0
 tags: tax, india, income-tax, capital-gains, stcg, ltcg, itr, advance-tax, tds, fy2526
