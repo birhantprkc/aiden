@@ -629,15 +629,24 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
   const spawnImpl = opts.spawnImpl ?? spawn;
   const start = Date.now();
 
-  // Resolve the installed version once; pulled from package.json so a tag
-  // mismatch surfaces here rather than via a confusing /doctor pass.
+  // Resolve the installed version. The relative path to package.json
+  // differs between source (cli/v4/doctor.ts → ../../package.json) and
+  // compiled dist (dist/cli/v4/doctor.js → ../../../package.json), so
+  // walk a small candidate list. Falls back to 0.0.0 only if every
+  // candidate is missing — which would imply a packaging bug worth
+  // surfacing rather than masking.
   let installedVersion = '0.0.0';
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const pkg = require('../../package.json') as { version: string };
-    installedVersion = pkg.version;
-  } catch {
-    /* leave default */
+  for (const rel of ['../../package.json', '../../../package.json']) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const pkg = require(rel) as { version: string };
+      if (pkg && typeof pkg.version === 'string' && pkg.version) {
+        installedVersion = pkg.version;
+        break;
+      }
+    } catch {
+      // try next candidate
+    }
   }
 
   const results: CheckResult[] = [];
