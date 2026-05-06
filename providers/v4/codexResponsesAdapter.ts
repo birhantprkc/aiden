@@ -48,6 +48,41 @@ import {
   ProviderTimeoutError,
 } from './errors';
 
+/**
+ * Phase 21 #6 reopen — pull `chatgpt_account_id` out of an OpenAI OAuth
+ * JWT's `https://api.openai.com/auth` claim. Used to populate the
+ * `ChatGPT-Account-ID` header that the Codex Cloudflare layer requires.
+ *
+ * Direct port of Hermes `agent/auxiliary_client.py:_codex_cloudflare_headers`
+ * (lines 384-396): tolerates malformed tokens silently (returns null) so
+ * a bad bearer surfaces as a 401 from the backend instead of a crash at
+ * adapter construction.
+ *
+ * Exported for unit tests.
+ */
+export function extractChatGptAccountId(accessToken: string | null | undefined): string | null {
+  if (typeof accessToken !== 'string' || accessToken.trim().length === 0) {
+    return null;
+  }
+  const parts = accessToken.split('.');
+  if (parts.length < 2) return null;
+  try {
+    // base64url + padding compensation, matching Python's `parts[1] + "=" * (-len(...) % 4)`
+    const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = payload + '='.repeat((4 - (payload.length % 4)) % 4);
+    const json = Buffer.from(padded, 'base64').toString('utf8');
+    const claims = JSON.parse(json) as Record<string, unknown>;
+    const auth = claims['https://api.openai.com/auth'];
+    if (auth && typeof auth === 'object' && !Array.isArray(auth)) {
+      const acct = (auth as Record<string, unknown>).chatgpt_account_id;
+      if (typeof acct === 'string' && acct.length > 0) return acct;
+    }
+  } catch {
+    /* malformed token — drop the header */
+  }
+  return null;
+}
+
 export interface CodexResponsesAdapterOptions {
   /** Default 'https://api.openai.com/v1'. No trailing slash. */
   baseUrl?: string;
@@ -170,9 +205,16 @@ export class CodexResponsesAdapter implements ProviderAdapter {
   async call(input: ProviderCallInput): Promise<ProviderCallOutput> {
     const body = this.buildRequestBody(input);
     const url = `${this.baseUrl}/responses`;
+    // Phase 21 #6 reopen: chatgpt.com/backend-api/codex Cloudflare layer
+    // rejects requests without codex_cli_rs originator + UA + the
+    // ChatGPT-Account-ID extracted from the OAuth JWT. Without these, the
+    // backend returns 400 "model not supported when using Codex with a
+    // ChatGPT account" regardless of slug. Hermes pattern verbatim from
+    // agent/auxiliary_client.py:_codex_cloudflare_headers.
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${this.apiKey}`,
+      ...this.codexBackendHeaders(),
       ...this.extraHeaders,
     };
 
@@ -269,10 +311,51 @@ export class CodexResponsesAdapter implements ProviderAdapter {
     if (input.tools.length > 0) {
       body.tools = this.translateTools(input.tools);
     }
-    if (input.maxTokens != null) body.max_output_tokens = input.maxTokens;
+    // Phase 21 #6 reopen: Codex backend (chatgpt.com/backend-api/codex)
+    // does NOT accept max_output_tokens — see Hermes
+    // agent/transports/codex.py:142-143: "if max_tokens is not None and
+    // not is_codex_backend". Sending it triggers 400.
+    if (input.maxTokens != null && !this.isCodexBackend()) {
+      body.max_output_tokens = input.maxTokens;
+    }
     if (input.temperature != null) body.temperature = input.temperature;
     if (input.extraBody) Object.assign(body, input.extraBody);
     return body;
+  }
+
+  /**
+   * True when this adapter is talking to the chatgpt.com/backend-api/codex
+   * endpoint — a different protocol surface than `api.openai.com/v1`. The
+   * Codex backend rejects max_output_tokens, requires Cloudflare-bypass
+   * headers, and binds requests to a ChatGPT account via JWT.
+   */
+  private isCodexBackend(): boolean {
+    return this.baseUrl.includes('chatgpt.com/backend-api/codex');
+  }
+
+  /**
+   * Phase 21 #6 reopen — Codex Cloudflare-bypass headers, verbatim from
+   * Hermes `agent/auxiliary_client.py:_codex_cloudflare_headers`:
+   *
+   *   User-Agent: codex_cli_rs/0.0.0 (Aiden Agent)
+   *   originator: codex_cli_rs
+   *   ChatGPT-Account-ID: <chatgpt_account_id from JWT claim>
+   *
+   * No-op for non-Codex backends (returns empty object). Malformed JWTs
+   * drop the account-id header rather than raise — a bad token surfaces
+   * as 401 from the backend, not a crash here.
+   */
+  private codexBackendHeaders(): Record<string, string> {
+    if (!this.isCodexBackend()) return {};
+    const headers: Record<string, string> = {
+      'User-Agent': 'codex_cli_rs/0.0.0 (Aiden Agent)',
+      originator: 'codex_cli_rs',
+    };
+    const acctId = extractChatGptAccountId(this.apiKey);
+    if (acctId) {
+      headers['ChatGPT-Account-ID'] = acctId;
+    }
+    return headers;
   }
 
   /**
