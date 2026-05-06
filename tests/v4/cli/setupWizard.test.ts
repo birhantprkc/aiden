@@ -314,7 +314,9 @@ describe('SetupWizard', () => {
       display,
       prompts: scriptedPrompts({ choose: [1] }), // pro stub — short-circuit, but banner runs first
     });
-    expect(chunks.join('\n')).toMatch(/Aiden v/);
+    // Phase 23.6: banner is the AIDEN ASCII block (no "Aiden vX.Y"
+    // tagline anymore).  Verify the block by its top edge instead.
+    expect(chunks.join('\n')).toMatch(/█████╗/);
   });
 
   describe('printPostWizardTutorial (Phase 22 Task 6)', () => {

@@ -119,7 +119,6 @@ export interface ChatSessionOptions {
   maxIterations?: number;
 }
 
-const BOX_WIDTH = 67;
 const STATUS_BAR_WIDTH = 10;
 
 export class ChatSession implements ChatSessionLike {
@@ -139,6 +138,12 @@ export class ChatSession implements ChatSessionLike {
    * here so the status formatter can render them today.
    */
   private statusState: StatusState = { kind: 'ready' };
+
+  // Phase 23.6 — v3-style turn-footer state.  Tracks the most-recent
+  // turn's elapsed ms (rendered in the trailing footer) and the
+  // provider used last turn (so a switch surfaces as `groq ──→ together`).
+  private lastTurnElapsedMs = 0;
+  private lastFooterProvider: string | null = null;
 
   constructor(private opts: ChatSessionOptions) {
     this.currentProviderId = opts.initialProviderId;
@@ -210,7 +215,7 @@ export class ChatSession implements ChatSessionLike {
     let sigintHandler: (() => void) | null = null;
     if (this.opts.installSignalHandler !== false) {
       sigintHandler = () => {
-        this.opts.display.line(60);
+        this.opts.display.write('\n');
         this.opts.display.dim('Goodbye.');
         process.exit(0);
       };
@@ -280,7 +285,8 @@ export class ChatSession implements ChatSessionLike {
           });
           if (result.exit) break;
           if (result.clearHistory) this.history = [];
-          this.renderStatusLine();
+          // Phase 23.6 — v3 doesn't print a status footer after slash
+          // commands; the footer belongs to agent turns only.
           continue;
         }
 
@@ -297,6 +303,7 @@ export class ChatSession implements ChatSessionLike {
     // Phase 22 Task 4: status bar reflects the live phase. Set on
     // entry, cleared in both success and error paths below.
     this.setStatusState({ kind: 'generating', sinceMs: Date.now() });
+    const turnStartedAt = Date.now();
     const userMsg: Message = { role: 'user', content: userInput };
 
     // Apply any queued system prompts (from skill slash commands) by
@@ -328,6 +335,13 @@ export class ChatSession implements ChatSessionLike {
       spinnerStopped = true;
       spinner.stop();
     };
+
+    // Phase 23.5: stop the "thinking…" spinner the moment the first
+    // tool row prints. The event rows are the user-facing indicator
+    // from that point on; a spinner painting `\r` over the same line
+    // would corrupt our row-overwrite when the row mutates to its
+    // final bracket state.
+    this.opts.callbacks.setBeforeFirstToolHook?.(stopSpinnerOnce);
 
     try {
       const result = await this.opts.agent.runConversation(baseHistory, {
@@ -382,6 +396,7 @@ export class ChatSession implements ChatSessionLike {
       }
 
       this.setStatusState({ kind: 'ready' });
+      this.lastTurnElapsedMs = Date.now() - turnStartedAt;
       this.renderStatusLine();
     } catch (err) {
       stopSpinnerOnce();
@@ -392,95 +407,58 @@ export class ChatSession implements ChatSessionLike {
         'Run `/model` to switch providers or `aiden doctor` to diagnose.',
       );
       this.setStatusState({ kind: 'ready' });
+      this.lastTurnElapsedMs = Date.now() - turnStartedAt;
     }
   }
 
-  // ── Boxed startup card ─────────────────────────────────────────────
+  // ── Startup card (Phase 23.6: v3 visual style port) ────────────────
+  // Boot rhythm matches the v3 reference (cli/aiden.ts:printBanner):
+  //
+  //     [AIDEN ASCII art in brand orange]
+  //
+  //     ● <provider> <model>  ·  ● <skill_count> skills  ·  <tools> tools  ·  ○ 0 mem
+  //     ────────────────────────────────────────────────
+  //     session  <id>
+  //     v4.0.0
+  //     ────────────────────────────────────────────────
+  //     ready ▸  /help for commands
+  //
+  // Pure presentation — no boxen, no inline catalogs.
   async renderStartupCard(): Promise<void> {
-    // Phase 22 Task 7: rotating tip beneath the banner. One pick per
-    // boot; tips.ts caps the pool at ~10 high-signal lines.
-    this.opts.display.printBanner(undefined, { tip: getRandomTip() });
+    const display = this.opts.display;
+    const VERSION = '4.0.0';
+
+    display.write('\n');
+    display.printBanner();
+    display.write('\n');
 
     const tools = this.opts.toolRegistry.list();
-    let skills: { name: string; category?: string }[] = [];
+    // Aiden's v4 SkillSummary has no `enabled` flag — every loaded skill
+    // is considered active.  v3's "enabled/total" split was meaningful
+    // because v3 tracked per-skill enable state in config; v4 doesn't.
+    let skillsLoaded = 0;
     try {
-      skills = await this.opts.skillLoader.list();
+      skillsLoaded = (await this.opts.skillLoader.list()).length;
     } catch {
-      skills = [];
+      skillsLoaded = 0;
     }
 
-    // Group tools by toolset.
-    const toolsByToolset = new Map<string, string[]>();
-    for (const name of tools) {
-      const handler = this.opts.toolRegistry.get(name);
-      const toolset = handler?.toolset ?? 'misc';
-      if (!toolsByToolset.has(toolset)) toolsByToolset.set(toolset, []);
-      toolsByToolset.get(toolset)!.push(name);
-    }
-
-    // Group skills by category.
-    const skillsByCategory = new Map<string, string[]>();
-    for (const s of skills) {
-      const cat = s.category ?? 'general';
-      if (!skillsByCategory.has(cat)) skillsByCategory.set(cat, []);
-      skillsByCategory.get(cat)!.push(s.name);
-    }
-
-    const lines: string[] = [];
-    lines.push(boxTop(BOX_WIDTH));
-    lines.push(boxLine(`Aiden v4.0.0 · Taracod`, BOX_WIDTH));
-    lines.push(boxLine('', BOX_WIDTH));
-    lines.push(boxLine('Available Tools', BOX_WIDTH));
-    const toolEntries = [...toolsByToolset.entries()];
-    const visibleTools = toolEntries.slice(0, 8);
-    for (const [toolset, list] of visibleTools) {
-      lines.push(boxLine(`  ${toolset}: ${truncList(list, 50)}`, BOX_WIDTH));
-    }
-    const hiddenToolsets = toolEntries.length - visibleTools.length;
-    if (hiddenToolsets > 0) {
-      lines.push(boxLine(`  (and ${hiddenToolsets} more toolsets…)`, BOX_WIDTH));
-    }
-    lines.push(boxLine('', BOX_WIDTH));
-    lines.push(boxLine('Available Skills', BOX_WIDTH));
-    const skillEntries = [...skillsByCategory.entries()];
-    const visibleSkills = skillEntries.slice(0, 6);
-    for (const [cat, list] of visibleSkills) {
-      lines.push(boxLine(`  ${cat}: ${truncList(list, 50)}`, BOX_WIDTH));
-    }
-    const hiddenSkillCats = skillEntries.length - visibleSkills.length;
-    if (hiddenSkillCats > 0) {
-      lines.push(
-        boxLine(
-          `  …${skills.length} skills across ${skillEntries.length} categories`,
-          BOX_WIDTH,
-        ),
-      );
-    }
-    lines.push(boxLine('', BOX_WIDTH));
-    lines.push(
-      boxLine(`${this.currentProviderId} · ${this.currentModelId}`, BOX_WIDTH),
+    display.write(
+      display.bootStatusLine({
+        provider: this.currentProviderId,
+        model: this.currentModelId,
+        skillsLoaded,
+        tools: tools.length,
+      }) + '\n',
     );
-    lines.push(
-      boxLine(`Session: ${(this.sessionId ?? 'new').slice(0, 16)}`, BOX_WIDTH),
+    display.write(`  ${display.rule()}\n`);
+    display.write(
+      `  ${display.muted('session  ')}${display.muted((this.sessionId ?? 'new').slice(0, 9))}\n`,
     );
-    lines.push(boxLine('', BOX_WIDTH));
-    lines.push(
-      boxLine(
-        `${tools.length} tools · ${skills.length} skills · /help for commands`,
-        BOX_WIDTH,
-      ),
-    );
-    // Phase 22 Task 1: concrete first-task suggestions inside the box —
-    // collapses time-to-first-tool-call by giving the user something to
-    // type. Constant content (not the rotating tip below the banner).
-    lines.push(boxLine('', BOX_WIDTH));
-    lines.push(boxLine(BOOT_TRY_HINT, BOX_WIDTH));
-    lines.push(boxBottom(BOX_WIDTH));
-
-    for (const line of lines) {
-      this.opts.display.dim(line);
-    }
-    this.opts.display.write('\n');
+    display.write(`  ${display.muted(`v${VERSION}`)}\n`);
+    display.write(`  ${display.rule()}\n`);
+    display.write(display.readyLine('/help for commands') + '\n');
+    display.write('\n');
   }
 
   /** Phase 22 Task 4: state transitions for the right-most segment. */
@@ -488,10 +466,23 @@ export class ChatSession implements ChatSessionLike {
     this.statusState = state;
   }
 
-  // ── Status line ────────────────────────────────────────────────────
+  // ── Status line (Phase 23.6: v3 visual style port) ──────────────────
+  // Render the post-turn footer with provider, model, ctx gauge, and
+  // elapsed time.  Optionally precedes the footer with a `prev ──→ next`
+  // provider-switch line when the active provider has changed since the
+  // last turn (matches v3 cli/aiden.ts:730).
   renderStatusLine(): void {
+    const display = this.opts.display;
     const provider = this.currentProviderId;
     const model = this.currentModelId;
+
+    if (
+      this.lastFooterProvider !== null &&
+      this.lastFooterProvider !== provider
+    ) {
+      display.write(display.providerSwitchLine(this.lastFooterProvider, provider) + '\n');
+    }
+    this.lastFooterProvider = provider;
 
     let limits;
     try {
@@ -501,24 +492,24 @@ export class ChatSession implements ChatSessionLike {
     }
     const usedTokens = this.modelMetadata.estimateMessageTokens(this.history);
     const maxTokens = limits.contextLength;
-    const turn = this.history.filter((m) => m.role === 'assistant').length;
 
-    const line = formatStatusLine({
-      provider,
-      model,
-      usedTokens,
-      maxTokens,
-      turn,
-      maxTurns: 90,
-      state: this.statusState,
-      display: this.opts.display,
-    });
-    this.opts.display.write(line + '\n');
+    display.write(
+      display.statusFooter({
+        provider,
+        model,
+        ctxUsed: usedTokens,
+        ctxMax: maxTokens,
+        elapsedMs: this.lastTurnElapsedMs,
+      }) + '\n\n',
+    );
   }
 
   // ── Input ──────────────────────────────────────────────────────────
   private async readUserInput(api: ChatPromptApi): Promise<string> {
-    const promptText = '$ ';
+    // Phase 23.6 — v3-style ▲ prompt in brand orange.  Inquirer's
+    // default `input` prompt prepends a `?` glyph; we override it with
+    // our own bare prefix so the result reads `▲ <user input>`.
+    const promptText = this.opts.display.promptPrefix();
 
     let raw = await api.readLine(promptText);
     if (raw == null) return '';
@@ -700,27 +691,6 @@ export function formatStatusLine(args: StatusLineArgs): string {
   return `${provider}:${model}${sep}${ctxSegment}${sep}${budgetSegment}${sep}${stateSegment}`;
 }
 
-function boxTop(width: number): string {
-  return '╭' + '─'.repeat(width) + '╮';
-}
-function boxBottom(width: number): string {
-  return '╰' + '─'.repeat(width) + '╯';
-}
-function boxLine(content: string, width: number): string {
-  const inner = ' ' + content;
-  const padded = inner.length >= width
-    ? inner.slice(0, width)
-    : inner + ' '.repeat(width - inner.length);
-  return '│' + padded + '│';
-}
-
-function truncList(items: string[], maxLen: number): string {
-  if (items.length === 0) return '(none)';
-  let out = items.join(', ');
-  if (out.length > maxLen) out = out.slice(0, maxLen - 1) + '…';
-  return out;
-}
-
 export function renderProgressBar(used: number, max: number, width: number): string {
   if (max <= 0) return '[' + '░'.repeat(width) + ']';
   const ratio = Math.max(0, Math.min(1, used / max));
@@ -748,10 +718,15 @@ function createDefaultPromptApi(): ChatPromptApi {
   // Lazy-load @inquirer/prompts so test harnesses without a TTY don't break.
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const inq = require('@inquirer/prompts');
+  // Phase 23.6 — v3 visual style.  Suppress inquirer's default `?` /
+  // `✔` glyphs (controlled by theme.prefix) so our brand `▲` prompt
+  // shows alone.  We pass per-status entries so the answered echo also
+  // stays clean; `loading` is intentionally untouched (spinner state).
+  const promptTheme = { prefix: { idle: '', done: '' } };
   return {
     async readLine(prompt) {
       try {
-        return (await inq.input({ message: prompt })) ?? '';
+        return (await inq.input({ message: prompt, theme: promptTheme })) ?? '';
       } catch (err) {
         // Inquirer wraps Ctrl+C as ExitPromptError. Re-throw as plain Error
         // with a recognisable message so the REPL can break the loop.
@@ -761,7 +736,7 @@ function createDefaultPromptApi(): ChatPromptApi {
     },
     async selectSlashCommand(source) {
       try {
-        return (await inq.search({ message: '/', source })) as string;
+        return (await inq.search({ message: '/', source, theme: promptTheme })) as string;
       } catch {
         return null;
       }

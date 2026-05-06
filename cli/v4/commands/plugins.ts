@@ -125,7 +125,7 @@ export const plugins: SlashCommand = {
       if (entry.manifest.author) ctx.display.dim(`by ${entry.manifest.author}`);
       if (entry.manifest.description)
         ctx.display.write(entry.manifest.description + '\n');
-      ctx.display.line(40);
+      ctx.display.write('\n');
       ctx.display.write(`Source     : ${entry.manifest.source ?? '?'}\n`);
       ctx.display.write(`Status     : ${entry.status}${entry.error ? ' — ' + entry.error : ''}\n`);
       ctx.display.write(`Tools      : ${entry.contributions.tools.join(', ') || '(none)'}\n`);

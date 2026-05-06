@@ -287,3 +287,107 @@ describe('CliCallbacks.setVerboseMode', () => {
     expect(output()).toMatch(/planner/);
   });
 });
+
+describe('CliCallbacks Phase 23.5 onToolCall', () => {
+  it('emits a row per tool call with [ok N ms] on success', () => {
+    const { display, output } = makeDisplay();
+    const cb = new CliCallbacks({ display });
+    cb.onToolCall(
+      { id: 'c1', name: 'web_search', arguments: { query: 'foo' } },
+      'before',
+    );
+    cb.onToolCall(
+      { id: 'c1', name: 'web_search', arguments: { query: 'foo' } },
+      'after',
+      { id: 'c1', name: 'web_search', result: { hits: [] } },
+    );
+    const text = output();
+    expect(text).toMatch(/· tool web_search/);
+    expect(text).toMatch(/\[ok \d+ms\]/);
+  });
+
+  it('uses [blocked] when result.error mentions URL provenance gate', () => {
+    const { display, output } = makeDisplay();
+    const cb = new CliCallbacks({ display });
+    cb.onToolCall(
+      { id: 'c2', name: 'open_url', arguments: { url: 'https://x' } },
+      'before',
+    );
+    cb.onToolCall(
+      { id: 'c2', name: 'open_url', arguments: { url: 'https://x' } },
+      'after',
+      {
+        id: 'c2',
+        name: 'open_url',
+        result: null,
+        error:
+          'Blocked: open_url URL https://www.youtube.com/watch?v=abc was ' +
+          'not returned by any youtube_search call this turn (URL ' +
+          'provenance gate).',
+      },
+    );
+    expect(output()).toMatch(/\[blocked\]/);
+  });
+
+  it('uses [fail N ms] for non-blocked tool errors', () => {
+    const { display, output } = makeDisplay();
+    const cb = new CliCallbacks({ display });
+    cb.onToolCall(
+      { id: 'c3', name: 'shell_exec', arguments: { command: 'foo' } },
+      'before',
+    );
+    cb.onToolCall(
+      { id: 'c3', name: 'shell_exec', arguments: { command: 'foo' } },
+      'after',
+      {
+        id: 'c3',
+        name: 'shell_exec',
+        result: null,
+        error: 'command not found',
+      },
+    );
+    expect(output()).toMatch(/\[fail \d+ms\]/);
+  });
+
+  it('fires beforeFirstToolHook exactly once per turn', () => {
+    const { display } = makeDisplay();
+    const cb = new CliCallbacks({ display });
+    let calls = 0;
+    cb.setBeforeFirstToolHook(() => {
+      calls += 1;
+    });
+    cb.onToolCall(
+      { id: 'a', name: 't', arguments: {} },
+      'before',
+    );
+    cb.onToolCall(
+      { id: 'a', name: 't', arguments: {} },
+      'after',
+      { id: 'a', name: 't', result: 'ok' },
+    );
+    cb.onToolCall(
+      { id: 'b', name: 't', arguments: {} },
+      'before',
+    );
+    cb.onToolCall(
+      { id: 'b', name: 't', arguments: {} },
+      'after',
+      { id: 'b', name: 't', result: 'ok' },
+    );
+    expect(calls).toBe(1);
+    // Re-arm for the next turn — fires again on the next first call.
+    cb.setBeforeFirstToolHook(() => {
+      calls += 1;
+    });
+    cb.onToolCall(
+      { id: 'c', name: 't', arguments: {} },
+      'before',
+    );
+    cb.onToolCall(
+      { id: 'c', name: 't', arguments: {} },
+      'after',
+      { id: 'c', name: 't', result: 'ok' },
+    );
+    expect(calls).toBe(2);
+  });
+});

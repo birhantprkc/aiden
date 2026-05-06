@@ -64,26 +64,202 @@ export class Display {
   /**
    * Build the welcome banner string (does not write).
    *
-   * `opts.tip` (Phase 22): when provided, appends a `✦ Tip: <text>` line
-   * in muted colour beneath the hint. Callers (REPL boot card, setup
-   * wizard) pass a tip from `cli/v4/tips.ts:getRandomTip`. Omitted in
-   * tests so banner output stays deterministic unless explicitly opted
-   * in.
+   * Phase 23.6 (v3 visual style port): banner is the AIDEN block ASCII
+   * art only, in brand orange, indented two columns to match the rest
+   * of the boot card.  Status / session / version / ready lines are
+   * emitted by chatSession.renderStartupCard so the banner stays a
+   * typographic anchor, not a catalog.  `opts.tip` is accepted for
+   * backward compat but ignored.
    */
-  banner(version = '4.0.0', opts: { tip?: string } = {}): string {
+  banner(_version = '4.0.0', _opts: { tip?: string } = {}): string {
     const sk = this.skin;
-    const lines = AIDEN_BANNER.split('\n').map((l) => sk.applyColors(l, 'brand'));
-    const tagline = sk.applyColors(`Aiden v${version} — your local-first agent`, 'muted');
-    const hint = sk.applyColors('Type /help to see what I can do.', 'muted');
-    const tipLine = opts.tip
-      ? `\n  ${sk.applyColors(`✦ Tip: ${opts.tip}`, 'muted')}`
-      : '';
-    return `${lines.join('\n')}\n  ${tagline}\n  ${hint}${tipLine}\n`;
+    const lines = AIDEN_BANNER.split('\n').map((l) =>
+      l ? `  ${sk.applyColors(l, 'brand')}` : '',
+    );
+    return `${lines.join('\n')}\n`;
   }
 
-  /** Print the banner. `opts.tip` forwards to `banner()`. */
+  /** Print the banner. `opts.tip` accepted for backward compat; unused. */
   printBanner(version?: string, opts: { tip?: string } = {}): void {
     this.out.write(this.banner(version, opts));
+  }
+
+  // ── Phase 23.6 — v3 visual primitives ──────────────────────────────────
+  // Pure renderers (return strings, don't write) so chatSession can
+  // compose the boot card and turn rhythm without owning ANSI escapes.
+
+  /** Terminal column count clamped to 100 — matches v3 width discipline. */
+  cols(): number {
+    return Math.min(this.out.columns ?? 80, 100);
+  }
+
+  /**
+   * Thin horizontal rule (`──…──`) in muted colour, full visible width
+   * minus the 2-column indent the boot card / turn render uses.  Returns
+   * the line WITHOUT a trailing newline; caller adds one + the leading
+   * 2-space indent.
+   */
+  rule(width?: number): string {
+    const w = Math.max(8, (width ?? this.cols()) - 2);
+    return this.skin.applyColors('─'.repeat(w), 'muted');
+  }
+
+  /** Render `▲` (brand-orange filled triangle) — Aiden's identity motif. */
+  triangle(): string {
+    return this.skin.applyColors('▲', 'brand');
+  }
+
+  /** Render `●` filled dot in success green (active state). */
+  dotOn(): string {
+    return this.skin.applyColors('●', 'success');
+  }
+
+  /** Render `○` hollow dot in muted (inactive state). */
+  dotOff(): string {
+    return this.skin.applyColors('○', 'muted');
+  }
+
+  /** Wrap text in success colour. */
+  success_(text: string): string {
+    return this.skin.applyColors(text, 'success');
+  }
+
+  /** Wrap text in warn colour. */
+  warn_(text: string): string {
+    return this.skin.applyColors(text, 'warn');
+  }
+
+  /** Wrap text in error colour. */
+  error_(text: string): string {
+    return this.skin.applyColors(text, 'error');
+  }
+
+  /**
+   * Render the v3-style assistant header:
+   *
+   *   Aiden                       (bold brand orange)
+   *   ──────────────────────…     (muted thin rule, full width − 2)
+   *
+   * Returns the two-line string with a trailing newline so the caller
+   * can append the body directly underneath.
+   */
+  agentHeader(): string {
+    const head = this.skin.applyColors('Aiden', 'brand');
+    return `  ${head}\n  ${this.rule()}\n`;
+  }
+
+  /**
+   * Render the v3-style boot status line:
+   *
+   *   ● <provider> <model>  ·  ● 56/72 skills  ·  43 tools  ·  ○ 0 mem
+   *
+   * Dots colour-graded: green ● when count > 0, muted ○ when 0.  Provider
+   * dot also tracks "active" — green when provider is reachable, error
+   * red otherwise (caller passes `providerOk`).
+   */
+  bootStatusLine(args: {
+    provider: string;
+    model: string;
+    providerOk?: boolean;
+    skillsLoaded: number;
+    skillsTotal?: number;
+    tools: number;
+    memCount?: number;
+  }): string {
+    const sk = this.skin;
+    const sep = sk.applyColors(' · ', 'muted');
+    const provDot = args.providerOk === false
+      ? sk.applyColors('●', 'error')
+      : this.dotOn();
+    const skillsDot = args.skillsLoaded > 0 ? this.dotOn() : this.dotOff();
+    const memCount = args.memCount ?? 0;
+    const memDot = memCount > 0 ? this.dotOn() : this.dotOff();
+    const provModel =
+      `${provDot} ${sk.applyColors(args.provider, 'brand')} ` +
+      `${sk.applyColors(args.model, 'muted')}`;
+    const skillCount =
+      typeof args.skillsTotal === 'number' && args.skillsTotal !== args.skillsLoaded
+        ? `${args.skillsLoaded}/${args.skillsTotal}`
+        : `${args.skillsLoaded}`;
+    const skillsSeg = `${skillsDot} ${sk.applyColors(`${skillCount} skills`, 'muted')}`;
+    const toolsSeg = sk.applyColors(`${args.tools} tools`, 'muted');
+    const memSeg = `${memDot} ${sk.applyColors(`${memCount} mem`, 'muted')}`;
+    return `  ${provModel}${sep}${skillsSeg}${sep}${toolsSeg}${sep}${memSeg}`;
+  }
+
+  /**
+   * v3-style "ready" line:
+   *
+   *   ready ▸  /help for commands
+   *
+   * "ready" + ▸ in brand orange; trailing hint in muted.
+   */
+  readyLine(hint = '/help for commands'): string {
+    const sk = this.skin;
+    const ready = sk.applyColors('ready', 'brand');
+    const arrow = sk.applyColors('▸', 'brand');
+    return `  ${ready} ${arrow}  ${sk.applyColors(hint, 'muted')}`;
+  }
+
+  /**
+   * v3-style post-turn status footer:
+   *
+   *   ▲ groq · llama-3.3-70b  │  ▓▓▓░░░░░░░ 12.4K/128K  │  2s
+   *
+   * Width-bounded (10-cell context bar), always one line.  Provider
+   * appears in muted, model bold, ctx bar colour-graded by % full,
+   * elapsed in muted.  Returns string sans trailing newline.
+   */
+  statusFooter(args: {
+    provider: string;
+    model: string;
+    ctxUsed: number;
+    ctxMax: number;
+    elapsedMs: number;
+  }): string {
+    const sk = this.skin;
+    const SEP = sk.applyColors(' │ ', 'muted');
+    const tri = this.triangle();
+    const provModel =
+      `${tri} ${sk.applyColors(args.provider, 'muted')}` +
+      `${sk.applyColors(' · ', 'muted')}` +
+      sk.applyColors(args.model, 'agent');
+
+    const pct = args.ctxMax > 0
+      ? Math.min(100, Math.round((args.ctxUsed / args.ctxMax) * 100))
+      : 0;
+    const barW = 10;
+    const filled = Math.round((pct / 100) * barW);
+    const ctxKind: 'success' | 'warn' | 'error' =
+      pct < 60 ? 'success' : pct < 85 ? 'warn' : 'error';
+    const bar =
+      sk.applyColors('▓'.repeat(filled), ctxKind) +
+      sk.applyColors('░'.repeat(barW - filled), 'muted');
+    const ctxLabel = `${formatCompactTokens(args.ctxUsed)}/${formatCompactTokens(args.ctxMax)}`;
+    const ctxSeg = `${bar} ${sk.applyColors(ctxLabel, ctxKind)}`;
+
+    const elapsed = sk.applyColors(formatElapsedShort(args.elapsedMs), 'muted');
+
+    return `  ${provModel}${SEP}${ctxSeg}${SEP}${elapsed}`;
+  }
+
+  /**
+   * Optional provider-switch indicator line — emitted only when this
+   * turn ran on a different provider than the previous one.  Format
+   * matches v3:
+   *
+   *   groq ──→ openrouter
+   */
+  providerSwitchLine(prev: string, next: string): string {
+    return `  ${this.skin.applyColors(`${prev} ──→ ${next}`, 'muted')}`;
+  }
+
+  /**
+   * Inquirer prompt prefix — "▲ " in brand orange.  Inquirer prepends
+   * its own padding, so we only ship the bare 2-char prefix.
+   */
+  promptPrefix(): string {
+    return `${this.skin.applyColors('▲', 'brand')} `;
   }
 
   /**
@@ -103,7 +279,9 @@ export class Display {
 
     const render = (): void => {
       if (!isTty || stopped) return;
-      const glyph = skin.applyColors(frames[frame % frames.length], 'accent');
+      // Phase 23.5: spinner glyph in soft cyan (muted), not brand orange.
+      // Quiet color, not loud — Hermes principle 6.
+      const glyph = skin.applyColors(frames[frame % frames.length], 'muted');
       this.out.write(`\r${glyph} ${current}   `);
       frame += 1;
     };
@@ -128,6 +306,83 @@ export class Display {
           this.out.write('\r\x1b[K');
         }
         if (finalText) this.out.write(`${finalText}\n`);
+      },
+    };
+  }
+
+  // ── Phase 23.5 — Hermes-style tool event row ──────────────────────────
+  // One line per tool call: a "·" gutter, the keyword `tool`, the
+  // tool name (soft cyan, padded), a brief truncated arg preview, and
+  // a single right-side bracket cluster carrying state. Bracket
+  // mutates in place: [running] → [ok 220ms] / [fail 1.4s] / [retry
+  // 1/2 …] / product-specific terminals. No multi-line spew, no raw
+  // JSON deltas.
+  //
+  // On non-TTY stdout (pipes, CI logs) the row is deferred until
+  // completion so each line in the log carries the final state — no
+  // ANSI cursor games on a dumb sink.
+
+  toolRow(name: string, args: unknown): ToolRowHandle {
+    const sk = this.skin;
+    const argStr = previewToolArgs(args);
+    const padded = name.length > TOOL_ROW_NAME_PAD
+      ? name.slice(0, TOOL_ROW_NAME_PAD)
+      : name.padEnd(TOOL_ROW_NAME_PAD);
+    const left =
+      `  ${sk.applyColors('·', 'muted')} ` +
+      `${sk.applyColors('tool', 'muted')} ` +
+      `${sk.applyColors(padded, 'tool')} ` +
+      `${sk.applyColors(argStr, 'muted')}`;
+
+    const renderBracket = (text: string, kind: ColorKindForBracket): string => {
+      const colored = sk.applyColors(`[${text}]`, kind);
+      return `${left} ${colored}\n`;
+    };
+
+    const isTty = !!this.out.isTTY;
+    let printed = false;
+
+    const writeFinal = (text: string, kind: ColorKindForBracket): void => {
+      if (isTty && printed) {
+        // Move up one line, clear it, then write the final row.
+        this.out.write('\x1b[1A\x1b[2K\r');
+      }
+      this.out.write(renderBracket(text, kind));
+      printed = true;
+    };
+
+    if (isTty) {
+      this.out.write(renderBracket('running', 'warn'));
+      printed = true;
+    }
+    // On non-TTY we hold off entirely until the caller signals completion.
+
+    return {
+      ok(durationMs: number, retries = 0) {
+        const text =
+          retries > 0
+            ? `ok ${formatToolDuration(durationMs)} after ${retries} ${retries === 1 ? 'retry' : 'retries'}`
+            : `ok ${formatToolDuration(durationMs)}`;
+        writeFinal(text, 'success');
+      },
+      fail(durationMs: number, retries = 0) {
+        const text =
+          retries > 0
+            ? `fail ${formatToolDuration(durationMs)} after ${retries} ${retries === 1 ? 'retry' : 'retries'}`
+            : `fail ${formatToolDuration(durationMs)}`;
+        writeFinal(text, 'error');
+      },
+      retry(n: number, m: number) {
+        writeFinal(`retry ${n}/${m} …`, 'warn');
+      },
+      blocked() {
+        writeFinal('blocked', 'warn');
+      },
+      emptyRetry() {
+        writeFinal('empty retry', 'warn');
+      },
+      emptyFail() {
+        writeFinal('empty fail', 'error');
       },
     };
   }
@@ -166,16 +421,29 @@ export class Display {
     return `${sk.applyColors(`${arrow} you`, 'user')}\n${text}\n`;
   }
 
-  /** Format an agent turn — renders markdown by default. */
+  /**
+   * Format an agent turn in the Phase 23.6 v3-style:
+   *
+   *     Aiden                       (bold orange label)
+   *     ─────────────────────…      (muted thin rule)
+   *     <body>                       (rendered markdown / plain text)
+   *
+   * Body is indented 2 columns to match the boot card and footer.
+   * Trailing newline included so the caller can stack a status footer
+   * directly underneath.
+   */
   agentTurn(text: string, opts: AgentTurnOptions = {}): string {
     const sk = this.skin;
     const useMd = opts.markdown !== false;
-    const body = useMd ? this.markdown(text).trimEnd() : text;
-    const head = sk.applyColors('Aiden', 'agent');
+    const rawBody = useMd ? this.markdown(text).trimEnd() : text;
+    const indented = rawBody
+      .split('\n')
+      .map((ln) => (ln ? `  ${ln}` : ''))
+      .join('\n');
     const reasoning = opts.reasoning
-      ? `${sk.applyColors(opts.reasoning.trim(), 'muted')}\n`
+      ? `  ${sk.applyColors(opts.reasoning.trim(), 'muted')}\n`
       : '';
-    return `${head}\n${reasoning}${body}\n`;
+    return `${this.agentHeader()}${reasoning}${indented}\n`;
   }
 
   /**
@@ -321,6 +589,102 @@ export class Display {
     this.out.write(`${prefix}${sk.applyColors(`${arrow} ${name}…`, 'tool')}\n`);
     this.streamLastEndedNewline = true;
   }
+}
+
+// ── Phase 23.5 — tool row helpers ─────────────────────────────────────
+
+/** Width the tool name is padded to so brackets line up across rows. */
+const TOOL_ROW_NAME_PAD = 16;
+/** Args preview cap. Args longer than this get truncated with "…". */
+const TOOL_ROW_ARG_CAP = 40;
+
+type ColorKindForBracket = 'success' | 'warn' | 'error';
+
+/**
+ * Handle returned by `Display.toolRow()`. Mutates the row's bracket in
+ * place once the tool resolves. Each method writes the row exactly once;
+ * subsequent calls would double-print.
+ */
+export interface ToolRowHandle {
+  ok(durationMs: number, retries?: number): void;
+  fail(durationMs: number, retries?: number): void;
+  retry(n: number, m: number): void;
+  blocked(): void;
+  emptyRetry(): void;
+  emptyFail(): void;
+}
+
+/**
+ * Build a compact, single-line preview of the tool's arguments. Picks
+ * the most informative scalar fields when the args are an object, then
+ * truncates with an ellipsis at TOOL_ROW_ARG_CAP. Pure — no side
+ * effects, deterministic for a given input.
+ */
+export function previewToolArgs(args: unknown): string {
+  if (args == null) return '';
+  if (typeof args === 'string') return truncToolArg(args);
+  if (typeof args !== 'object') return truncToolArg(String(args));
+  const obj = args as Record<string, unknown>;
+  // Prefer obvious "first" fields the user can recognise without
+  // reading JSON. Fall back to the full JSON otherwise.
+  const preferKeys = [
+    'query', 'q', 'url', 'path', 'file', 'name', 'command', 'cmd',
+    'message', 'text', 'content', 'prompt',
+  ];
+  for (const k of preferKeys) {
+    const v = obj[k];
+    if (typeof v === 'string' && v.trim().length > 0) {
+      return truncToolArg(k === 'url' || k === 'path' || k === 'file'
+        ? v
+        : `"${v}"`);
+    }
+  }
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(obj);
+  } catch {
+    serialized = String(obj);
+  }
+  return truncToolArg(serialized);
+}
+
+function truncToolArg(s: string): string {
+  const flat = s.replace(/\s+/g, ' ').trim();
+  if (flat.length <= TOOL_ROW_ARG_CAP) return flat;
+  return flat.slice(0, TOOL_ROW_ARG_CAP - 1) + '…';
+}
+
+/**
+ * Render a tool-call duration in the bracket cluster. Sub-second
+ * durations show ms; ≥1s shows one decimal place of seconds. Pure.
+ */
+export function formatToolDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '0ms';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const sec = ms / 1000;
+  if (sec < 10) return `${sec.toFixed(1)}s`;
+  return `${Math.round(sec)}s`;
+}
+
+// ── Phase 23.6 — token / elapsed formatters for the status footer ──────
+
+/** "12345" → "12.3K"; "1234567" → "1.2M". Used by statusFooter. */
+export function formatCompactTokens(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return '0';
+  if (n < 1000) return `${Math.round(n)}`;
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}K`;
+  return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+}
+
+/** "850" → "850ms"; "2300" → "2.3s"; "75000" → "1m 15s". */
+export function formatElapsedShort(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '0ms';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const sec = ms / 1000;
+  if (sec < 60) return `${sec.toFixed(1).replace(/\.0$/, '')}s`;
+  const mins = Math.floor(sec / 60);
+  const remSec = Math.round(sec - mins * 60);
+  return remSec > 0 ? `${mins}m ${remSec}s` : `${mins}m`;
 }
 
 let _global: Display | null = null;

@@ -93,25 +93,29 @@ describe('Display', () => {
     display = new Display({ skin });
   });
 
-  it('banner contains the Aiden brand and version line', () => {
+  it('banner emits the AIDEN ASCII block (Phase 23.6 v3 visual style port)', () => {
+    // Banner is ASCII art only — no inline version, no tagline, no
+    // /help hint, no tip.  Those moved to chatSession.renderStartupCard.
     const b = stripAnsi(display.banner('4.2.1'));
-    expect(b).toMatch(/Aiden v4\.2\.1/);
-    expect(b).toMatch(/\/help/);
+    // ASCII block uses heavy box-drawing chars; assert the top edge.
+    expect(b).toMatch(/█████╗/);
   });
 
-  it('banner with no tip option omits the tip line', () => {
+  it('banner does not include /help, tagline, or tip line', () => {
     const b = stripAnsi(display.banner('4.2.1'));
     expect(b).not.toMatch(/✦ Tip:/);
+    expect(b).not.toMatch(/\/help/);
+    expect(b).not.toMatch(/local-first agent/);
+    // Version no longer rendered in the banner — chatSession boot card
+    // owns it now.
+    expect(b).not.toMatch(/v4\.2\.1/);
   });
 
-  it('banner with tip option appends a single ✦ Tip line', () => {
+  it('banner ignores a tip option (Phase 23.5: tip moved to boot card)', () => {
     const b = stripAnsi(
       display.banner('4.2.1', { tip: 'Type /help to see what I can do.' }),
     );
-    expect(b).toMatch(/✦ Tip: Type \/help to see what I can do\./);
-    // Only one tip line — not duplicated alongside the constant /help hint.
-    const tipLines = b.split('\n').filter((l) => l.includes('✦ Tip:'));
-    expect(tipLines).toHaveLength(1);
+    expect(b).not.toMatch(/✦ Tip:/);
   });
 
   it('userTurn formats with a "you" marker', () => {
@@ -222,5 +226,88 @@ describe('Display Phase 14b helpers', () => {
     // mono skin uses '─' for default-style and '-' for monochrome glyphs.
     expect(joined.length).toBe(11); // 10 chars + newline
     expect(joined).toMatch(/─{10}\n|-{10}\n/);
+  });
+});
+
+describe('Display Phase 23.5 toolRow', () => {
+  function captureDisplay(opts: { tty: boolean }) {
+    const chunks: string[] = [];
+    const out = new Writable({
+      write(chunk, _enc, cb) {
+        chunks.push(chunk.toString());
+        cb();
+      },
+    }) as unknown as NodeJS.WriteStream;
+    (out as unknown as { isTTY: boolean }).isTTY = opts.tty;
+    const skin = new SkinEngine({ forceMono: true });
+    const d = new Display({ skin, stdout: out });
+    return { d, chunks };
+  }
+
+  it('non-TTY: row is deferred until completion (single line, ok bracket)', () => {
+    const { d, chunks } = captureDisplay({ tty: false });
+    const row = d.toolRow('web_search', { query: 'bollywood top hindi songs' });
+    expect(chunks.join('')).toBe(''); // nothing yet
+    row.ok(220);
+    const joined = stripAnsi(chunks.join(''));
+    expect(joined).toMatch(/^ {2}· tool web_search\s+"bollywood top hindi songs" \[ok 220ms\]\n$/);
+  });
+
+  it('TTY: prints [running] immediately then mutates to [ok N ms]', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    const row = d.toolRow('youtube_search', { query: 'Sahiba Jasleen Royal' });
+    const first = chunks.join('');
+    expect(first).toContain('[running]');
+    chunks.length = 0;
+    row.ok(180);
+    const second = chunks.join('');
+    // overwrite escape (CSI 1A + clear) then the final row
+    expect(second).toMatch(/\x1b\[1A\x1b\[2K\r/);
+    expect(stripAnsi(second)).toMatch(/\[ok 180ms\]/);
+  });
+
+  it('fail bracket carries fail + duration', () => {
+    const { d, chunks } = captureDisplay({ tty: false });
+    d.toolRow('open_url', { url: 'https://example.com/x' }).fail(1500);
+    expect(stripAnsi(chunks.join(''))).toMatch(/\[fail 1\.5s\]\n$/);
+  });
+
+  it('blocked bracket for url-provenance gate', () => {
+    const { d, chunks } = captureDisplay({ tty: false });
+    d.toolRow('open_url', { url: 'https://www.youtube.com/watch?v=abc' }).blocked();
+    expect(stripAnsi(chunks.join(''))).toMatch(/\[blocked\]\n$/);
+  });
+
+  it('retry bracket carries N/M counter', () => {
+    const { d, chunks } = captureDisplay({ tty: false });
+    d.toolRow('web_search', { query: 'foo' }).retry(1, 2);
+    expect(stripAnsi(chunks.join(''))).toMatch(/\[retry 1\/2 …\]\n$/);
+  });
+
+  it('ok bracket includes after-N-retries when retries>0', () => {
+    const { d, chunks } = captureDisplay({ tty: false });
+    d.toolRow('web_search', { query: 'foo' }).ok(4200, 1);
+    expect(stripAnsi(chunks.join(''))).toMatch(/\[ok 4\.2s after 1 retry\]\n$/);
+  });
+
+  it('truncates long args with an ellipsis at 40 chars', () => {
+    const { d, chunks } = captureDisplay({ tty: false });
+    const longUrl =
+      'https://www.youtube.com/watch?v=' + 'X'.repeat(80) + '&list=PL';
+    d.toolRow('open_url', { url: longUrl }).ok(90);
+    const joined = stripAnsi(chunks.join(''));
+    expect(joined).toMatch(/…/);
+    // The arg portion sits between the padded name and the bracket;
+    // capped at 40 chars including the ellipsis.
+    const argMatch = joined.match(/open_url\s+(\S+)/);
+    expect(argMatch?.[1]?.length ?? 0).toBeLessThanOrEqual(40);
+  });
+
+  it('pads tool name to 16 chars so brackets align across rows', () => {
+    const { d, chunks } = captureDisplay({ tty: false });
+    d.toolRow('foo', { query: 'q' }).ok(10);
+    const joined = stripAnsi(chunks.join(''));
+    // "foo" padded to 16 chars => "foo             " (13 trailing spaces)
+    expect(joined).toMatch(/tool foo {13} /);
   });
 });

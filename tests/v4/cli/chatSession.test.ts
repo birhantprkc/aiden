@@ -219,7 +219,10 @@ describe('ChatSession.run', () => {
     expect(out.join('')).toContain('hello there');
   });
 
-  it('renders the boxed startup card with provider/model/tool/skill counts', async () => {
+  it('renders the startup card with provider/model/tool/skill counts (Phase 23.6)', async () => {
+    // Phase 23.6: v3 visual style port.  Box wrapper gone; ASCII banner
+    // + boot status line (`● <provider> <model> · ● N skills · M tools
+    // · ○ 0 mem`) + session/version + ready ▸ /help for commands.
     const { display, out } = mkDisplay();
     const session = new ChatSession(
       buildOpts({
@@ -232,17 +235,21 @@ describe('ChatSession.run', () => {
     );
     await session.run();
     const text = out.join('');
-    expect(text).toContain('╭');
-    expect(text).toContain('╰');
-    expect(text).toContain('Aiden v4.0.0');
+    expect(text).not.toContain('╭');
+    expect(text).not.toContain('╰');
+    // Banner ASCII is present.
+    expect(text).toMatch(/█████╗/);
     expect(text).toContain('groq');
     expect(text).toContain('llama-3.3-70b-versatile');
     expect(text).toContain('3 tools');
     expect(text).toContain('2 skills');
-    expect(text).toMatch(/files: file_read/);
+    expect(text).toContain('session  ');
+    expect(text).toContain('v4.0.0');
+    expect(text).toMatch(/ready/);
+    expect(text).toMatch(/\/help for commands/);
   });
 
-  it('renders status line after each turn', async () => {
+  it('renders the v3-style status footer after each turn (Phase 23.6)', async () => {
     const { display, out } = mkDisplay();
     const session = new ChatSession(
       buildOpts({
@@ -251,14 +258,13 @@ describe('ChatSession.run', () => {
       }),
     );
     await session.run();
-    // Phase 22 Task 4: status line dropped the leading "$ " prefix
-    // and switched to vertical-bar separators between segments.
+    // Phase 23.6: status footer is ▲ provider · model │ ctx-bar │ elapsed.
     const text = out.join('');
-    expect(text).toMatch(/groq:llama-3\.3-70b-versatile/);
-    expect(text).toMatch(/ctx \d/);
-    expect(text).toMatch(/budget \d+\/90/);
-    expect(text).toMatch(/ │ /); // separator present
-    expect(text).toMatch(/ready/); // right-most state segment
+    expect(text).toMatch(/▲ groq/);
+    expect(text).toContain('llama-3.3-70b-versatile');
+    expect(text).toMatch(/ │ /); // vertical-bar separator
+    // Elapsed segment ends with a unit suffix.
+    expect(text).toMatch(/\d+(?:ms|s|m)/);
   });
 
   it('intercepts slash commands before the agent', async () => {

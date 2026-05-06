@@ -815,6 +815,10 @@ export async function buildAgentRuntime(
     plannerGuard,
     honestyEnforcement,
     skillTeacher,
+    // Phase 23.5: Hermes-style tool event rows. CliCallbacks.onToolCall
+    // emits a single line per call — `· tool <name> <args> [running]`
+    // mutates to `[ok 220ms]` / `[fail 1.4s]` / `[blocked]` on resolve.
+    onToolCall: callbacks.onToolCall,
     onCompression: callbacks.onCompression,
     onBudgetWarning: callbacks.onBudgetWarning,
     onPlannerGuardDecision: callbacks.onPlannerGuardDecision,

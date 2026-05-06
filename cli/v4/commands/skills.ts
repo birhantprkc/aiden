@@ -52,7 +52,7 @@ export const skills: SlashCommand = {
       }
       ctx.display.info(`${parsed.frontmatter.name} v${parsed.frontmatter.version}`);
       ctx.display.dim(parsed.frontmatter.description ?? '(no description)');
-      ctx.display.line(40);
+      ctx.display.write('\n');
       ctx.display.write(parsed.body.slice(0, 1200));
       if (parsed.body.length > 1200) ctx.display.dim('… (truncated)');
       ctx.display.write('\n');

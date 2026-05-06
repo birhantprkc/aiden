@@ -17,7 +17,7 @@
  * v4.1 alongside the multi-pane TUI.
  */
 
-import type { Display } from './display';
+import type { Display, ToolRowHandle } from './display';
 import { boxBottom, boxLine, boxTopTitled } from './box';
 import type {
   ApprovalRequest,
@@ -28,6 +28,10 @@ import type { SkillProposal } from '../../moat/skillTeacher';
 import type { PlannerGuardDecision } from '../../moat/plannerGuard';
 import type { CompressionResult } from '../../core/v4/contextCompressor';
 import type { AuxiliaryClient } from '../../core/v4/auxiliaryClient';
+import type { ToolCallRequest, ToolCallResult } from '../../providers/v4/types';
+/* Phase 23.6 rollback — Ink controller bridge stashed to
+ * docs/sprint/_internal/v4.1-ink-stash/.  Re-introduce when v4.1 picks
+ * up the Ink rebuild. */
 
 export type VerboseMode = 'compact' | 'normal' | 'verbose';
 
@@ -83,6 +87,16 @@ export class CliCallbacks {
   private verboseMode: VerboseMode;
   private promptsPromise: Promise<PromptApi>;
 
+  // Phase 23.5 — tool event row state.
+  // `toolRows` and `toolStartTimes` are keyed by ToolCallRequest.id so
+  // sequential before/after pairs find each other. Cleared per-call.
+  // `beforeFirstToolHook` lets chatSession stop the "thinking…" spinner
+  // the moment the first row prints — registered fresh each turn.
+  private toolRows = new Map<string, ToolRowHandle>();
+  private toolStartTimes = new Map<string, number>();
+  private beforeFirstToolHook?: () => void;
+  private firstToolFiredThisTurn = false;
+
   constructor(opts: CliCallbacksOptions) {
     this.display = opts.display;
     this.auxiliaryClient = opts.auxiliaryClient;
@@ -96,6 +110,63 @@ export class CliCallbacks {
   setVerboseMode(mode: VerboseMode): void {
     this.verboseMode = mode;
   }
+
+  /**
+   * Phase 23.5 — chatSession registers a one-shot hook here at the top
+   * of each turn (typically `() => spinner.stop()`). Fires once just
+   * before the first tool row of the turn prints. Cleared internally
+   * after firing; chatSession re-registers next turn.
+   */
+  setBeforeFirstToolHook(fn?: () => void): void {
+    this.beforeFirstToolHook = fn;
+    this.firstToolFiredThisTurn = false;
+  }
+
+  /**
+   * Phase 23.5 — bound to AidenAgent.onToolCall. Emits one event row
+   * per tool call: prints `[running]` on `before`, mutates the bracket
+   * to `[ok N ms]` / `[fail N ms]` / `[blocked]` on `after`. Recognises
+   * the URL-provenance gate's terminal error and surfaces it as the
+   * Aiden-specific `[blocked]` cluster instead of a generic fail.
+   */
+  onToolCall = (
+    call: ToolCallRequest,
+    phase: 'before' | 'after',
+    result?: ToolCallResult,
+  ): void => {
+    if (phase === 'before') {
+      if (!this.firstToolFiredThisTurn) {
+        this.firstToolFiredThisTurn = true;
+        try {
+          this.beforeFirstToolHook?.();
+        } catch {
+          /* hook errors must not block tool dispatch */
+        }
+        this.beforeFirstToolHook = undefined;
+      }
+      const handle = this.display.toolRow(call.name, call.arguments);
+      this.toolRows.set(call.id, handle);
+      this.toolStartTimes.set(call.id, Date.now());
+      return;
+    }
+    // 'after'
+    const handle = this.toolRows.get(call.id);
+    const startedAt = this.toolStartTimes.get(call.id);
+    this.toolRows.delete(call.id);
+    this.toolStartTimes.delete(call.id);
+    if (!handle || startedAt === undefined) return;
+    const ms = Date.now() - startedAt;
+    const err = result?.error;
+    if (typeof err === 'string' && err.includes('URL provenance gate')) {
+      handle.blocked();
+      return;
+    }
+    if (err) {
+      handle.fail(ms);
+      return;
+    }
+    handle.ok(ms);
+  };
 
   /** ApprovalEngine.callbacks.promptUser */
   promptApproval = async (req: ApprovalRequest): Promise<ApprovalDecision> => {
@@ -146,14 +217,15 @@ Reply with ONE word: safe, caution, or dangerous.`;
 
   /** SkillTeacher.callbacks.promptUser */
   promptSkillProposal = async (proposal: SkillProposal): Promise<boolean> => {
-    this.display.line(60);
+    // Phase 23.5: dividers removed — blank lines carry the boundary.
+    this.display.write('\n');
     this.display.info(`Skill suggestion: ${proposal.proposedName}`);
     this.display.dim(`  ${proposal.description}`);
     if (proposal.toolsUsed.length > 0) {
       this.display.dim(`  tools: ${proposal.toolsUsed.join(', ')}`);
     }
     this.display.dim(`  confidence: ${proposal.confidence.toFixed(2)}`);
-    this.display.line(60);
+    this.display.write('\n');
 
     const prompts = await this.promptsPromise;
     try {
