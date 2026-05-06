@@ -18,12 +18,25 @@
 const realCDP = require('chrome-remote-interface');
 
 class CdpClient {
+  /**
+   * @param {object} opts
+   * @param {number} [opts.port=9222]
+   * @param {string} [opts.host='127.0.0.1']
+   * @param {function} [opts.criFactory] — chrome-remote-interface (or fake for tests)
+   * @param {function} [opts.ensureReady] — async () => { ok, reason?, manualCommand? }.
+   *   Phase 21 #1: lazy bootstrap. Called once on the first connect() to launch
+   *   the dedicated debug Chrome (or attach to an existing CDP endpoint) so the
+   *   REPL boot path never spawns a browser. Subsequent connect() calls reuse
+   *   the cached client and skip ensureReady entirely.
+   */
   constructor(opts = {}) {
     this.port = opts.port ?? 9222;
     this.host = opts.host ?? '127.0.0.1';
     this.criFactory = opts.criFactory ?? realCDP;
+    this.ensureReady = opts.ensureReady ?? null;
     this._client = null;
     this._connecting = null;
+    this._readyOnce = false; // ensureReady called for THIS plugin instance
   }
 
   async connect() {
@@ -31,6 +44,19 @@ class CdpClient {
     if (this._connecting) return this._connecting;
     this._connecting = (async () => {
       try {
+        // Phase 21 #1: lazy Chrome bootstrap. Skip when already done so the
+        // hot path stays a single CDP attach. ensureReady is responsible for
+        // its own reachability check — re-running on every reconnect would
+        // re-spawn Chrome unnecessarily.
+        if (this.ensureReady && !this._readyOnce) {
+          const r = await this.ensureReady();
+          this._readyOnce = true;
+          if (!r || r.ok !== true) {
+            const reason = (r && r.reason) || 'unknown reason';
+            const cmd = r && r.manualCommand ? ` Manual launch: ${r.manualCommand}` : '';
+            throw new Error(`CDP not ready on port ${this.port}: ${reason}.${cmd}`);
+          }
+        }
         const client = await this.criFactory({ port: this.port, host: this.host });
         await client.Page.enable();
         await client.Runtime.enable();

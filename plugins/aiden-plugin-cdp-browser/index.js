@@ -169,30 +169,41 @@ function buildToolHandlers(cdpClient) {
 /**
  * Plugin entrypoint. The loader awaits this and reports success/failure
  * via PluginRegistry.
+ *
+ * Phase 21 #1: Chrome is launched lazily on the first browser_real_*
+ * tool call rather than at plugin activation. Booting the Aiden REPL
+ * no longer pops a browser window — the user only sees Chrome appear
+ * when the agent actually decides to use a real-Chrome tool.
+ *
+ * Hermes pattern (cli.py:6850 _handle_browser_command): Chrome launch
+ * is bound to the explicit `/browser connect` slash command — never
+ * automatic. Aiden v4 takes a slightly more permissive line: the first
+ * browser_real_* tool call triggers the launch (no slash ritual). The
+ * tool itself is gated by the approval engine, so user consent still
+ * happens at exactly one point — just on first use rather than at boot.
  */
 async function register(ctx) {
-  const cdpClient = new CdpClient({ port: DEFAULT_PORT });
+  const aidenRoot = resolveAidenRoot();
+
+  // ensureReady is invoked AT MOST once per plugin instance, on first
+  // connect(). Subsequent CdpClient.connect() calls skip it because
+  // CdpClient caches both the client AND the readyOnce flag.
+  const ensureReady = () =>
+    ensureCdpReady({
+      port: DEFAULT_PORT,
+      aidenRoot,
+      timeoutMs: 8000,
+    });
+
+  const cdpClient = new CdpClient({ port: DEFAULT_PORT, ensureReady });
 
   for (const handler of buildToolHandlers(cdpClient)) {
     ctx.registerTool(handler);
   }
 
-  ctx.registerHook('onActivate', async () => {
-    const aidenRoot = resolveAidenRoot();
-    const r = await ensureCdpReady({
-      port: DEFAULT_PORT,
-      aidenRoot,
-      timeoutMs: 8000,
-    });
-    if (!r.ok) {
-      // Surface a helpful diagnostic. Loader logs warnings; we also include
-      // the manual command so a savvy user can launch Chrome themselves.
-      const cmd = r.manualCommand
-        ? ` Manual launch: ${r.manualCommand}`
-        : '';
-      throw new Error(`CDP not ready on port ${DEFAULT_PORT}: ${r.reason}.${cmd}`);
-    }
-  });
+  // onActivate is intentionally NOT registered. The plugin loads, the
+  // tools register, no Chrome is touched. The cdp connection is
+  // established the first time a browser_real_* tool is executed.
 
   ctx.registerHook('onTeardown', async () => {
     await cdpClient.close();

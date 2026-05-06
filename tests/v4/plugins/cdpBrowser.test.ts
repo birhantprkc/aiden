@@ -190,8 +190,9 @@ describe('plugin register() integration', () => {
 
   it('32. registerTool gates each tool through the plugin context (declared+permission)', async () => {
     // Smoke that the plugin's register() works end-to-end with the real
-    // PluginContext. We bypass onActivate (which would try to launch
-    // Chrome) by registering tools directly via a synthetic context.
+    // PluginContext. Phase 21 #1: register() no longer hooks onActivate
+    // (Chrome launch is now lazy on first tool call) so we just verify
+    // the three tools land and the teardown hook is wired.
     const tools = new ToolRegistry();
     const hooks = new Map<any, any>();
     // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -205,8 +206,72 @@ describe('plugin register() integration', () => {
         'browser_real_eval',
       ]),
     );
-    // onActivate registered but not fired.
-    expect(hooks.get('onActivate')?.length).toBe(1);
+    // Phase 21 #1: onActivate is no longer registered — boot must not
+    // touch Chrome. Allowing either "no entry" or "empty array" depending
+    // on whether the registry pre-populates hook keys.
+    const activate = hooks.get('onActivate');
+    expect(activate === undefined || activate.length === 0).toBe(true);
     expect(hooks.get('onTeardown')?.length).toBe(1);
+  });
+
+  it('33. Phase 21 #1 — register() does not call ensureCdpReady at boot', async () => {
+    // Inject a sentinel ensureCdpReady through module mocking. Since the
+    // plugin imports it from chromeLauncher.js, we monkey-patch the
+    // export on the live module BEFORE register() runs.
+    const tools = new ToolRegistry();
+    const hooks = new Map<any, any>();
+    const ensureCalls: number[] = [];
+    const original = launcher.ensureCdpReady;
+    launcher.ensureCdpReady = (...args: any[]) => {
+      ensureCalls.push(Date.now());
+      return Promise.resolve({ ok: true });
+    };
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const manifestRaw = require('../../../plugins/aiden-plugin-cdp-browser/plugin.json');
+      const ctx = new PluginContext(manifestRaw, tools, hooks);
+      await pluginEntry.register(ctx);
+      expect(ensureCalls.length).toBe(0);
+    } finally {
+      launcher.ensureCdpReady = original;
+    }
+  });
+
+  it('34. Phase 21 #1 — first tool call runs ensureReady; second reuses cached connection', async () => {
+    // CdpClient lazily invokes ensureReady on first connect() and never
+    // again on the same instance. We verify both: count of ensureReady
+    // calls AND count of CRI factory calls.
+    const ensureCalls: any[] = [];
+    const ensureReady = vi.fn(async () => {
+      ensureCalls.push(1);
+      return { ok: true };
+    });
+    const { factory, calls } = buildFakeCriFactory();
+    const c = new CdpClient({ criFactory: factory, ensureReady });
+    // First tool call.
+    const r1 = await c.click('.first');
+    expect(r1.clicked).toBe(true);
+    expect(ensureReady).toHaveBeenCalledTimes(1);
+    expect(factory).toHaveBeenCalledTimes(1);
+    // Second tool call.
+    const r2 = await c.extract('h2');
+    expect(r2).toBeDefined();
+    // ensureReady NOT called again — same instance, _readyOnce stays true.
+    expect(ensureReady).toHaveBeenCalledTimes(1);
+    // CRI factory NOT called again — cached client reused.
+    expect(factory).toHaveBeenCalledTimes(1);
+  });
+
+  it('35. Phase 21 #1 — ensureReady failure surfaces as connect error with manualCommand', async () => {
+    const ensureReady = vi.fn(async () => ({
+      ok: false,
+      reason: 'no chrome on PATH',
+      manualCommand: 'chrome --remote-debugging-port=9222',
+    }));
+    const { factory } = buildFakeCriFactory();
+    const c = new CdpClient({ criFactory: factory, ensureReady });
+    await expect(c.click('.x')).rejects.toThrow(/CDP not ready.*no chrome on PATH.*Manual launch/);
+    // CRI factory must NOT have been called when ensureReady failed.
+    expect(factory).not.toHaveBeenCalled();
   });
 });
