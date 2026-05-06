@@ -28,7 +28,40 @@ Searches confirm: no `claude_subscription` or `chatgpt_subscription` parallel ke
 
 `agent/credential_pool.py:423` hard-asserts `self.provider != "anthropic"` to skip non-anthropic entries — every consumer trusts the canonical provider name.
 
-## Decision for Aiden
+## Resolver chain appendix (Phase 21 #5 reopen)
+
+After the registry unification (commit 9b3ecab) the user retest still
+hit `No credentials found for apiMode='codex_responses' at auth.json`.
+Re-audit revealed the actual call-chain bug — orthogonal to the
+registry shape:
+
+- `runtimeResolver.resolveCredentials()` line 227 has the canonical
+  Phase 18 OAuth fast-path: `if (entry.oauth && options.paths) { ...
+  loadTokens(paths, entry.oauth.providerId) }`.
+- The fast-path is gated on **`options.paths`** being passed.
+- `chatSession.setProvider()` (line 157) called
+  `this.opts.resolver.resolve({ providerId, modelId })` — **no paths**.
+- Without paths the gate fails, the fast-path is skipped, and the chain
+  falls through to the legacy `credentialResolver.getCredentialsForMode`
+  which reads from `auth.json` and throws the user-reported error.
+
+### Hermes equivalent
+
+`hermes_cli/main.py::HermesCLI._handle_model_command` calls
+`get_pool_for_provider(provider_id)` which reads from a single
+`load_pool()` — no separate "paths" parameter. Hermes routes purely by
+provider id; the pool knows where credentials live for each source. By
+contrast, Aiden's runtimeResolver still threads paths through every
+call site, so any forgetful caller defeats the OAuth fast-path
+silently.
+
+### Fix
+
+`chatSession.setProvider()` now forwards `this.opts.paths` to
+`resolver.resolve()`. Auxiliary client wrapper (`aidenCLI:591`) does
+the same. Both call sites are covered. Cross-call integration tests
+were added to catch future regressions — the original parity tests
+verified registry shape only and would not have caught this.
 Adopt Hermes pattern. Aiden has **two parallel registry entries per OAuth service** today (`claude_subscription` + `claude-pro`, `chatgpt_subscription` + `chatgpt-plus`). The legacy snake_case stubs lack `oauth.providerId`; selecting them through the picker routes credentials through the deprecated `auth.json` `credentialResolver` path which has no fresh tokenStore awareness.
 
 The fix is **deletion**, not aliasing. A single canonical entry per service; remove the stubs entirely. This matches Hermes one-name-per-service and eliminates the divergence at its root.

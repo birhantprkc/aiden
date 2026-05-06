@@ -154,7 +154,18 @@ export class ChatSession implements ChatSessionLike {
     return this.totalUsage;
   }
   async setProvider(providerId: string, modelId: string): Promise<void> {
-    const adapter = await this.opts.resolver.resolve({ providerId, modelId });
+    // Phase 21 #5 reopen: forward `paths` so RuntimeResolver can hit the
+    // Phase 18 OAuth fast-path (entry.oauth.providerId → tokenStore at
+    // <aiden-home>/auth/<id>.json). Without paths the resolver skips the
+    // fast-path and falls through to the legacy auth.json credential
+    // path, which throws the user-reported "No credentials found for
+    // apiMode='codex_responses' at .../auth.json" error even after a
+    // successful /auth login.
+    const adapter = await this.opts.resolver.resolve({
+      providerId,
+      modelId,
+      paths: this.opts.paths,
+    });
     this.opts.agent.setProvider(adapter);
     this.currentProviderId = providerId;
     this.currentModelId = modelId;
