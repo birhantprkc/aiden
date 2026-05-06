@@ -24,6 +24,11 @@ function mockPrompts(answers: string[]): PickerPrompts {
   };
 }
 
+/** Phase 22: stage-1 messages start with `⚙ Model Picker — Select Provider`. */
+function isStage1(message: string): boolean {
+  return message.includes('⚙ Model Picker — Select Provider');
+}
+
 describe('runModelPicker', () => {
   it('parses provider:model spec without prompting', async () => {
     const result = await runModelPicker({
@@ -59,15 +64,11 @@ describe('runModelPicker', () => {
     expect(result).toBeNull();
   });
 
-  it('interactive picker shows all 19 providers when no tier filter', async () => {
+  it('interactive picker shows all 19 providers + Cancel row', async () => {
     const select = vi.fn(async (opts: any) => {
-      // First call = provider, second call = model
-      if (opts.message.startsWith('Select provider')) {
-        // Phase 21 #5 unification: removed the two legacy snake_case
-        // OAuth stubs (claude_subscription, chatgpt_subscription) so the
-        // picker now exposes ONE entry per OAuth service: the canonical
-        // claude-pro and chatgpt-plus IDs. 21 providers → 19.
-        expect(opts.choices.length).toBe(19);
+      if (isStage1(opts.message)) {
+        // Phase 22 Task 3: 19 providers + a Cancel row = 20 stage-1 rows.
+        expect(opts.choices.length).toBe(20);
         return 'groq';
       }
       return 'llama-3.3-70b-versatile';
@@ -83,7 +84,7 @@ describe('runModelPicker', () => {
   it('renders tier badges in provider choices', async () => {
     const seen: string[] = [];
     const select = vi.fn(async (opts: any) => {
-      if (opts.message.startsWith('Select provider')) {
+      if (isStage1(opts.message)) {
         for (const c of opts.choices) seen.push(c.name);
         return 'ollama';
       }
@@ -103,7 +104,7 @@ describe('runModelPicker', () => {
   it('model choice includes context length and pricing when available', async () => {
     let modelChoices: any[] = [];
     const select = vi.fn(async (opts: any) => {
-      if (opts.message.startsWith('Select provider')) return 'anthropic';
+      if (isStage1(opts.message)) return 'anthropic';
       modelChoices = opts.choices;
       return 'claude-opus-4-7';
     });
@@ -119,7 +120,7 @@ describe('runModelPicker', () => {
   it('model choice omits pricing when undefined', async () => {
     let modelChoices: any[] = [];
     const select = vi.fn(async (opts: any) => {
-      if (opts.message.startsWith('Select provider')) return 'ollama';
+      if (isStage1(opts.message)) return 'ollama';
       modelChoices = opts.choices;
       return 'llama3.2';
     });
@@ -132,7 +133,7 @@ describe('runModelPicker', () => {
     expect(local.name).toMatch(/131K/);
   });
 
-  it('returns null when user cancels provider prompt', async () => {
+  it('returns null when user cancels provider prompt via Ctrl+C', async () => {
     const result = await runModelPicker({
       resolver: realResolver(),
       promptModule: mockPrompts(['__CANCEL__']),
@@ -140,7 +141,7 @@ describe('runModelPicker', () => {
     expect(result).toBeNull();
   });
 
-  it('returns null when user cancels model prompt', async () => {
+  it('returns null when user cancels model prompt via Ctrl+C', async () => {
     const result = await runModelPicker({
       resolver: realResolver(),
       promptModule: mockPrompts(['anthropic', '__CANCEL__']),
@@ -148,10 +149,10 @@ describe('runModelPicker', () => {
     expect(result).toBeNull();
   });
 
-  it('tier filter restricts provider list', async () => {
+  it('tier filter restricts provider list (+ Cancel row)', async () => {
     let count = 0;
     const select = vi.fn(async (opts: any) => {
-      if (opts.message.startsWith('Select provider')) {
+      if (isStage1(opts.message)) {
         count = opts.choices.length;
         return 'ollama';
       }
@@ -162,6 +163,158 @@ describe('runModelPicker', () => {
       promptModule: { select },
       tier: 'local',
     });
-    expect(count).toBe(1); // only ollama is tier 'local'
+    // Phase 22 Task 3: 1 provider + Cancel row.
+    expect(count).toBe(2);
+  });
+
+  // ── Phase 22 Task 3 additions ─────────────────────────────────────────
+
+  it('stage-1 row carries the (N models) count badge per provider', async () => {
+    const seen: string[] = [];
+    const select = vi.fn(async (opts: any) => {
+      if (isStage1(opts.message)) {
+        for (const c of opts.choices) seen.push(c.name);
+        return 'anthropic';
+      }
+      return 'claude-opus-4-7';
+    });
+    await runModelPicker({
+      resolver: realResolver(),
+      promptModule: { select },
+    });
+    const anthropicRow = seen.find((s) => s.startsWith('Anthropic'))!;
+    expect(anthropicRow).toBeDefined();
+    expect(anthropicRow).toMatch(/\(\d+ model[s]?\)/);
+  });
+
+  it('stage-1 shows ✓ authed for providers reporting credentials', async () => {
+    const seen: string[] = [];
+    const select = vi.fn(async (opts: any) => {
+      if (isStage1(opts.message)) {
+        for (const c of opts.choices) seen.push(c.name);
+        return 'anthropic';
+      }
+      return 'claude-opus-4-7';
+    });
+    await runModelPicker({
+      resolver: realResolver(),
+      promptModule: { select },
+      isProviderAuthed: (id) => id === 'anthropic',
+    });
+    const anthropicRow = seen.find((s) => s.startsWith('Anthropic'))!;
+    const groqRow = seen.find((s) => s.startsWith('Groq'))!;
+    expect(anthropicRow).toMatch(/✓ authed/);
+    expect(groqRow).toMatch(/⚠ no API key/);
+  });
+
+  it('stage-1 marks the current provider with ← current and stage-2 the current model', async () => {
+    let seenStage1: string[] = [];
+    let seenStage2: string[] = [];
+    const select = vi.fn(async (opts: any) => {
+      if (isStage1(opts.message)) {
+        seenStage1 = opts.choices.map((c: any) => c.name);
+        return 'anthropic';
+      }
+      seenStage2 = opts.choices.map((c: any) => c.name);
+      return 'claude-opus-4-7';
+    });
+    await runModelPicker({
+      resolver: realResolver(),
+      promptModule: { select },
+      currentProviderId: 'anthropic',
+      currentModelId: 'claude-opus-4-7',
+    });
+    expect(seenStage1.find((r) => r.startsWith('Anthropic'))).toMatch(/← current/);
+    expect(seenStage2.find((r) => r.startsWith('Claude Opus 4.7'))).toMatch(/← current/);
+  });
+
+  it('stage-1 hint shows "Current: <provider> on <model>" when supplied', async () => {
+    let stage1Message = '';
+    const select = vi.fn(async (opts: any) => {
+      if (isStage1(opts.message)) {
+        stage1Message = opts.message;
+        return 'anthropic';
+      }
+      return 'claude-opus-4-7';
+    });
+    await runModelPicker({
+      resolver: realResolver(),
+      promptModule: { select },
+      currentProviderId: 'groq',
+      currentModelId: 'llama-3.3-70b-versatile',
+    });
+    expect(stage1Message).toMatch(/Current: groq on llama-3\.3-70b-versatile/);
+  });
+
+  it('stage-2 message carries the breadcrumb to the chosen provider', async () => {
+    let stage2Message = '';
+    const select = vi.fn(async (opts: any) => {
+      if (isStage1(opts.message)) return 'anthropic';
+      stage2Message = opts.message;
+      return 'claude-opus-4-7';
+    });
+    await runModelPicker({
+      resolver: realResolver(),
+      promptModule: { select },
+    });
+    expect(stage2Message).toMatch(/⚙ Model Picker — Anthropic/);
+    expect(stage2Message).toMatch(/Select a model \(\d+ available\)/);
+  });
+
+  it('stage-2 includes ← Back and Cancel rows after the model list', async () => {
+    let modelChoices: any[] = [];
+    const select = vi.fn(async (opts: any) => {
+      if (isStage1(opts.message)) return 'anthropic';
+      modelChoices = opts.choices;
+      return 'claude-opus-4-7';
+    });
+    await runModelPicker({
+      resolver: realResolver(),
+      promptModule: { select },
+    });
+    expect(modelChoices.at(-2)?.name).toBe('← Back');
+    expect(modelChoices.at(-1)?.name).toBe('Cancel');
+  });
+
+  it('selecting ← Back returns to stage 1 and re-prompts cleanly', async () => {
+    const calls: string[] = [];
+    let stage1Calls = 0;
+    const select = vi.fn(async (opts: any) => {
+      calls.push(opts.message);
+      if (isStage1(opts.message)) {
+        stage1Calls += 1;
+        // First time pick anthropic; second time (after Back) pick groq.
+        return stage1Calls === 1 ? 'anthropic' : 'groq';
+      }
+      // Stage 2: first time return BACK, second time pick a real model.
+      const backChoice = opts.choices.find((c: any) => c.name === '← Back');
+      if (calls.filter((m) => !isStage1(m)).length === 1) {
+        return backChoice.value;
+      }
+      return 'llama-3.3-70b-versatile';
+    });
+    const result = await runModelPicker({
+      resolver: realResolver(),
+      promptModule: { select },
+    });
+    expect(result).toEqual({ providerId: 'groq', modelId: 'llama-3.3-70b-versatile' });
+    // 4 calls: stage1 → stage2(back) → stage1 → stage2(pick).
+    expect(stage1Calls).toBe(2);
+  });
+
+  it('marks the catalog default model with ⭐ recommended', async () => {
+    let modelChoices: any[] = [];
+    const select = vi.fn(async (opts: any) => {
+      if (isStage1(opts.message)) return 'anthropic';
+      modelChoices = opts.choices;
+      return 'claude-opus-4-7';
+    });
+    await runModelPicker({
+      resolver: realResolver(),
+      promptModule: { select },
+    });
+    const recommended = modelChoices.filter((c) => /⭐ recommended/.test(c.name));
+    // At least one model in any provider's catalog must be the default.
+    expect(recommended.length).toBeGreaterThan(0);
   });
 });

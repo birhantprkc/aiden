@@ -11,9 +11,43 @@
  * provider/model. Empty args opens the interactive picker (also reused by
  * `aiden model`). Spec form is parsed via Phase 5's ModelSwitcher.
  */
+import path from 'node:path';
+import fs from 'node:fs';
+
 import type { SlashCommand, SlashCommandContext } from '../commandRegistry';
 import { ModelSwitcher } from '../../../providers/v4/modelSwitch';
 import { runModelPicker } from './modelPicker';
+import { PROVIDER_REGISTRY } from '../../../providers/v4/registry';
+
+/**
+ * Sync auth-state probe used by the Phase 22 picker. Single source of
+ * truth for "is this provider usable right now":
+ *   - local providers (ollama) — assume authed; the actual switch
+ *     surfaces a daemon-not-reachable error if not.
+ *   - OAuth providers — token file at <root>/auth/<oauth-id>.json must
+ *     exist. Token validity is the runtime resolver's concern.
+ *   - env-var providers — process.env[apiKeyEnvVar] must be non-empty.
+ */
+function makeAuthProbe(rootPath: string | undefined): (id: string) => boolean {
+  return (providerId: string): boolean => {
+    const entry = PROVIDER_REGISTRY[providerId];
+    if (!entry) return false;
+    if (entry.tier === 'local') return true;
+    if (entry.oauth && rootPath) {
+      try {
+        fs.accessSync(path.join(rootPath, 'auth', `${entry.oauth.providerId}.json`));
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    if (entry.apiKeyEnvVar) {
+      const v = process.env[entry.apiKeyEnvVar];
+      return typeof v === 'string' && v.length > 0;
+    }
+    return false;
+  };
+}
 
 export const model: SlashCommand = {
   name: 'model',
@@ -47,7 +81,12 @@ export const model: SlashCommand = {
         return {};
       }
     } else {
-      const picked = await runModelPicker({ resolver: ctx.resolver });
+      const picked = await runModelPicker({
+        resolver: ctx.resolver,
+        currentProviderId: ctx.session?.getCurrentProvider(),
+        currentModelId: ctx.session?.getCurrentModel(),
+        isProviderAuthed: makeAuthProbe(ctx.paths?.root),
+      });
       if (!picked) {
         ctx.display.dim('Model unchanged.');
         return {};

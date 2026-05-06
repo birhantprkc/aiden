@@ -80,11 +80,15 @@ describe('barrel exports', () => {
 });
 
 describe('/help', () => {
-  it('lists registered system commands', async () => {
+  it('lists registered system commands grouped by Phase 22 sub-section', async () => {
     const { ctx, output } = makeCtx();
     await help.handler(ctx as any);
     const out = output();
-    expect(out).toMatch(/System commands/);
+    // Phase 22 Task 2 swapped the flat "System commands:" header for
+    // ── Section ── banners. /help and /quit live in the Help and
+    // System buckets respectively.
+    expect(out).toMatch(/── Help ──/);
+    expect(out).toMatch(/── System ──/);
     expect(out).toMatch(/\/help/);
     expect(out).toMatch(/\/quit/);
   });
