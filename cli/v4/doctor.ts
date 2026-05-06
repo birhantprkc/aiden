@@ -68,16 +68,33 @@ async function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T
   }
 }
 
-/** Run a binary with --version and resolve true on exit code 0. */
+/**
+ * Run a binary with --version and resolve true on exit code 0.
+ *
+ * Phase 20.2 — `shell: true` on Windows so npm shims (`npx.cmd`,
+ * `npm.cmd`, `tsc.cmd`, ...) get resolved via cmd.exe's pathext lookup.
+ * Without it, Node's `spawn` only finds bare `.exe` files on Windows
+ * and reports `npx not found` even when `npx --version` works fine in
+ * the user's shell. POSIX is unchanged — bare-name resolution there
+ * already covers shebangs.
+ *
+ * Args are hardcoded to `--version` everywhere this helper is called,
+ * so cmd.exe arg-interpretation is not a concern (no user input flows
+ * through the shell).
+ */
 function probeBinary(
   bin: string,
   args: string[],
   spawnImpl: typeof spawn,
 ): Promise<{ ok: boolean; stdout: string }> {
+  const useShell = process.platform === 'win32';
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawnImpl(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], shell: false });
+      child = spawnImpl(bin, args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: useShell,
+      });
     } catch {
       resolve({ ok: false, stdout: '' });
       return;
