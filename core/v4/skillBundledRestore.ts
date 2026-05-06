@@ -29,6 +29,7 @@
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 
 import type { AidenPaths } from './paths';
 import { BundledManifest } from './skillBundledManifest';
@@ -182,6 +183,18 @@ export async function restoreBundledSkillsIfNeeded(
     } catch {
       /* manifest update is best-effort */
     }
+    // Phase 22 Group C smoke-fix #2: stamp the bundle version on the
+    // fresh-install copy so the subsequent syncBundledSkillsIfStale
+    // call no-ops. Without this, every fresh-install boot does the
+    // same work twice (restore copies, sync re-copies because no
+    // version file exists yet).
+    try {
+      const version = await resolvePackageVersion();
+      await fs.mkdir(path.dirname(paths.skillsBundleVersion), { recursive: true });
+      await fs.writeFile(paths.skillsBundleVersion, version + '\n', 'utf-8');
+    } catch {
+      /* sync will retry on the next boot */
+    }
   }
 
   return result;
@@ -220,4 +233,192 @@ async function copyDirRecursive(src: string, dst: string): Promise<void> {
     }
     // Symlinks intentionally skipped — bundled skills shouldn't contain any.
   }
+}
+
+// ─── Phase 22 Group C smoke-fix #2 — bundle-version sync ──────────────
+
+export interface BundleSyncResult {
+  /** Source dir resolved against the package layout, or null. */
+  sourceDir: string | null;
+  /** Recorded bundle version on disk before the sync ran (empty when fresh). */
+  installedVersion: string;
+  /** Current bundle version (from package.json or `bundleVersion` override). */
+  bundleVersion: string;
+  /** Skills overwritten with the bundled copy. */
+  refreshed: number;
+  /** Skills left alone because they're flagged user-modified. */
+  preserved: number;
+  /** Skills added that weren't on disk yet. */
+  added: number;
+  /** True when the version on disk now matches `bundleVersion`. */
+  versionUpdated: boolean;
+}
+
+/**
+ * Resolve the bundle's intrinsic version. Reads `package.json` next to
+ * the package root by walking parent dirs from `__dirname`. Tests
+ * inject `override` to avoid disk dependency.
+ */
+async function resolvePackageVersion(override?: string): Promise<string> {
+  if (override) return override;
+  let cursor = __dirname;
+  for (let depth = 0; depth < 6; depth += 1) {
+    const candidate = path.join(cursor, 'package.json');
+    try {
+      const raw = await fs.readFile(candidate, 'utf-8');
+      const parsed = JSON.parse(raw);
+      const v = parsed?.version;
+      if (typeof v === 'string' && v.length > 0) return v;
+    } catch {
+      /* keep walking */
+    }
+    cursor = path.dirname(cursor);
+  }
+  return '0.0.0';
+}
+
+async function readInstalledVersion(file: string): Promise<string> {
+  try {
+    const raw = await fs.readFile(file, 'utf-8');
+    return raw.trim();
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return '';
+    throw e;
+  }
+}
+
+async function writeInstalledVersion(file: string, version: string): Promise<void> {
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, version + '\n', 'utf-8');
+}
+
+function sha256(text: string): string {
+  return crypto.createHash('sha256').update(text).digest('hex');
+}
+
+/**
+ * Sync bundled skills into `paths.skillsDir` whenever the package's
+ * bundled-skill version differs from the version recorded on disk.
+ *
+ * Per-skill rules:
+ *   • Skill not present in user dir → copy bundled copy (counted as
+ *     "added"; `restoreBundledSkillsIfNeeded` covers the same path on
+ *     fresh installs but the sync handles versions that ADD skills).
+ *   • Skill present, BundledManifest reports it user-modified → leave
+ *     alone (counted as "preserved"). The user keeps their edits.
+ *   • Skill present, NOT user-modified → overwrite with bundled
+ *     content (counted as "refreshed"). This is the path that fixes
+ *     Phase 22 Task 8's Bug 2: existing installs whose user-data
+ *     copy lags behind a newer bundle (e.g. tightened skill.json
+ *     descriptions).
+ *
+ * After the walk completes the on-disk version is updated so the next
+ * boot is a no-op until the package version bumps again.
+ */
+export async function syncBundledSkillsIfStale(
+  paths: AidenPaths,
+  opts: {
+    sourceOverride?: string;
+    /** Test seam — defaults to package.json read. */
+    bundleVersion?: string;
+  } = {},
+): Promise<BundleSyncResult> {
+  const result: BundleSyncResult = {
+    sourceDir: null,
+    installedVersion: '',
+    bundleVersion: '',
+    refreshed: 0,
+    preserved: 0,
+    added: 0,
+    versionUpdated: false,
+  };
+
+  result.bundleVersion = await resolvePackageVersion(opts.bundleVersion);
+  result.installedVersion = await readInstalledVersion(paths.skillsBundleVersion);
+  if (result.installedVersion === result.bundleVersion) {
+    return result; // already in sync — common case after the first boot
+  }
+
+  const sourceDir = await resolveBundledSkillsDir({
+    override: opts.sourceOverride,
+  });
+  result.sourceDir = sourceDir;
+  if (!sourceDir) return result;
+
+  let bundledEntries: string[];
+  try {
+    bundledEntries = await fs.readdir(sourceDir);
+  } catch {
+    return result;
+  }
+
+  await fs.mkdir(paths.skillsDir, { recursive: true });
+  const manifest = new BundledManifest(paths);
+
+  for (const entry of bundledEntries) {
+    const lc = entry.toLowerCase();
+    if (lc === 'aiden_catalog.md' || lc === 'skill_template.md') continue;
+    const src = path.join(sourceDir, entry);
+    const dst = path.join(paths.skillsDir, entry);
+
+    let stat;
+    try {
+      stat = await fs.stat(src);
+    } catch {
+      continue;
+    }
+
+    if (stat.isDirectory()) {
+      const skillFile = path.join(src, 'SKILL.md');
+      if (!(await fileExists(skillFile))) continue;
+      if (!(await dirExists(dst))) {
+        await copyDirRecursive(src, dst);
+        result.added += 1;
+        continue;
+      }
+      // Skill present — preserve user-modified, otherwise refresh.
+      const userModified = await manifest.isUserModified(entry).catch(() => false);
+      if (userModified) {
+        result.preserved += 1;
+        continue;
+      }
+      await copyDirRecursive(src, dst);
+      result.refreshed += 1;
+    } else if (stat.isFile() && lc.endsWith('.md')) {
+      // Single-file skill (legacy shape). Compare hashes; overwrite
+      // when content actually differs.
+      const bundledRaw = await fs.readFile(src, 'utf-8');
+      let userRaw = '';
+      try {
+        userRaw = await fs.readFile(dst, 'utf-8');
+      } catch {
+        await fs.copyFile(src, dst);
+        result.added += 1;
+        continue;
+      }
+      if (sha256(userRaw) === sha256(bundledRaw)) {
+        result.preserved += 1;
+        continue;
+      }
+      // Content drifted but we have no per-file user-modified flag for
+      // single-file skills — Phase 10 manifest tracks dirs only.
+      // Conservative: leave drifted single-file skills alone, surface as
+      // preserved. v4.1 expansion can add per-file tracking.
+      result.preserved += 1;
+    }
+  }
+
+  // Refresh the manifest hashes so isUserModified() reflects the new
+  // bundled content for the next sync.
+  if (result.refreshed > 0 || result.added > 0) {
+    try {
+      await manifest.initialize(sourceDir);
+    } catch {
+      /* manifest update is best-effort */
+    }
+  }
+
+  await writeInstalledVersion(paths.skillsBundleVersion, result.bundleVersion);
+  result.versionUpdated = true;
+  return result;
 }

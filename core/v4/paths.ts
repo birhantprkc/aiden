@@ -72,6 +72,16 @@ export interface AidenPaths {
   logsDir: string;
   /** root/.bundled_manifest — sha map of skills shipped with the package. */
   bundledManifest: string;
+  /**
+   * root/.skills-bundle-version — single-line text file recording the
+   * package version whose bundled skills were last synced into
+   * `skillsDir`. On boot, syncBundledSkillsIfStale compares this to the
+   * current package.json version and re-copies bundled skills (skipping
+   * user-modified ones per BundledManifest) when they differ. Phase 22
+   * Group C smoke-fix #2 — without this, bundle-side description /
+   * SKILL.md updates never reached existing installs.
+   */
+  skillsBundleVersion: string;
 }
 
 export interface ResolveAidenPathsOptions {
@@ -156,6 +166,7 @@ export function resolveAidenPaths(opts: ResolveAidenPathsOptions = {}): AidenPat
     pluginsDir: path.join(root, 'plugins'),
     logsDir: path.join(root, 'logs'),
     bundledManifest: path.join(root, '.bundled_manifest'),
+    skillsBundleVersion: path.join(root, '.skills-bundle-version'),
   };
 }
 

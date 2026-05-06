@@ -85,7 +85,10 @@ import {
   buildDefaultSlots,
   type ProviderSlot,
 } from '../../core/v4/providerFallback';
-import { restoreBundledSkillsIfNeeded } from '../../core/v4/skillBundledRestore';
+import {
+  restoreBundledSkillsIfNeeded,
+  syncBundledSkillsIfStale,
+} from '../../core/v4/skillBundledRestore';
 import { createFileLogger } from '../../core/v4/aidenLogger';
 import {
   PluginLoader,
@@ -376,6 +379,26 @@ export async function buildAgentRuntime(
   // Phase 16b.1: first-run / self-heal copy of bundled skills. No-op
   // when the user's skills dir is already populated.
   await restoreBundledSkillsIfNeeded(paths).catch(() => undefined);
+
+  // Phase 22 Group C smoke-fix: re-sync bundled skills whenever the
+  // package's bundle version differs from the version recorded in
+  // user-data. Without this, bundle-side updates (tightened
+  // descriptions, new SKILL.md content) never reached existing
+  // installs — restoreBundledSkillsIfNeeded only fires on first run.
+  // User-modified skills (per BundledManifest) are preserved.
+  try {
+    const sync = await syncBundledSkillsIfStale(paths);
+    if (sync.versionUpdated && sync.refreshed + sync.added > 0) {
+      // Single line on stderr so users see the upgrade happen but
+      // the boot card stays clean. skillsLogger isn't constructed
+      // yet at this point in the boot sequence.
+      process.stderr.write(
+        `[skills] refreshed ${sync.refreshed}, added ${sync.added}, preserved ${sync.preserved} (bundle ${sync.installedVersion || '<fresh>'} → ${sync.bundleVersion})\n`,
+      );
+    }
+  } catch {
+    /* silent — sync is best-effort, restore already populated dirs */
+  }
 
   const config = new ConfigManager(paths);
   await config.load();

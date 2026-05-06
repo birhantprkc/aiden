@@ -24,6 +24,7 @@ function makePaths(root: string): AidenPaths {
     pluginsDir: path.join(root, 'plugins'),
     logsDir: path.join(root, 'logs'),
     bundledManifest: path.join(root, '.bundled_manifest'),
+    skillsBundleVersion: path.join(root, '.skills-bundle-version'),
   };
 }
 
