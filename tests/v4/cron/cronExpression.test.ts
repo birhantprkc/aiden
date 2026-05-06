@@ -49,6 +49,12 @@ describe('parseSchedule — intervals (regression)', () => {
     ['2h',               2 * 3_600_000],
     ['1d',               86_400_000],
     ['45s',              45_000],
+    // 24.1c — "every <N><shortcode>" must work alongside the long form.
+    ['every 2m',         2  * 60_000],
+    ['every 30m',        30 * 60_000],
+    ['every 1h',         1  * 3_600_000],
+    ['every 30s',        30 * 1000],
+    ['every 7d',         7  * 86_400_000],
   ])('"%s" → %i ms', (input, expected) => {
     const spec = parseSchedule(input)
     expect(spec.kind).toBe('interval')

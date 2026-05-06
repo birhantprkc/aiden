@@ -75,14 +75,21 @@ function tryParseOneshot(raw: string): ScheduleSpec | null {
 function parseInterval(raw: string): ScheduleSpec {
   const norm = raw.toLowerCase()
 
-  // "every N <unit>"
+  // "every N <unit>" — accepts both full words ("every 2 minutes") and
+  // shortcodes ("every 2m"). The space between number and unit is optional
+  // for shortcodes, required for full words; both branches share the same
+  // unit→ms mapping (which keys on first character) below.
   const everyN = norm.match(
-    /^every\s+(\d+)\s+(second|seconds|minute|minutes|hour|hours|day|days)$/,
+    /^every\s+(\d+)\s*(seconds?|minutes?|hours?|days?|s|sec|secs|m|min|mins|h|hr|hrs|d)$/,
   )
   if (everyN) {
     const n  = parseInt(everyN[1], 10)
-    const u  = everyN[2].replace(/s$/, '')
-    const ms = unitToMs(u, n)
+    // Strip trailing plural "s" only for words ("seconds" → "second"). The
+    // bare "s" shortcode must survive — without this guard "every 30s"
+    // would collapse to "" and fail unitToMs.
+    const tok = everyN[2]
+    const u   = tok.length > 1 ? tok.replace(/s$/, '') : tok
+    const ms  = unitToMs(u, n)
     if (ms != null) return interval(ms, raw)
   }
 

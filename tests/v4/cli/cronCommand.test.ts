@@ -96,21 +96,48 @@ describe('/cron list — empty state', () => {
   })
 })
 
-describe('/cron remove — requires confirmation', () => {
-  it('does not call deleteJob when confirm returns false', async () => {
+describe('/cron remove — y/N prompt parsing (24.1c)', () => {
+  beforeEach(() => {
     cronMocks.listJobs.mockReturnValue([{ id: 'aaaabbbb', description: 'job' }])
-    const confirm = vi.fn(async () => false)
-    const { ctx, output } = makeCtx('remove job', { confirm })
+    cronMocks.deleteJob.mockReturnValue(true)
+  })
+
+  it('shows a "(y/N)" prompt — disambiguates from the job id', async () => {
+    const prompt = vi.fn(async () => 'n')
+    const { ctx } = makeCtx('remove job', { prompt })
     await cron.handler(ctx as any)
-    expect(confirm).toHaveBeenCalledOnce()
+    expect(prompt).toHaveBeenCalledOnce()
+    expect((prompt.mock.calls[0][0] as string)).toMatch(/\(y\/N\)/)
+  })
+
+  it('typing the job id ("1") is treated as cancel, not delete', async () => {
+    const prompt = vi.fn(async () => '1')
+    const { ctx, output } = makeCtx('remove job', { prompt })
+    await cron.handler(ctx as any)
     expect(cronMocks.deleteJob).not.toHaveBeenCalled()
     expect(output()).toMatch(/Cancelled/)
   })
-  it('calls deleteJob when confirm returns true', async () => {
-    cronMocks.listJobs.mockReturnValue([{ id: 'aaaabbbb', description: 'job' }])
-    cronMocks.deleteJob.mockReturnValue(true)
-    const { ctx } = makeCtx('remove job', { confirm: vi.fn(async () => true) })
+
+  it.each([['y'], ['Y'], ['yes'], ['YES']])('typing %j confirms', async (answer) => {
+    const prompt = vi.fn(async () => answer)
+    const { ctx } = makeCtx('remove job', { prompt })
     await cron.handler(ctx as any)
+    expect(cronMocks.deleteJob).toHaveBeenCalledWith('aaaabbbb')
+  })
+
+  it('typing nothing (empty) cancels', async () => {
+    const prompt = vi.fn(async () => '')
+    const { ctx, output } = makeCtx('remove job', { prompt })
+    await cron.handler(ctx as any)
+    expect(cronMocks.deleteJob).not.toHaveBeenCalled()
+    expect(output()).toMatch(/Cancelled/)
+  })
+
+  it('falls back to ctx.confirm when ctx.prompt is not wired', async () => {
+    const confirm = vi.fn(async () => true)
+    const { ctx } = makeCtx('remove job', { confirm })
+    await cron.handler(ctx as any)
+    expect(confirm).toHaveBeenCalledOnce()
     expect(cronMocks.deleteJob).toHaveBeenCalledWith('aaaabbbb')
   })
 })

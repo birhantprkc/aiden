@@ -237,12 +237,18 @@ function cmdDisable(ctx: SlashCommandContext, args: string[]): void {
 async function cmdRemove(ctx: SlashCommandContext, args: string[]): Promise<void> {
   const job = resolveJob(args[0] ?? '');
   if (!job) { ctx.display.printError(`Job not found: ${args[0] ?? '(missing)'}`); return; }
-  // Confirm before deletion. If no confirm hook is wired (tests/CLI variants
-  // without prompts), fall back to refusing the destructive op rather than
-  // surprise-deleting.
-  const ok = ctx.confirm
-    ? await ctx.confirm(`Delete cron job "${job.description}" [${shortId(job.id)}]?`)
-    : false;
+  // Confirmation: prefer ctx.prompt so we own the y/N parsing — that way
+  // typing the job's id (or anything other than y/yes) is unambiguously
+  // treated as cancel. If neither prompt nor confirm is wired we refuse the
+  // destructive op rather than surprise-deleting.
+  const question = `Delete cron job "${job.description}" [${shortId(job.id)}]? (y/N) `;
+  let ok = false;
+  if (ctx.prompt) {
+    const answer = (await ctx.prompt(question)).trim();
+    ok = /^(y|yes)$/i.test(answer);
+  } else if (ctx.confirm) {
+    ok = await ctx.confirm(question);
+  }
   if (!ok) { ctx.display.dim('Cancelled.'); return; }
   if (deleteJob(job.id)) {
     await awaitPendingSaves();
