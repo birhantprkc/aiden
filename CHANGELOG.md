@@ -1,3 +1,67 @@
+## v4.0.1 — 2026-05-07 · security patch
+
+Security patch covering 15 Dependabot alerts (10 high, 5 medium, 0
+critical) plus the secret-scanning audit done in tandem.
+
+### Dependency bumps
+
+- **axios** `^1.13.5` → `^1.15.2` — fixes prototype pollution gadgets
+  in HTTP adapter (high) and invisible JSON tampering via `parseReviver`
+  (medium).
+- **multer** `^1.4.5-lts.2` → `^2.1.1` — fixes 6 separate DoS CVEs
+  (uncontrolled recursion, incomplete cleanup, resource exhaustion,
+  unhandled exception × 2, memory leak from unclosed streams). All
+  high. Major version bump verified against Aiden's call sites
+  (`api/server.ts:445-467` — `diskStorage` + standard `fileFilter`,
+  no API changes needed).
+- **@types/multer** `^1.4.12` → `^2.0.0` — match runtime.
+
+### Transitive overrides
+
+`package.json` `overrides` block to force-resolve vulnerable
+transitives without waiting for upstream packages to bump:
+
+- `basic-ftp` → `^5.3.1` (high — DoS via unbounded multiline buffer)
+- `ip-address` → `^10.1.1` (medium — XSS in HTML-emitting methods)
+- `semver` → `^7.5.2` (high — RegEx DoS)
+- `postcss` → `^8.5.10` (medium — XSS in CSS Stringify)
+- `hono` → `^4.12.16` (medium — bodyLimit bypass + JSX HTML injection)
+- `minimatch` → `^9.0.9` (pin: v10 changed default-export to
+  named-only, broke `permissionSystem.ts` and `toolRegistry.ts`).
+
+### Source changes
+
+- `core/permissionSystem.ts` and `core/toolRegistry.ts` switched from
+  `import minimatch from 'minimatch'` to
+  `import { minimatch } from 'minimatch'` for forward-compat with
+  minimatch v9+ and v10+ (named export is stable across both).
+- `package.json` `build:cli` and `build:api` scripts add
+  `--external:@aws-sdk/client-s3` so esbuild ignores the optional
+  unzipper transitive that's only required when fetching ZIPs from
+  S3 (Aiden doesn't).
+
+### Secret-scanning resolutions
+
+- Alert #1, #2 (Google API Keys in WhatsApp web cache files) — `wont_fix`.
+  Keys are Google's own (Firebase / Maps) embedded in WhatsApp's web
+  client; cached by Chromium service worker via `whatsapp-web.js`.
+  Cache directory removed from main; only reachable via `v3.11-final`
+  tag history.
+- Alert #3 (Tenor API key in `skills/gif-search/SKILL.md`) — `revoked`.
+  Key was already removed from current `main` in v3 commit `56b56b29`;
+  v4.0.0 npm tarball does not contain the leaked key. Key rotated in
+  Google Cloud Console.
+- Alert #4 (`native-modules/ssh2/test/fixtures/id_rsa`) — `used_in_tests`.
+  Public test fixture from upstream `ssh2` library; not exploitable.
+
+### Test infrastructure
+
+- `tests/v4/license/publishConfig.test.ts` updated to match Phase
+  28.4.1's prepublishOnly contract (typecheck + build, no test —
+  tests run in CI on tag push and manually via `npm test`).
+
+---
+
 ## v4.0.0 — 2026-05-07 · "REWRITE"
 
 A from-scratch rewrite of Aiden's core. Every provider adapter, prompt

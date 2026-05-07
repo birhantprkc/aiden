@@ -9,15 +9,21 @@ import path from 'node:path';
  * push fires the GitHub workflow.
  */
 describe('npm publish config', () => {
-  it('1. package.json declares version 4.0.0-beta.* and public publishConfig', async () => {
+  it('1. package.json declares v4.x version and public publishConfig', async () => {
     const repoRoot = path.resolve(__dirname, '..', '..', '..');
     const raw = await fs.readFile(path.join(repoRoot, 'package.json'), 'utf8');
     const pkg = JSON.parse(raw) as Record<string, any>;
     expect(pkg.name).toBe('aiden-runtime');
-    expect(pkg.version).toMatch(/^4\.0\.0(-beta\.\d+)?$/);
+    expect(pkg.version).toMatch(/^4\.\d+\.\d+(-(?:beta|rc)\.\d+)?$/);
     expect(pkg.publishConfig?.access).toBe('public');
     expect(pkg.scripts?.prepublishOnly).toContain('typecheck');
-    expect(pkg.scripts?.prepublishOnly).toContain('test');
+    expect(pkg.scripts?.prepublishOnly).toContain('build');
+    // Phase 28.4.1: `npm test` was dropped from prepublishOnly because
+    // the legacy v3 test suite + vendored native-modules tests would
+    // block publish even when v4 source was clean. Tests now run in
+    // CI on tag push (.github/workflows/publish.yml) and via
+    // `npm test` manually. prepublishOnly remains the typecheck +
+    // build smoke for ship-readiness.
     expect(pkg.scripts?.['publish:beta']).toBeDefined();
     expect(pkg.scripts?.['publish:stable']).toBeDefined();
   });
