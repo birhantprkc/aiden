@@ -23,7 +23,7 @@ import { marked } from 'marked';
 const TerminalRenderer: new (opts?: unknown) => unknown = require('marked-terminal').default ?? require('marked-terminal');
 
 import { SkinEngine, getSkinEngine } from './skinEngine';
-import { visibleLength } from './box';
+import { visibleLength, truncateVisible } from './box';
 
 export interface SpinnerHandle {
   stop(finalText?: string): void;
@@ -296,33 +296,69 @@ export class Display {
   }
 
   /**
-   * Scroll-shaped ASCII footer with the project credits. Renders the
-   * full multi-line scroll when `cols() >= 75`; otherwise falls back
-   * to a plain 4-line credits block. Each scroll structure character
-   * is rendered as a single muted SGR span — no nested colour, so the
-   * trailing reset doesn't leak into the next line. The `♥` is brand
-   * orange (its own SGR span).
+   * Phase 26.2.5 — parchment-shaped credits footer. Replaces the
+   * earlier scroll ASCII whose diagonals wouldn't align reliably in
+   * a monospace cell. Layout:
+   *
+   *       ___________________________________________________________
+   *      |                                                           |
+   *      |   ♥  Built solo                                           |
+   *      |   GitHub:  github.com/taracodlabs/aiden                   |
+   *      |   Web:     aiden.taracod.com                              |
+   *      |   Contact: contact@taracod.com                            |
+   *      |___________________________________________________________|
+   *
+   * Top underscore lid floats one column past the left wall (the lid
+   * sits *between* the pipes, not over them) — gives the parchment a
+   * lifted-corner feel without using corner glyphs. Bottom is sealed.
+   *
+   * Width-responsive:
+   *   cols >= 80 → full parchment (interior 63 chars)
+   *   cols <  80 → plain 4-line text fallback (no border)
+   *
+   * Colours: borders in muted, ♥ in brand, field labels in brand,
+   * field values in `agent` (off-white). Each colour span is its own
+   * SGR open/close — no nesting — so the closing reset doesn't bleed
+   * across lines.
    */
   scrollFooter(): string {
     const sk = this.skin;
     const m = (s: string): string => sk.applyColors(s, 'muted');
+    const lab = (s: string): string => sk.applyColors(s, 'brand');
+    const val = (s: string): string => sk.applyColors(s, 'agent');
     const heart = sk.applyColors('♥', 'brand');
-    if (this.cols() < 75) {
+
+    if (this.cols() < 80) {
+      // Plain 4-line fallback (no border).
       return [
-        `  ${heart}  ${m('Built solo')}`,
-        `  ${m('GitHub:  github.com/taracodlabs/aiden')}`,
-        `  ${m('Web:     aiden.taracod.com')}`,
-        `  ${m('Contact: contact@taracod.com')}`,
+        `  ${heart}  ${val('Built solo')}`,
+        `  ${lab('GitHub:')}  ${val('github.com/taracodlabs/aiden')}`,
+        `  ${lab('Web:')}     ${val('aiden.taracod.com')}`,
+        `  ${lab('Contact:')} ${val('contact@taracod.com')}`,
       ].join('\n');
     }
+
+    // Parchment.
+    const INTERIOR = 63;
+    const wallIndent = '     ';     // 5 spaces — column where the | sits
+    const lidIndent = '      ';     // 6 spaces — lid floats one past the wall
+    const pipe = m('|');
+    const lid = m('_'.repeat(INTERIOR));
+
+    const padInner = (text: string): string => {
+      const v = visibleLength(text);
+      if (v >= INTERIOR) return truncateVisible(text, INTERIOR);
+      return text + ' '.repeat(INTERIOR - v);
+    };
+
     return [
-      m('      _____________________________________________________________'),
-      m('   ___|                                                             |___'),
-      m('   \\  |   ') + heart + m('  Built solo                                             |  /'),
-      m('    \\ |   GitHub:  github.com/taracodlabs/aiden                     | /'),
-      m('    / |   Web:     aiden.taracod.com                                | \\'),
-      m('   /__|   Contact: contact@taracod.com                              |__\\'),
-      m('   __)                                                                (__'),
+      lidIndent + lid,
+      wallIndent + pipe + ' '.repeat(INTERIOR) + pipe,
+      wallIndent + pipe + padInner(`   ${heart}  ${val('Built solo')}`) + pipe,
+      wallIndent + pipe + padInner(`   ${lab('GitHub:')}  ${val('github.com/taracodlabs/aiden')}`) + pipe,
+      wallIndent + pipe + padInner(`   ${lab('Web:')}     ${val('aiden.taracod.com')}`) + pipe,
+      wallIndent + pipe + padInner(`   ${lab('Contact:')} ${val('contact@taracod.com')}`) + pipe,
+      wallIndent + pipe + lid + pipe,
     ].join('\n');
   }
 
