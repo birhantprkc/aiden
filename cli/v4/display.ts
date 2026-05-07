@@ -246,17 +246,39 @@ export class Display {
   }
 
   /**
+   * Phase 26.2.8 — HH:MM:SS muted timestamp prefix used when
+   * `AIDEN_UI_TIMESTAMPS=1`. Returns the wrapped 8-char string
+   * (`12:41:02`) in muted; the caller owns the trailing spacer.
+   * `d` is injectable so tests can pin the time.
+   */
+  timestampPrefix(d: Date = new Date()): string {
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    const ss = String(d.getSeconds()).padStart(2, '0');
+    return this.skin.applyColors(`${hh}:${mm}:${ss}`, 'muted');
+  }
+
+  /**
    * Phase 26.2.3 — single-line assistant header in the Hermes
    * `┃ Aiden` style. `┃` (U+2503 heavy vertical) and `Aiden` are
    * both brand-orange. The thin rule that previously sat under the
    * label is gone — the per-turn separator (printed BEFORE the user
    * prompt by chatSession) carries that visual weight now.
    *
+   * Phase 26.2.8 — when `AIDEN_UI_TIMESTAMPS=1`, prepends a muted
+   * `HH:MM:SS  ` prefix in front of the indented `┃ Aiden`. The
+   * existing 2-space indent is replaced by the 10-char timestamp
+   * gutter so the bar and label shift right to align with the
+   * gutter. Default OFF preserves the exact current shape.
+   *
    * Returns one indented line with a trailing newline.
    */
   agentHeader(): string {
     const bar = this.skin.applyColors('┃', 'brand');
     const head = this.skin.applyColors('Aiden', 'brand');
+    if (process.env.AIDEN_UI_TIMESTAMPS === '1') {
+      return `${this.timestampPrefix()}  ${bar} ${head}\n`;
+    }
     return `  ${bar} ${head}\n`;
   }
 
@@ -549,9 +571,17 @@ export class Display {
    * glyph aligned with the bottom hint's `▲ Type your message …` and
    * with Aiden's brand mark from v3). Inquirer prepends its own
    * padding, so we only ship the bare 2-char prefix.
+   *
+   * Phase 26.2.8 — when `AIDEN_UI_TIMESTAMPS=1`, prepends a muted
+   * `HH:MM:SS  ` so the user's input line reads
+   * `12:41:02  ▲ <input>`. Default OFF preserves `▲ <input>`.
    */
   promptPrefix(): string {
-    return `${this.skin.applyColors('▲', 'brand')} `;
+    const tri = this.skin.applyColors('▲', 'brand');
+    if (process.env.AIDEN_UI_TIMESTAMPS === '1') {
+      return `${this.timestampPrefix()}  ${tri} `;
+    }
+    return `${tri} `;
   }
 
   /**
