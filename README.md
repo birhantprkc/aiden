@@ -1,4 +1,6 @@
-<img width="346" height="167" alt="image" src="https://github.com/user-attachments/assets/6e196680-0fe6-421d-9721-54ed69cda771" />
+<img width="1672" height="941" alt="AIDEN BOOTUP LOGO" src="https://github.com/user-attachments/assets/c0809009-73e2-4d58-9292-12fbd0324952" />
+
+
 
 
 ```
