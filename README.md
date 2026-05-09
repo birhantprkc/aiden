@@ -8,7 +8,7 @@
 
 Autonomous AI Engine
 
-19 providers · 68 skills · 42 tools · 9 channels · AGPL-3.0
+72 skills · 42 tools · 19 providers · 9 channels · AGPL-3.0
 
 Windows · Linux · WSL · macOS (API Mode)
 
@@ -104,13 +104,13 @@ Local-first · Self-healing routing · Browser & terminal control · Persistent 
   <a href="https://aiden.taracod.com/contact"><b>Contact</b></a> &nbsp;·&nbsp;
   <a href="https://discord.gg/gMZ3hUnQTm"><b>Discord</b></a> &nbsp;·&nbsp;
   <a href="https://github.com/taracodlabs/aiden-releases/releases/latest"><b>Download</b></a> &nbsp;·&nbsp;
-  <a href="https://www.amazon.in/Omega-Shiva-Deore-ebook/dp/B0GX33VWZC/"><b>Book</b></a>
+  <a href="https://amzn.to/4tpiXwM"><b>Book</b></a>
 </p>
 
 ---
 
-> **v4.1.0 — multi-channel autonomous engine · Telegram + MCP server + subagent fanout · voice CLI · hardened cron · skill mining · structured markdown rendering · cross-platform CI**
-> v4.1 turns Aiden into a multi-surface agent: a `ChannelAdapter`-shaped Telegram bot (text / voice / photo / PDF / groups / admin), an MCP server exposing 24 tools + the full skill catalog to Claude Desktop, parallel subagent fanout across `groq`/`together`, REPL voice mode (PTT + continuous), an auto-mining pipeline that proposes new skills from successful workflows, and a deep REPL polish layer (custom `@inquirer/core` prompt, autosuggest, sectioned boot card, sharp ASCII corners, theme detection). Linux/macOS/Windows × Node 20/22 CI matrix. See [changelog](#changelog) below.
+> **v4.1.0 — Multi-channel autonomous AI engine**
+> Telegram + MCP server + subagent fanout + voice CLI + skill mining. Hardened cron, structured markdown, cross-platform CI. See [changelog](#changelog) below.
 
 ---
 
