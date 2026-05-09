@@ -103,13 +103,14 @@ Local-first · Self-healing routing · Browser & terminal control · Persistent 
   <a href="https://aiden.taracod.com"><b>Website</b></a> &nbsp;·&nbsp;
   <a href="https://aiden.taracod.com/contact"><b>Contact</b></a> &nbsp;·&nbsp;
   <a href="https://discord.gg/gMZ3hUnQTm"><b>Discord</b></a> &nbsp;·&nbsp;
-  <a href="https://github.com/taracodlabs/aiden-releases/releases/latest"><b>Download</b></a>
+  <a href="https://github.com/taracodlabs/aiden-releases/releases/latest"><b>Download</b></a> &nbsp;·&nbsp;
+  <a href="https://www.amazon.in/Omega-Shiva-Deore-ebook/dp/B0GX33VWZC/"><b>Book</b></a>
 </p>
 
 ---
 
-> **v4.0.0 "REWRITE" — clean-room core · 19 providers · single-loop agent · cron scheduler · neofetch boot card · OAuth subscriptions · honest failures**
-> v4 is a from-scratch rewrite: every adapter, every prompt slot, every loop. Provider OAuth (Claude Pro, ChatGPT Plus) routes to subscription quota instead of pay-as-you-go. Sub-second provider fallback. 28 slash commands. See [changelog](#changelog) below.
+> **v4.1.0 — multi-channel autonomous engine · Telegram + MCP server + subagent fanout · voice CLI · hardened cron · skill mining · structured markdown rendering · cross-platform CI**
+> v4.1 turns Aiden into a multi-surface agent: a `ChannelAdapter`-shaped Telegram bot (text / voice / photo / PDF / groups / admin), an MCP server exposing 24 tools + the full skill catalog to Claude Desktop, parallel subagent fanout across `groq`/`together`, REPL voice mode (PTT + continuous), an auto-mining pipeline that proposes new skills from successful workflows, and a deep REPL polish layer (custom `@inquirer/core` prompt, autosuggest, sectioned boot card, sharp ASCII corners, theme detection). Linux/macOS/Windows × Node 20/22 CI matrix. See [changelog](#changelog) below.
 
 ---
 
