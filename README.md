@@ -22,6 +22,7 @@ Local-first · Self-healing routing · Browser & terminal control · Persistent 
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-orange?style=for-the-badge" alt="License: AGPL-3.0" /></a>
   <a href="https://github.com/taracodlabs/aiden/stargazers"><img src="https://img.shields.io/github/stars/taracodlabs/aiden?style=for-the-badge&color=f9d71c" alt="Stars" /></a>
   <a href="https://www.npmjs.com/package/aiden-runtime"><img src="https://img.shields.io/npm/v/aiden-runtime?color=f97316&label=npm&style=for-the-badge" alt="npm" /></a>
+  <a href="https://amzn.to/4tpiXwM"><img src="https://img.shields.io/badge/book-Omega-ff9900?logo=amazon&logoColor=white&style=for-the-badge" alt="Book: Omega" /></a>
 </p>
 
 <p align="center">
@@ -103,8 +104,7 @@ Local-first · Self-healing routing · Browser & terminal control · Persistent 
   <a href="https://aiden.taracod.com"><b>Website</b></a> &nbsp;·&nbsp;
   <a href="https://aiden.taracod.com/contact"><b>Contact</b></a> &nbsp;·&nbsp;
   <a href="https://discord.gg/gMZ3hUnQTm"><b>Discord</b></a> &nbsp;·&nbsp;
-  <a href="https://github.com/taracodlabs/aiden-releases/releases/latest"><b>Download</b></a> &nbsp;·&nbsp;
-  <a href="https://amzn.to/4tpiXwM"><b>Book</b></a>
+  <a href="https://github.com/taracodlabs/aiden-releases/releases/latest"><b>Download</b></a>
 </p>
 
 ---
