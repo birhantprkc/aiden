@@ -87,6 +87,7 @@ import {
   createSubsystemHealthRegistry,
   SubsystemHealthTracker,
 } from '../../core/v4/subsystemHealth';
+import { SkillOutcomeTracker } from '../../core/v4/skillOutcomeTracker';
 import { isMcpServeMode } from './uiBuild';
 import { MemoryGuard } from '../../moat/memoryGuard';
 import { SSRFProtection } from '../../moat/ssrfProtection';
@@ -962,6 +963,16 @@ export async function buildAgentRuntime(
   const subsystemHealthRegistry = createSubsystemHealthRegistry();
   const skillTeacherHealth = new SubsystemHealthTracker('skill-teacher');
   const skillMinerHealth   = new SubsystemHealthTracker('skill-miner');
+  // Phase v4.1.2-slice4: outcome tracker — observes tool-call lifecycle,
+  // attributes downstream successes/failures to skills loaded via
+  // skill_view. Persisted to <skillsDir>/.skill-outcomes.json (atomic
+  // write, lazy hydrate). Persist failures surface to doctor via a
+  // shared slice3 SubsystemHealthTracker.
+  const skillOutcomeHealth = new SubsystemHealthTracker('skill-outcome-tracker');
+  const skillOutcomeTracker = new SkillOutcomeTracker(
+    path.join(paths.skillsDir, '.skill-outcomes.json'),
+    skillOutcomeHealth,
+  );
   subsystemHealthRegistry.register(
     'skill-teacher',
     () => skillTeacherHealth.snapshot(),
@@ -969,6 +980,10 @@ export async function buildAgentRuntime(
   subsystemHealthRegistry.register(
     'skill-miner',
     () => skillMinerHealth.snapshot(),
+  );
+  subsystemHealthRegistry.register(
+    'skill-outcome-tracker',
+    () => skillOutcomeHealth.snapshot(),
   );
 
   const skillTeacher = new SkillTeacher(
@@ -1095,6 +1110,7 @@ export async function buildAgentRuntime(
     skillTeacher,
     skillMiner,
     subsystemHealthRegistry,
+    skillOutcomeTracker,
     onSkillCandidate: (candidate: MinedCandidate) => {
       try {
         callbacks.onSkillCandidate?.(candidate);
@@ -1103,7 +1119,17 @@ export async function buildAgentRuntime(
     // Phase 23.5: tool event rows. CliCallbacks.onToolCall
     // emits a single line per call — `· tool <name> <args> [running]`
     // mutates to `[ok 220ms]` / `[fail 1.4s]` / `[blocked]` on resolve.
-    onToolCall: callbacks.onToolCall,
+    //
+    // Phase v4.1.2-slice4: compose (do NOT replace) so the
+    // SkillOutcomeTracker observes the same lifecycle the CLI display
+    // is rendering. Tracker hooks run first so attribution lands even
+    // if the display callback throws.
+    onToolCall: (call, phase, result) => {
+      try {
+        skillOutcomeTracker.onTool(call, phase, result);
+      } catch { /* telemetry must not break the turn */ }
+      callbacks.onToolCall?.(call, phase, result);
+    },
     onCompression: callbacks.onCompression,
     onBudgetWarning: callbacks.onBudgetWarning,
     onPlannerGuardDecision: callbacks.onPlannerGuardDecision,

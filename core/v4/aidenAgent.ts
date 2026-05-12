@@ -122,6 +122,15 @@ export interface AidenAgentOptions {
    * paths use. Subsystems work fine if the registry is undefined.
    */
   subsystemHealthRegistry?: import('./subsystemHealth').SubsystemHealthRegistry;
+  /**
+   * Phase v4.1.2-slice4 telemetry. Optional read handle to the in-
+   * process skill-outcome tracker. The caller (aidenCLI) composes
+   * the tracker's `onTool` into the agent's `onToolCall` callback so
+   * attribution happens automatically; this field is only the doctor-
+   * facing READ surface. Undefined when the caller didn't wire a
+   * tracker (standalone doctor invocation has no live state).
+   */
+  skillOutcomeTracker?:     import('./skillOutcomeTracker').SkillOutcomeTracker;
   /** Observability — fired before and after each tool call. */
   onToolCall?: (
     call:    ToolCallRequest,
@@ -266,6 +275,13 @@ export class AidenAgent {
    * without telemetry — back-compat).
    */
   public readonly subsystemHealthRegistry?: import('./subsystemHealth').SubsystemHealthRegistry;
+  /**
+   * Phase v4.1.2-slice4: optional read handle to the in-process
+   * skill-outcome tracker. Doctor reads its snapshot() for the
+   * "Skill outcomes" section. Composed into onToolCall by the caller
+   * so attribution happens automatically.
+   */
+  public readonly skillOutcomeTracker?: import('./skillOutcomeTracker').SkillOutcomeTracker;
 
   /** Process-scoped tracker metrics for `/doctor`. */
   private readonly skillEnforcementMetrics: SkillEnforcementMetrics = {
@@ -313,6 +329,11 @@ export class AidenAgent {
     // via their own constructors; we just hold the read handle.
     (this as { subsystemHealthRegistry?: import('./subsystemHealth').SubsystemHealthRegistry })
       .subsystemHealthRegistry = opts.subsystemHealthRegistry;
+    // Phase v4.1.2-slice4: same pattern for the outcome tracker. The
+    // caller composes the tracker into `onToolCall`; we just keep a
+    // read handle for doctor.
+    (this as { skillOutcomeTracker?: import('./skillOutcomeTracker').SkillOutcomeTracker })
+      .skillOutcomeTracker = opts.skillOutcomeTracker;
   }
 
   // ── Public method surface ────────────────────────────────────────────

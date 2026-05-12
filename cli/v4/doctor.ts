@@ -82,6 +82,13 @@ export interface DoctorOptions {
    * here; standalone CLI invocations don't have one.
    */
   subsystemHealthRegistry?: import('../../core/v4/subsystemHealth').SubsystemHealthRegistry;
+  /**
+   * Phase v4.1.2-slice4: optional in-process skill-outcome tracker.
+   * When provided, doctor renders a "Skill outcomes" section showing
+   * the top skills by load count with success rates. Omitted entirely
+   * on standalone CLI invocations (no live agent → no outcome state).
+   */
+  skillOutcomeTracker?: import('../../core/v4/skillOutcomeTracker').SkillOutcomeTracker;
 }
 
 /**
@@ -141,6 +148,53 @@ function humanAge(ms: number): string {
   if (ms < 3_600_000)   return `${Math.floor(ms / 60_000)}m`;
   if (ms < 86_400_000)  return `${Math.floor(ms / 3_600_000)}h`;
   return `${Math.floor(ms / 86_400_000)}d`;
+}
+
+/**
+ * Phase v4.1.2-slice4: render the Skill outcomes section. Per Q3
+ * decision: silent on empty state (no tracker, or no skills tracked
+ * yet) — doctor output for healthy systems stays short.
+ *
+ * Output (when not empty): top N skills sorted by load count, with
+ * total observations and success percentage. Last-error message
+ * shown for the one most-recently failing skill (cap one row of
+ * detail so the block stays compact).
+ */
+export function renderSkillOutcomesSection(
+  tracker: import('../../core/v4/skillOutcomeTracker').SkillOutcomeTracker | undefined,
+  topN = 5,
+): string {
+  if (!tracker) return '';
+  const snaps = tracker.snapshot();
+  if (snaps.length === 0) return '';
+
+  const lines: string[] = ['\nSkill outcomes (top ' + Math.min(topN, snaps.length) + ' by load count)'];
+  for (const s of snaps.slice(0, topN)) {
+    const attributed = s.toolSuccesses + s.toolFailures;
+    const rate = attributed === 0
+      ? '—'
+      : `${Math.round((s.toolSuccesses / attributed) * 100)}% success`;
+    const stats = `loaded ${s.loaded}, ${s.toolSuccesses} ok, ${s.toolFailures} err  (${rate})`;
+    const last  = s.lastUsed
+      ? `  last ${humanAge(Date.now() - new Date(s.lastUsed).getTime())} ago`
+      : '';
+    lines.push(`  ${s.skillName.padEnd(32)} ${stats}${last}`);
+  }
+  // Spotlight the most-recent failure across all tracked skills so a
+  // single broken skill is visible without scanning every row.
+  const recentFailures = snaps
+    .filter((s) => s.lastError)
+    .sort((a, b) =>
+      new Date(b.lastError!.at).getTime() - new Date(a.lastError!.at).getTime(),
+    );
+  if (recentFailures.length > 0) {
+    const f = recentFailures[0];
+    lines.push(
+      `  ↳ last failure: ${f.skillName} — "${f.lastError!.message}"`,
+    );
+  }
+  lines.push('');
+  return lines.join('\n');
 }
 
 const DEFAULT_TIMEOUT_MS = 3_000;
@@ -965,6 +1019,12 @@ export async function runDoctorCli(opts?: DoctorOptions): Promise<DoctorReport> 
   // no live agent so the section is omitted.
   const subsystemBlock = renderSubsystemHealthSection(opts?.subsystemHealthRegistry);
   if (subsystemBlock) process.stdout.write(subsystemBlock);
+
+  // Phase v4.1.2-slice4: skill-outcome surface. Same gating — only
+  // renders when a tracker was passed and has at least one observed
+  // skill. Standalone CLI invocations skip it.
+  const outcomesBlock = renderSkillOutcomesSection(opts?.skillOutcomeTracker);
+  if (outcomesBlock) process.stdout.write(outcomesBlock);
 
   // Liveness reds count toward the overall exit code so CI / scripts
   // can `aiden doctor --providers && deploy`.
