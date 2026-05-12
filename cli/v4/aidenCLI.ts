@@ -88,6 +88,8 @@ import {
   SubsystemHealthTracker,
 } from '../../core/v4/subsystemHealth';
 import { SkillOutcomeTracker } from '../../core/v4/skillOutcomeTracker';
+import { resolveBootProvider } from './providerBootSelector';
+import { enumerateConfiguredProviders } from './doctorLiveness';
 import { isMcpServeMode } from './uiBuild';
 import { MemoryGuard } from '../../moat/memoryGuard';
 import { SSRFProtection } from '../../moat/ssrfProtection';
@@ -624,12 +626,49 @@ export async function buildAgentRuntime(
     await config.load();
   }
 
-  const providerId =
-    (cliOpts.provider as string | undefined) ??
-    config.getValue<string>('model.provider', 'groq')!;
-  const modelId =
-    (cliOpts.model as string | undefined) ??
-    config.getValue<string>('model.modelId', 'llama-3.3-70b-versatile')!;
+  // Phase v4.1.2-bug1: boot model selection now consults the priority-
+  // list auto-picker (cli/v4/providerBootSelector.ts) instead of
+  // hardcoded `groq + llama-3.3-70b-versatile`. Users with chatgpt-plus
+  // OAuth (the post-v4.1.1 onboarding default) used to boot into Groq
+  // and hit a 400 on the first tool-bearing request — llama-3.3-70b's
+  // tool emission is rejected by Groq's first-party validator.
+  //
+  // Precedence (handled inside resolveBootProvider):
+  //   1. Both --provider + --model flags  → use them
+  //   2. One flag only                     → use it, resolve other
+  //   3. Persisted model-selection.json   → use it
+  //   4. Partial config                    → use it, resolve other
+  //   5. Auto-pick from priority list      → first authed provider
+  //   6. Nothing authed                    → hardcoded groq fallback
+  let providerId: string;
+  let modelId:    string;
+  let bootSource: 'cli-flag' | 'persisted-config' | 'auto-priority' | 'cli-flag-partial' | 'config-partial' | 'hardcoded-fallback';
+  try {
+    const selection = await resolveBootProvider(
+      {
+        cliProviderId: cliOpts.provider as string | undefined,
+        cliModelId:    cliOpts.model    as string | undefined,
+        cfgProviderId: config.getValue<string>('model.provider'),
+        cfgModelId:    config.getValue<string>('model.modelId'),
+      },
+      () => enumerateConfiguredProviders({ paths, env: process.env }),
+    );
+    if (selection) {
+      providerId = selection.providerId;
+      modelId    = selection.modelId;
+      bootSource = selection.source;
+    } else {
+      // Case 6: nothing authed — preserve the prior hardcoded default
+      // so the legacy first-run path (manual API-key entry into .env)
+      // still works.
+      providerId = 'groq';
+      modelId    = 'llama-3.3-70b-versatile';
+      bootSource = 'hardcoded-fallback';
+    }
+  } catch (err) {
+    process.stderr.write(`aiden: ${(err as Error).message}\n`);
+    process.exit(1);
+  }
 
   // Resolve session continuation.
   const store = new SessionStore(paths.sessionsDb);
@@ -671,6 +710,16 @@ export async function buildAgentRuntime(
         'Run `aiden model` to pick a valid provider, or `aiden doctor`.',
       );
       process.exit(1);
+    }
+    // Phase v4.1.2-bug1: surface the auto-pick in the boot log when
+    // neither CLI flags nor persisted config specified the choice.
+    // Silent on explicit selections so power users don't see noise.
+    if (bootSource === 'auto-priority') {
+      display.dim(`[boot] ${providerId} · ${modelId}  (auto · first authed provider)`);
+    } else if (bootSource === 'hardcoded-fallback') {
+      display.dim(
+        `[boot] ${providerId} · ${modelId}  (no authed providers detected — using legacy default)`,
+      );
     }
   }
 
