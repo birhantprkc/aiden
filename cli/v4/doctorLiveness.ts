@@ -17,11 +17,12 @@
  *   - `--providers` is opt-in. When the user types it we extend the
  *     report with one liveness row per probe, then render a summary
  *     line at the bottom.
- *   - Tool-catalog validation is deliberately OUT of scope. Liveness
- *     probes ship `tools: []` (see comment in checkProviderLiveness)
- *     so one bad tool schema doesn't false-red every provider that
- *     validates strictly. The eval-harness / registration-time schema
- *     validator (v4.1.1 main) is the right home for that concern.
+ *   - Tool-catalog validation is deliberately OUT of scope. The
+ *     probe ships ONE hardcoded no-op tool (`probe_noop`) so the
+ *     Codex backend accepts the request (it rejects empty `tools`),
+ *     while user-registered tool schemas stay un-validated here. The
+ *     eval-harness / registration-time schema validator (v4.1.1
+ *     main) is the right home for that concern.
  *
  * Trust artifact:
  *   - On failure we surface `err.message` VERBATIM (truncated to 200
@@ -110,6 +111,29 @@ function truncate(s: string, max = ERROR_TRUNCATE_CHARS): string {
 }
 
 /**
+ * Phase v4.1.2-slice5: pick a probe-safe model id from the registry.
+ *
+ * Some providers list model slugs that only work for enterprise / CLI
+ * accounts. ChatGPT Plus is the canonical case: the registry's
+ * `modelIds[0]` is `gpt-5.1-codex-max`, which is rejected by the
+ * subscription-account Codex backend with
+ * `"The 'gpt-5.1-codex-max' model is not supported when using Codex
+ * with a ChatGPT account."` — even though real REPL chat on the same
+ * account works because the user has selected a non-Codex slug
+ * (`gpt-5.5`).
+ *
+ * Heuristic: skip any slug containing `-codex` (covers `-codex-max`,
+ * `-codex-mini`, plain `-codex` suffix variants). Falls back to
+ * `modelIds[0]` if every slug is Codex-flavoured. No provider id
+ * special-casing — the heuristic is shape-based so future-similar
+ * providers benefit too.
+ */
+export function pickProbeModel(entry: ProviderRegistryEntry): string {
+  const safe = entry.modelIds.find((m) => !m.includes('-codex'));
+  return safe ?? entry.modelIds[0] ?? '';
+}
+
+/**
  * Wrap a promise with a hard timeout. Resolves to the inner result on
  * success, throws a clearly-labelled `Error` on timeout. Cleans up the
  * timer either way.
@@ -153,7 +177,7 @@ export async function enumerateConfiguredProviders(opts: {
 
   for (const entry of Object.values(PROVIDER_REGISTRY)) {
     // Every provider needs at least one model to probe against.
-    const model = entry.modelIds[0];
+    const model = pickProbeModel(entry);
     if (!model) {
       out.push({
         entry,
@@ -265,11 +289,42 @@ export async function checkProviderLiveness(
 
   // Liveness probes "is this provider reachable + authenticated?".
   // Tool-catalog validation is a separate concern (eval harness,
-  // v4.1.1 main). Sending tools: [] ensures one bad tool schema
-  // doesn't false-red every provider that validates strictly.
+  // v4.1.1 main).
+  //
+  // Phase v4.1.2-slice5: the probe used to send `messages: [user]`
+  // only, with `tools: []`. That body 400s against the Codex backend
+  // for two reasons:
+  //   1. No system message → empty `instructions` field in the wire
+  //      body. Codex rejects requests without `instructions` (same
+  //      root cause as the eval-runner fix in 6535d531).
+  //   2. Empty tools array → the codex adapter omits `tools`,
+  //      `tool_choice`, `parallel_tool_calls` from the wire body
+  //      entirely. The Codex backend treats this as malformed.
+  //
+  // Fix: add a minimal one-line system message (collapses into
+  // `instructions`) and one hand-crafted no-op tool. The probe tool
+  // is hardcoded with a conservative JSON Schema
+  // (`additionalProperties: false`) so strict validators accept it.
+  // The "one bad tool schema false-reds everyone" concern from the
+  // pre-slice5 comment applied to USER tools; this tool is internal.
   const input: ProviderCallInput = {
-    messages:  [{ role: 'user', content: 'ping' }],
-    tools:     [],
+    messages: [
+      {
+        role:    'system',
+        content: 'You are an availability probe. Respond with a single word.',
+      },
+      { role: 'user', content: 'ping' },
+    ],
+    tools: [
+      {
+        name:        'probe_noop',
+        description: 'Probe placeholder. Do not call — the probe ignores any tool calls.',
+        inputSchema: {
+          type:       'object',
+          properties: {},
+        },
+      },
+    ],
     maxTokens: PROBE_MAX_TOKENS,
   };
 
