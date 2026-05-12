@@ -59,6 +59,19 @@ export interface DoctorOptions {
   spawnImpl?: typeof spawn;
   /** Override env (defaults to process.env). Tests use this to stub keys. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * Phase v4.1.1-oauth-fix Phase 4: when true, doctor also pings every
+   * configured / authed provider with a minimal request and prints a
+   * per-provider liveness section below the standard health box.
+   * Default false — keeps `aiden doctor` fast and offline-friendly.
+   */
+  liveness?: boolean;
+  /**
+   * Per-liveness-probe timeout in ms. Default 8 000. Independent of
+   * `timeoutMs` (which gates the offline config checks) because real
+   * provider round-trips can legitimately take 1-2 seconds.
+   */
+  livenessTimeoutMs?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 3_000;
@@ -847,6 +860,30 @@ export async function runDoctorCli(opts?: DoctorOptions): Promise<DoctorReport> 
   process.stdout.write(
     `\n${report.passed ? 'all checks passed' : 'some checks failed'} in ${report.totalMs} ms\n`,
   );
-  process.exitCode = report.passed ? 0 : 1;
+
+  // Phase v4.1.1-oauth-fix Phase 4: opt-in provider liveness.
+  // Runs after the standard report so a failed config check is visible
+  // before the network probes start. Section header + summary line are
+  // rendered by doctorLiveness.renderProviderLivenessSection so the
+  // formatting stays alongside its consumer.
+  let livenessFailed = false;
+  if (opts?.liveness) {
+    process.stdout.write('\n  Running provider liveness checks...\n');
+    const { runProviderLiveness, renderProviderLivenessSection } =
+      await import('./doctorLiveness');
+    const paths = opts.paths ?? resolveAidenPaths();
+    const { results, summary } = await runProviderLiveness({
+      paths,
+      env:        opts.env,
+      fetchImpl:  opts.fetchImpl,
+      timeoutMs:  opts.livenessTimeoutMs,
+    });
+    process.stdout.write(renderProviderLivenessSection(results, summary));
+    livenessFailed = summary.red > 0;
+  }
+
+  // Liveness reds count toward the overall exit code so CI / scripts
+  // can `aiden doctor --providers && deploy`.
+  process.exitCode = (report.passed && !livenessFailed) ? 0 : 1;
   return report;
 }

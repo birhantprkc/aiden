@@ -327,12 +327,16 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
   program
     .command('doctor')
     .description('Run diagnostic checks')
-    .action(async () => {
+    .option(
+      '--providers',
+      'Also ping each configured / authed provider and report live status (deep check). Slower; useful before shipping or when a provider regression is suspected.',
+    )
+    .action(async (cmdOpts: { providers?: boolean }) => {
       if (opts.runDoctorHook) {
         await opts.runDoctorHook();
         return;
       }
-      await runDoctorCli();
+      await runDoctorCli({ liveness: cmdOpts.providers === true });
     });
 
   program
