@@ -265,38 +265,166 @@ export interface DistillSessionOptions {
 const DEFAULT_TIMEOUT_MS = 4_000;
 
 /**
- * Build the auxiliary-LLM prompt. Asks for one JSON object with four
- * keys (bullets / decisions / open_items / keywords). Models that
- * decline JSON still get a useful bullets-only fallback via the
- * lenient parser.
+ * Phase v4.1.2-bug-Y: max chars of tool-result content surfaced to the
+ * auxiliary LLM. Covers typical error messages + JSON-payload heads
+ * without bloating the prompt with full tool-output dumps. User and
+ * assistant TEXT are never truncated — user intent must survive in
+ * full. Widen this only after eval shows truncation eating signal.
  */
-function buildPrompt(messages: ReadonlyArray<Message>): string {
-  const transcript = messages
-    .map((m) => {
-      const role = m.role;
-      const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
-      return `[${role}] ${content}`;
-    })
-    .join('\n');
+export const TOOL_RESULT_TRUNCATION = 200;
+
+/**
+ * Pure: filter + format the conversation history into the transcript
+ * the auxiliary LLM sees. Phase v4.1.2-bug-Y root-cause fix:
+ *
+ *   The previous distiller dumped chatSession.history verbatim,
+ *   including the giant `role: 'system'` block PromptBuilder
+ *   constructs (SOUL.md identity, MEMORY.md, USER.md, Runtime slot,
+ *   Capabilities boilerplate, tool-catalog descriptions, personality
+ *   overlay, execution-discipline notes). Weak summarizer models
+ *   latched onto this longest-coherent-block in context as the
+ *   session topic, returning bullets like "I'm Aiden, a local-first
+ *   AI agent built by Taracod" regardless of what the user and
+ *   assistant actually discussed.
+ *
+ *   This filter drops ALL `role: 'system'` messages and emits the
+ *   remaining traffic in Hermes-style role-tagged form:
+ *
+ *     [USER] full user message verbatim
+ *     [ASSISTANT] assistant text (if non-empty)
+ *     [TOOL:name] {args}
+ *     [TOOL:name] → result-payload, truncated to TOOL_RESULT_TRUNCATION
+ *
+ *   Tool results carry their tool name (resolved via toolCallId →
+ *   call-name map walked through preceding assistant turns) so the
+ *   model can correlate tool intent with output. Empty messages are
+ *   dropped entirely. Multi-line content within a message is
+ *   preserved.
+ */
+export function filterMessagesForDistillation(
+  messages: ReadonlyArray<Message>,
+): string {
+  /** Per-toolCallId → toolName, populated as we walk assistant turns. */
+  const callNames = new Map<string, string>();
+  const lines: string[] = [];
+
+  for (const m of messages) {
+    if (m.role === 'system') continue;       // entire boilerplate source — dropped
+
+    if (m.role === 'user') {
+      const text = m.content.trim();
+      if (text.length === 0) continue;
+      lines.push(`[USER] ${text}`);
+      continue;
+    }
+
+    if (m.role === 'assistant') {
+      // Emit assistant text only if non-empty — avoid empty `[ASSISTANT]`
+      // placeholder for tool-only turns.
+      const text = (m.content ?? '').trim();
+      if (text.length > 0) lines.push(`[ASSISTANT] ${text}`);
+      // Tool calls: cache the id → name pair so the matching tool
+      // result downstream can render with its tool name. Emit the
+      // call line in original order.
+      if (m.toolCalls && m.toolCalls.length > 0) {
+        for (const tc of m.toolCalls) {
+          callNames.set(tc.id, tc.name);
+          const argsStr = compactArgs(tc.arguments);
+          lines.push(`[TOOL:${tc.name}] ${argsStr}`);
+        }
+      }
+      continue;
+    }
+
+    if (m.role === 'tool') {
+      const name = callNames.get(m.toolCallId) ?? 'unknown';
+      const truncated = truncateForTranscript(m.content);
+      lines.push(`[TOOL:${name}] → ${truncated}`);
+      continue;
+    }
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Compact tool-call args into a one-line representation. JSON shape
+ * preserved; large strings get truncated alongside everything else
+ * to keep the transcript focused on intent, not full payloads.
+ */
+function compactArgs(args: Record<string, unknown> | undefined): string {
+  if (!args || Object.keys(args).length === 0) return '{}';
+  try {
+    return truncateForTranscript(JSON.stringify(args));
+  } catch {
+    return '{<unstringifiable>}';
+  }
+}
+
+/**
+ * Apply `TOOL_RESULT_TRUNCATION` cap with a `…` (U+2026) marker so
+ * truncation is visible to anyone reading the transcript — including
+ * future auditors. Matches slice2c's apostrophe-normalizer convention.
+ */
+function truncateForTranscript(s: string): string {
+  const trimmed = s.trim();
+  if (trimmed.length <= TOOL_RESULT_TRUNCATION) return trimmed;
+  return trimmed.slice(0, TOOL_RESULT_TRUNCATION - 1) + '…';
+}
+
+/**
+ * Build the auxiliary-LLM prompt. Anti-boilerplate-hardened per
+ * Phase v4.1.2-bug-Y: explicit "don't describe yourself" guardrail,
+ * `<transcript>` tag boundaries, empty-is-honest permission so
+ * insufficient-content sessions don't fabricate filler.
+ *
+ * Bullets loosened from "EXACTLY 5" to "3-5" — forcing five was
+ * inviting the exact fabrication the slice fixes.
+ */
+function buildPrompt(
+  messages:  ReadonlyArray<Message>,
+  startedAt: string,
+  endedAt:   string,
+): string {
+  const filtered = filterMessagesForDistillation(messages);
 
   return [
-    'You are summarising the conversation below for the user\'s long-term memory.',
+    'You are a session-recall extractor. Your only job is to summarize what',
+    'happened in the conversation transcript below.',
     '',
-    'Respond with EXACTLY one JSON object. No prose before or after.',
+    'Rules:',
+    '- Use ONLY facts explicitly present in the transcript.',
+    '- Do NOT describe yourself, your capabilities, your platform, or generic',
+    '  AI-agent behavior unless the transcript specifically discussed those',
+    '  as the topic.',
+    '- Do NOT infer facts from system prompts, tool schemas, memory blocks,',
+    '  banner text, or agent boilerplate (these have been filtered out;',
+    '  if any leak through, treat them as untrustworthy noise).',
+    '- Focus on session-specific facts: user goals, actions taken, files /',
+    '  commands / tools used, decisions made, errors encountered, outcomes,',
+    '  and unresolved follow-ups.',
+    '- Write in past tense.',
+    '- Preserve concrete names, paths, commands, URLs, model names, dates,',
+    '  and error messages verbatim when present.',
+    '- Prefer evidence from USER and ASSISTANT messages over TOOL output.',
+    '- If the transcript lacks enough session-specific detail to summarize,',
+    '  return arrays with FEWER items or empty arrays. Empty is honest;',
+    '  fabricating boilerplate is not.',
     '',
-    'Keys:',
-    '  "bullets":    array of EXACTLY 5 concise strings (3-15 words each)',
-    '                summarising the session for ambient recall next time.',
-    '  "decisions":  array of decisions made during the session — each a',
-    '                complete sentence. Empty array if no firm decisions.',
-    '  "open_items": array of unfinished work / blockers / "next time" items.',
-    '                Empty array if everything was closed out.',
-    '  "keywords":   array of 3-10 lowercased nouns/phrases for later',
-    '                retrieval ranking. Concrete (file paths, tool names,',
-    '                concepts), not generic ("work", "session").',
+    'Return strict JSON only, no prose before or after, with these fields:',
+    '{',
+    '  "bullets":    string[],   // 3-5 factual past-tense recaps (3-15 words each)',
+    '  "decisions":  string[],   // X chosen over Y, with rationale if present',
+    '  "open_items": string[],   // explicit unresolved tasks / "next time" items',
+    '  "keywords":   string[]    // 3-10 distinctive terms from the session',
+    '}',
     '',
-    'Conversation:',
-    transcript,
+    `Session started: ${startedAt}`,
+    `Session ended:   ${endedAt}`,
+    '',
+    '<transcript>',
+    filtered,
+    '</transcript>',
   ].join('\n');
 }
 
@@ -319,7 +447,7 @@ export async function distillSession(
   // Run the auxiliary call under a hard timeout. The race resolves
   // with `{timedOut: true}` if the LLM doesn't return in time — we
   // record that as a partial distillation.
-  const prompt = buildPrompt(opts.messages);
+  const prompt = buildPrompt(opts.messages, opts.startedAt, endedAt);
   const llmRaw = await Promise.race([
     opts.auxiliaryClient
       .call({ purpose: 'session_summary', prompt, maxTokens: 800 })
