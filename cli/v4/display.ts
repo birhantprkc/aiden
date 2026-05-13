@@ -488,6 +488,14 @@ export class Display {
      * stale model name from config.yaml cannot mislead a fresh user.
      */
     providerOk?: boolean;
+    /**
+     * Phase v4.1.2-version-display — when present, append a fifth pill
+     * `● v<version>` so users see the running version at boot without
+     * invoking `aiden --version`. No label (the `v` prefix carries it).
+     * Omitted → no version pill rendered, status row stays four-wide
+     * for callers that don't thread version yet.
+     */
+    version?: string;
   }): string {
     const sk = this.skin;
     const dot = (on: boolean): string => sk.applyColors('●', on ? 'success' : 'muted');
@@ -497,15 +505,18 @@ export class Display {
       `${dot(on)} ${lab(label)} ${val(value)}`;
     const providerOk = args.providerOk !== false;
     const modelValue = providerOk ? args.model : 'not configured';
-    return (
-      '  ' +
-      [
-        pill(args.coreOnline, 'core', args.coreOnline ? 'online' : 'starting'),
-        pill(true, 'mode', args.mode),
-        pill(providerOk, 'model', modelValue),
-        pill(args.memoryActive, 'memory', args.memoryActive ? 'active' : 'off'),
-      ].join('    ')
-    );
+    const pills = [
+      pill(args.coreOnline, 'core', args.coreOnline ? 'online' : 'starting'),
+      pill(true, 'mode', args.mode),
+      pill(providerOk, 'model', modelValue),
+      pill(args.memoryActive, 'memory', args.memoryActive ? 'active' : 'off'),
+    ];
+    if (args.version) {
+      // Version pill: dot + value, no label (the `v` prefix is the label).
+      // Always-on dot — informational, not a health indicator.
+      pills.push(`${dot(true)} ${val(`v${args.version}`)}`);
+    }
+    return '  ' + pills.join('    ');
   }
 
   /**

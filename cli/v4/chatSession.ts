@@ -57,6 +57,7 @@ import {
   type SessionExitPath,
   type SessionDistillation,
 } from '../../core/v4/sessionDistiller';
+import { VERSION as AIDEN_VERSION } from '../../core/version';
 import { writeDistillation } from '../../core/v4/distillationStore';
 import { extractCandidates } from '../../core/v4/promotionCandidates';
 import {
@@ -137,16 +138,12 @@ export function renderCommandLabel(cmd: SlashCommand): string {
     : `/${cmd.name}`;
 }
 
-/** Aiden version pulled from package.json at require-time; falls back
- *  to a static literal so TS compiles without a JSON resolution wobble. */
-const AIDEN_VERSION: string = (() => {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    return (require('../../package.json') as { version?: string }).version ?? '4.0.0';
-  } catch {
-    return '4.0.0';
-  }
-})();
+// Phase v4.1.2-version-display: AIDEN_VERSION is now imported at the
+// top of the file from `core/version.ts` (the canonical build-injected
+// source). The previous package.json runtime-require IIFE that lived
+// here was replaced — single source of truth, no JSON resolution
+// wobble. The version is surfaced on the boot card status pills row
+// so users see what they're running without invoking `aiden --version`.
 
 /** Lightweight readline / inquirer abstraction so tests can swap in stubs. */
 export interface ChatPromptApi {
@@ -1178,6 +1175,9 @@ export class ChatSession implements ChatSessionLike {
     }
 
     // Status pills.
+    // Phase v4.1.2-version-display: append the running version as the
+    // fifth pill so users see what they're on without invoking
+    // `aiden --version`. Sourced from the build-injected core/version.ts.
     display.write(
       display.statusPillsRow({
         coreOnline:   true,
@@ -1185,6 +1185,7 @@ export class ChatSession implements ChatSessionLike {
         model:        this.currentModelId,
         memoryActive: true,
         providerOk:   !this.opts.unconfigured,
+        version:      AIDEN_VERSION,
       }) + '\n',
     );
 
