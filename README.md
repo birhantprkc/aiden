@@ -13,7 +13,7 @@
 
 Autonomous AI Engine
 
-72 skills · 45 tools · 19 providers · 9 channels · AGPL-3.0
+74 skills · 53 tools · 19 providers · 9 channels · AGPL-3.0
 
 Windows · Linux · WSL · macOS (API Mode)
 
@@ -97,8 +97,8 @@ Local-first · Self-healing routing · Browser & terminal control · Persistent 
 
 <p align="center">
   <img src="https://img.shields.io/badge/providers-19-f97316?style=for-the-badge" alt="19 providers" />
-  <img src="https://img.shields.io/badge/skills-68-43853d?style=for-the-badge" alt="68 skills" />
-  <img src="https://img.shields.io/badge/tools-45-blueviolet?style=for-the-badge" alt="45 tools" />
+  <img src="https://img.shields.io/badge/skills-74-43853d?style=for-the-badge" alt="74 skills" />
+  <img src="https://img.shields.io/badge/tools-53-blueviolet?style=for-the-badge" alt="53 tools" />
   <img src="https://img.shields.io/badge/channels-9-5865f2?style=for-the-badge" alt="9 channels" />
   <img src="https://img.shields.io/badge/offline-Ollama-22c55e?style=for-the-badge" alt="offline" />
   <img src="https://img.shields.io/badge/OAuth-Claude%20Pro%20%2B%20ChatGPT%20Plus-9333ea?style=for-the-badge" alt="OAuth subscriptions" />
@@ -115,7 +115,7 @@ Local-first · Self-healing routing · Browser & terminal control · Persistent 
 
 ---
 
-> **v4.1.0 — Multi-channel autonomous AI engine**
+> **v4.1 — Multi-channel autonomous AI engine**
 > Telegram + MCP server + subagent fanout + voice CLI + skill mining. Hardened cron, structured markdown, cross-platform CI. See [changelog](#changelog) below.
 
 ---
@@ -139,14 +139,14 @@ Most AI agents answer questions. Aiden runs work end-to-end on your machine.
 - **Automates any browser** — 10 Playwright-driven tools (navigate, click, type, fill, scroll, extract, screenshot, get-url, close, captcha-check)
 - **Self-healing provider routing** — 6-slot fallback chain (`together → groq × 4`) advances slots in under a second on rate-limit
 - **OAuth subscription routing** — sign in with Claude Pro or ChatGPT Plus; queries route to your subscription quota, not pay-as-you-go
-- **Persistent memory** — `MEMORY_INDEX.md`, `USER.md`, `SOUL.md`, plus semantic recall and a `LESSONS.md` failure log that grows every session
+- **Persistent memory** — `USER.md`, `SOUL.md`, `MEMORY.md` (durable facts + recent-session distillations), plus semantic recall over past sessions via the `recall_session` tool. Memory promotes itself: each session ends with a structured distillation, and durable facts graduate to a protected section that survives compression.
 - **Lives where you do** — identity files re-read every turn; edit `USER.md` mid-conversation and the change lands within one reply
 - **One command to start** — `npx aiden-runtime` installs, configures, and runs everything
 - **Honest failures** — every tool error names the tool, provider, retry count, fallback chain, error, and next step. No silent swallowing.
 - **Plugin extension** — drop a plugin into `<aiden-home>/plugins/` and call `ctx.commandRegistry.register()` to add slash commands without touching core
 - **Open source** — AGPL-3.0 core, Apache-2.0 skills. Read every line, modify anything, contribute back.
 
-Aiden is a local-first AI operating system. It runs entirely on your machine — no cloud account required, no telemetry, no data leaving your hardware unless you configure a cloud provider. It installs as a global npm package (`aiden-runtime`, ~16 MB) on Windows, Linux, WSL, and macOS — Node.js 18+ is the only prerequisite. Features: 68 bundled skills, 42 built-in tools across 11 categories, multi-layer memory architecture, self-healing provider routing across 19 providers, the ability to control your screen, browse the web, run code, send emails and messages, manage files, and hold a full conversation — offline via Ollama.
+Aiden is a local-first AI operating system. It runs entirely on your machine — no cloud account required, no telemetry, no data leaving your hardware unless you configure a cloud provider. It installs as a global npm package (`aiden-runtime`, ~16 MB) on Windows, Linux, WSL, and macOS — Node.js 18+ is the only prerequisite. Features: 74 bundled skills, 53 built-in tools across 11 categories, multi-layer memory architecture, self-healing provider routing across 19 providers, the ability to control your screen, browse the web, run code, send emails and messages, manage files, and hold a full conversation — offline via Ollama.
 
 ---
 
@@ -175,10 +175,10 @@ All platforms use the same npm-based install path. Node.js 18+ is the only prere
 
 | Platform | Install | Skills available |
 |---|---|---|
-| **Windows 10/11** | ✅ `npm install -g aiden-runtime` | All 68 (including Windows-only skills) |
-| **Linux** | ✅ `npm install -g aiden-runtime` | ~62 (Windows-only skills auto-skipped) |
-| **WSL 2** | ✅ `npm install -g aiden-runtime` | ~62 (Windows-only skills auto-skipped) |
-| **macOS** | ✅ `npm install -g aiden-runtime` | ~62 (Windows-only skills auto-skipped) |
+| **Windows 10/11** | ✅ `npm install -g aiden-runtime` | All 74 (including Windows-only skills) |
+| **Linux** | ✅ `npm install -g aiden-runtime` | ~68 (Windows-only skills auto-skipped) |
+| **WSL 2** | ✅ `npm install -g aiden-runtime` | ~68 (Windows-only skills auto-skipped) |
+| **macOS** | ✅ `npm install -g aiden-runtime` | ~68 (Windows-only skills auto-skipped) |
 
 Windows-only skills (clipboard history, Defender, OneNote, Outlook COM, registry, Task Scheduler, etc.) are tagged `platform: windows` and silently skipped on other platforms at load time.
 
@@ -311,7 +311,7 @@ Set `AIDEN_HEADLESS=true` to suppress the Electron GUI when running the packaged
 
 ---
 
-## Known limitations (v4.0.0)
+## Known limitations
 
 We're shipping honest. Things that work, things that don't:
 
@@ -339,6 +339,12 @@ We're shipping honest. Things that work, things that don't:
 **Landed in v4.1:**
 
 - Telegram channel adapter (DM polling + per-chat memory) — see [docs/channels/telegram.md](docs/channels/telegram.md)
+- DeepSeek V4 Pro provider with reasoning-token streaming and per-model defaults
+- `/update` slash command + `aiden_self_update` tool — registry probe, in-process installer, platform-specific permission-denied remediations
+- Structured session distillation — each session ends with a JSON summary that promotes durable facts into a protected `MEMORY.md` section
+- `recall_session` tool — semantic search over past distilled sessions
+- Eval harness — 18 honesty scenarios (10 easy + 8 hard) with `npm run eval -- --suite honesty`
+- Subsystem health registry surfacing component status in `/doctor`
 
 **Beta features:**
 
@@ -375,7 +381,7 @@ play me a popular hindi song
 what files did I download today
 ```
 
-Type `/` to browse all 28 commands with instant search. Skills register their own dynamic slash commands at load time.
+Type `/` to browse all 33 commands with instant search. Skills register their own dynamic slash commands at load time.
 
 ---
 
@@ -445,10 +451,10 @@ Multi-layer memory visualised — every conversation, task, and learned pattern 
 
 | Category | What Aiden does |
 |---|---|
-| **Inference & providers** | 19 providers including Anthropic, OpenAI, Groq (4-slot fallback), Together, Gemini, NVIDIA NIM, OpenRouter, DeepSeek, Mistral, Z.ai, Kimi, MiniMax, Hugging Face, custom OpenAI-compatible endpoints, and **Ollama** for fully offline. OAuth subscription routing for Claude Pro and ChatGPT Plus. |
-| **42 built-in tools** | Web search & fetch, deep research, YouTube search, Playwright browser automation (10 tools), file ops (read, list, write, patch, delete, move, copy), process control (spawn, kill, list, log-read, wait), shell exec, code execution, system info, MCP bridge, memory add/replace/remove, session list/search, skill view/list/manage. |
-| **68 bundled skills** | Composable workflows each with a `SKILL.md` prompt, optional helper scripts, and tool requirements. Includes: GitHub PR/issue workflows, NSE / Upstox / Zerodha trading, Censys / Shodan / VirusTotal lookups, Windows Defender / Task Scheduler, Docker management, YouTube content tools, ASCII art, and more. |
-| **6-layer memory** | `MEMORY_INDEX.md` (declarative facts), conversation/session/workspace memory, semantic search (BM25 + embeddings), learning memory (`LESSONS.md`), structured user profile. Dirty-bit invalidation rebuilds the prompt when files change mid-session. |
+| **Inference & providers** | 19 providers including Anthropic, OpenAI, Groq (4-slot fallback), Together, Gemini, NVIDIA NIM, OpenRouter, **DeepSeek V4 Pro** (reasoning-token streaming), Mistral, Z.ai, Kimi, MiniMax, Hugging Face, custom OpenAI-compatible endpoints, and **Ollama** for fully offline. OAuth subscription routing for Claude Pro and ChatGPT Plus. |
+| **53 built-in tools** | Web search & fetch, deep research, YouTube search, Playwright browser automation (10 tools), file ops (read, list, write, patch, delete, move, copy), process control (spawn, kill, list, log-read, wait), shell exec, code execution, system info, screenshot, clipboard, app launch/close, media keys, MCP bridge, memory add/replace/remove, session list/search/summary/recall, skill view/list/manage, and `aiden_self_update`. |
+| **74 bundled skills** | Composable workflows each with a `SKILL.md` prompt, optional helper scripts, and tool requirements. Includes: GitHub PR/issue workflows, NSE / Upstox / Zerodha trading, Censys / Shodan / VirusTotal lookups, Windows Defender / Task Scheduler, Docker management, YouTube content tools, ASCII art, and more. |
+| **Self-promoting memory** | `USER.md` + `SOUL.md` identity, plus a `MEMORY.md` split between durable facts (compression-protected) and recent-session distillations. Each session ends with a structured JSON summary that graduates durable facts into the protected section. Semantic recall over past sessions via the `recall_session` tool. Dirty-bit invalidation rebuilds the prompt when files change mid-session. |
 | **Voice** | Edge TTS / Windows SAPI text-to-speech, speech-to-text helpers. |
 | **Channel adapters** | Discord, Slack, Telegram, WhatsApp, Email (IMAP+SMTP), Webhook, Twilio SMS, iMessage (macOS), Signal — any channel triggers the same agent loop. |
 | **Computer use** | Screenshot capture, screen-state vision loop, browser automation. Mouse/keyboard automation partial. |
@@ -484,16 +490,16 @@ User input (any channel)
        │           │
        │           ▼
        │     ┌──────────────────┐
-       │     │  Tool dispatcher │──▶ 42 built-in tools
+       │     │  Tool dispatcher │──▶ 53 built-in tools
        │     └──────────────────┘    + skill-driven dynamic tools
        │
        ▼
   ┌─────────────────────────────────────┐
   │  Memory                             │
-  │  MEMORY_INDEX.md · USER.md · SOUL.md │
-  │  conversation · session · workspace │
-  │  semantic (BM25 + embeddings)       │
-  │  learning (LESSONS.md)              │
+  │  USER.md · SOUL.md · MEMORY.md      │
+  │  (durable facts · recent sessions)  │
+  │  semantic recall (recall_session)   │
+  │  end-of-session distillation        │
   └─────────────────────────────────────┘
        │
        ▼
@@ -577,7 +583,7 @@ Optional: set `AIDEN_API_KEY=your-secret` in `.env` to require Bearer-token auth
 | `npm start` | Start the API server (port 4200) |
 | `npm run build` | Rebuild after source changes |
 
-### In-chat slash commands (28 total)
+### In-chat slash commands (33 total)
 
 **Session**
 | Command | Description |
@@ -586,6 +592,9 @@ Optional: set `AIDEN_API_KEY=your-secret` in `.env` to require Bearer-token auth
 | `/compress` | Compress the conversation to free context |
 | `/save` | Save the current session |
 | `/title` | Set a title for the session |
+| `/history` | Browse past sessions |
+| `/show` | Show session metadata |
+| `/status` | Show current session status |
 
 **Configuration**
 | Command | Description |
@@ -611,11 +620,16 @@ Optional: set `AIDEN_API_KEY=your-secret` in `.env` to require Bearer-token auth
 | `/license` | Show / set Pro license |
 | `/plugins` | List, grant, suspend plugins |
 | `/reload-mcp` | Reconnect MCP servers |
+| `/reload-soul` | Reload SOUL.md / USER.md mid-session |
 | `/tools` | List registered tools |
 | `/skills` | List, view, install skills |
 | `/usage` | Token usage + cost summary |
 | `/yolo` | No-approval mode (use carefully) |
 | `/cron` | Schedule recurring tasks |
+| `/update` | Check for / install the latest `aiden-runtime` (`install` subcommand applies) |
+| `/setup` | Re-run the setup wizard from the REPL |
+| `/channel` | List / manage channel adapters (Discord, Slack, Telegram, …) |
+| `/voice` | Toggle voice output (Edge TTS / Windows SAPI) |
 | `/quit` | Exit the REPL |
 
 **Authentication**
@@ -644,8 +658,8 @@ Both the terminal CLI and the browser dashboard (`localhost:4200/ui`) expose the
 | Chat | ✅ inline prompt | ✅ chat panel |
 | Streaming responses | ✅ token-by-token | ✅ live SSE |
 | Markdown rendering | ✅ | ✅ |
-| Slash commands | ✅ all 28 | ✅ same commands |
-| `/` command dropdown | ✅ instant, 28 commands | ✅ |
+| Slash commands | ✅ all 33 | ✅ same commands |
+| `/` command dropdown | ✅ instant, 33 commands | ✅ |
 | Provider panel | `/providers` | ✅ Providers tab |
 | Memory panel | `/identity` + tool calls | ✅ Memory tab |
 | Skills panel | `/skills` | ✅ Skills tab |
@@ -668,7 +682,7 @@ Both the terminal CLI and the browser dashboard (`localhost:4200/ui`) expose the
 - **better-sqlite3** + **sql.js** — local persistence.
 - **croner** — cron scheduler.
 - **discord.js**, **@slack/web-api**, **whatsapp-web.js**, **twilio**, **nodemailer**, **imap-simple** — channel adapters.
-- **Vitest 4** — test runner; ~1,500 unit + integration tests.
+- **Vitest 4** — test runner; ~1,983 unit + integration tests.
 - **esbuild** — bundler for the npm package; **electron-builder** — optional desktop wrapper.
 - **Cloudflare Workers** — landing page + license server + install-script proxy.
 
@@ -715,8 +729,9 @@ Eval failures are signal, not gates: the runner exits 0 unless `--strict`.
 Default provider: `chatgpt-plus / gpt-5.5`. Falls back to the test-provider
 chain (Groq / Together via env-var keys) when ChatGPT Plus isn't authed.
 
-Available suites: `honesty` (10 scenarios covering fabricated content, fake
-"I found" claims, claimed actions without tool calls, unverified completions).
+Available suites: `honesty` (18 scenarios — 10 easy + 8 hard — covering
+fabricated content, fake "I found" claims, claimed actions without tool calls,
+unverified completions, write/read mismatches, and post-cutoff version claims).
 
 ---
 
@@ -783,7 +798,20 @@ Aiden is built and maintained by one person. If it saves you time, consider spon
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for the full history. **v4.0.0 highlights:**
+See [CHANGELOG.md](CHANGELOG.md) for the full history.
+
+**v4.1.2 highlights:**
+
+- 🧠 **Self-promoting memory** — sessions end with a structured JSON distillation; durable facts graduate into a compression-protected `MEMORY.md` section that survives `/compress`. Recent-session distillations are kept separately for `recall_session` semantic search.
+- 🔍 **`recall_session` tool** — query past sessions in natural language; returns ranked distillations with date + summary + relevant facts.
+- 🛰 **DeepSeek V4 Pro provider** — reasoning-token streaming, per-model defaults (`MODEL_DEFAULTS`), probe filtering for codex-only slugs.
+- ⬆ **`/update` slash command + `aiden_self_update` tool** — npm-registry probe with 6h boot cache, in-process `executeInstall` shared between both surfaces, platform-specific permission-denied remediations (Windows admin / sudo / user-local prefix). No silent self-escalation, no false claims of in-place upgrade.
+- 🧪 **Eval harness** — 18 honesty scenarios (10 easy + 8 hard); `npm run eval -- --suite honesty`, results land in `evals/results/<timestamp>.json`.
+- 🩺 **Subsystem health registry** — `/doctor` surfaces component status with a uniform OK / WARN / FAIL contract.
+- 🔒 **Memory-guard hardening** — section-aware `## Durable facts` protection, word-boundary regex anchors, entry-delimited storage, case-insensitive dedup with separator tolerance.
+- ✅ **~1,983 tests passing** — regression guards for every smoke-test bug found in earlier slices.
+
+**v4.0.0 highlights:**
 
 - 🧠 **Clean-room core rewrite** — every adapter, every prompt slot, every loop. 7 dual-attribution files rewritten under full Aiden copyright.
 - 🔌 **19 providers** including OAuth subscription routing for Claude Pro and ChatGPT Plus (subscription quota, not pay-as-you-go).

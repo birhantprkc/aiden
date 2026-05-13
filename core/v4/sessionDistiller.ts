@@ -288,7 +288,7 @@ export const TOOL_RESULT_TRUNCATION = 200;
  *   assistant actually discussed.
  *
  *   This filter drops ALL `role: 'system'` messages and emits the
- *   remaining traffic in Hermes-style role-tagged form:
+ *   remaining traffic as role-tagged lines:
  *
  *     [USER] full user message verbatim
  *     [ASSISTANT] assistant text (if non-empty)

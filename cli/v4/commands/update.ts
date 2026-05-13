@@ -15,8 +15,10 @@
  *                      remediation on permission failure.
  *
  * No auto-restart on success — the user keeps control by typing
- * /quit and re-launching aiden. Hermes consult was explicit:
- * "never claim the current process is upgraded after install."
+ * /quit and re-launching aiden. Honest UX: never claim the current
+ * process is upgraded after a successful install. Auto-restart of
+ * a node REPL via re-exec is also fragile across Windows/macOS/
+ * Linux, so the explicit /quit path is both honest and reliable.
  */
 
 import type { SlashCommand, SlashCommandContext } from '../commandRegistry';

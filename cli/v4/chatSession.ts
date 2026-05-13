@@ -600,8 +600,9 @@ export class ChatSession implements ChatSessionLike {
    *
    * Idempotency: `this.summarized` is set to true ONLY on full
    * success (MEMORY.md write verified). Failed or timed-out attempts
-   * leave the flag false so the next exit path retries. Matches
-   * Hermes's `_agent_running` pattern minus the gateway complexity.
+   * leave the flag false so the next exit path retries. Lightweight
+   * in-memory flag pattern — clears on normal completion, only set
+   * after a fully verified write.
    *
    * Timeout: SUMMARY_TIMEOUT_MS_DEFAULT (4s) override via env var.
    * On timeout the LLM result is treated as empty → distillation

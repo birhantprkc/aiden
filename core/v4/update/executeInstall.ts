@@ -30,9 +30,12 @@
  *     install manually with proper privileges.
  *
  * Honest about what it doesn't do:
- *   - No auto-restart of the running REPL (Hermes consult: "never
- *     claim current process is upgraded after install"). Caller
- *     prints the "type /quit and rerun aiden" hint.
+ *   - No auto-restart of the running REPL. The currently-running
+ *     process keeps running the OLD version regardless of what npm
+ *     just installed globally — claiming otherwise would lie to the
+ *     user. Caller prints the "type /quit and rerun aiden" hint
+ *     instead so the user knows exactly when the new version takes
+ *     effect.
  *   - No self-escalation to UAC/sudo. We try once; on permission
  *     failure we surface the right copy-paste, not silent escalation.
  *   - No registry probe — call `checkForUpdate` first if you need to
@@ -235,10 +238,11 @@ function isPermissionDenied(
 }
 
 /**
- * Build the platform-specific copy-paste remediation. Hermes recommends
- * three distinct paths — system-wide-with-elevation, sudo, or
- * user-local-prefix — so the user has options without us trying to
- * self-escalate.
+ * Build the platform-specific copy-paste remediation. Provides three
+ * distinct paths — system-wide-with-elevation (Windows admin),
+ * sudo (macOS/Linux), or user-local-prefix (cross-platform) — so the
+ * user has options without us trying to self-escalate to UAC/sudo
+ * from inside the running REPL.
  */
 function permissionDeniedMessage(platform: NodeJS.Platform): string {
   const userLocal =

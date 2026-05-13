@@ -311,7 +311,7 @@ describe('distillSession (orchestrator)', () => {
 // ("I'm Aiden, a local-first AI agent…") instead of session content,
 // because the unfiltered transcript included the giant role:'system'
 // block PromptBuilder constructs. Filter drops system messages and
-// emits Hermes-style role-tagged lines for the rest.
+// emits role-tagged lines ([USER], [ASSISTANT], [TOOL:name]) for the rest.
 
 describe('filterMessagesForDistillation', () => {
   it('drops ALL role:\'system\' messages (the boilerplate source)', () => {
