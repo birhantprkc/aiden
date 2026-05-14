@@ -319,12 +319,15 @@ describe('CliCallbacks.setVerboseMode', () => {
 
 describe('CliCallbacks Phase 23.5 onToolCall', () => {
   // v4.1.3-repl-polish: row format changed —
-  //   - Successful tool calls are SILENT on non-TTY (no persistent row).
   //   - Failure / blocked / degraded rows render via the new trail
   //     format: `┊ {icon} {verb:12} {detail}  {outcome}`. Brackets
   //     [ok …] / [fail …] / [blocked] are gone; the outcome is a
   //     plain suffix colored by kind.
-  it('non-TTY success emits no persistent row (silent positive)', () => {
+  //
+  // v4.1.5 Issue N: clean-success rows are now PERSISTENT (was: silent).
+  // The completed row replaces the running row and survives past the
+  // turn for scrollback recall.
+  it('non-TTY success emits a persistent completed row (v4.1.5 Issue N)', () => {
     const { display, output } = makeDisplay();
     const cb = new CliCallbacks({ display });
     cb.onToolCall(
@@ -336,9 +339,13 @@ describe('CliCallbacks Phase 23.5 onToolCall', () => {
       'after',
       { id: 'c1', name: 'web_search', result: { hits: [] } },
     );
-    // Mock stream is non-TTY by default; new toolRow() defers until
-    // completion on non-TTY, and ok() is silent → buffer stays empty.
-    expect(output()).toBe('');
+    // v4.1.5 Issue N: clean-success now writes a completed row so the
+    // log scrollback captures the action timeline. The exact ms suffix
+    // is non-deterministic in tests (depends on fake-clock advance);
+    // assert the row chrome + verb appear.
+    const out = output();
+    expect(out).toContain('┊');
+    expect(out).toContain('fetching');
   });
 
   it('uses "blocked" suffix when result.error mentions URL provenance gate', () => {

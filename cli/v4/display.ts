@@ -978,7 +978,24 @@ export class Display {
    * content below MUST call `pause()` first; otherwise their content
    * lands on the indicator line and the next tick clobbers it.
    */
-  activityIndicator(initialVerb: string = 'thinking'): ActivityIndicatorHandle {
+  /**
+   * v4.1.5 Issue K — wave-bar option.
+   *
+   * When `opts.waveBar === true` (DEFAULT), the indicator paints a
+   * second row BELOW the verb line — a 10-cell `▰▱` snake-scroll
+   * heartbeat that gives visible motion during long pre-first-token
+   * gaps even when the verb doesn't change. The bar is NOT progress:
+   * it's a constant-cadence heartbeat (250ms shared with the dot
+   * pulse), explicitly not a percentage indicator.
+   *
+   * Pass `{ waveBar: false }` for back-compat with v4.1.4 tests that
+   * assert single-row geometry. Production callers (chatSession) get
+   * the wave bar by default.
+   */
+  activityIndicator(
+    initialVerb: string = 'thinking',
+    opts: { waveBar?: boolean } = {},
+  ): ActivityIndicatorHandle {
     const sk     = this.skin;
     const out    = this.out;
     const isTty  = !!out.isTTY;
@@ -1008,6 +1025,14 @@ export class Display {
     // v4.1.5 if wanted, but it must NOT be glued to the indicator.
     const glyph = sk.applyColors('▲', 'brand');
 
+    // v4.1.5 Issue K — wave-bar state. Snake-scroll: a 3-cell `▰`
+    // block slides across 10 cells, wrapping at the right edge. Same
+    // 250ms tick as the verb dot pulse — one timer drives both rows.
+    const waveBarEnabled = opts.waveBar !== false; // default true
+    const WAVE_CELLS = 10;
+    const WAVE_BLOCK = 3;
+    let waveFrame = 0;
+
     const buildLine = (): string => {
       const dots = '.'.repeat(dotFrame); // 0..3 dots
       const elapsedSec = Math.floor((Date.now() - startTime) / 1000);
@@ -1018,13 +1043,94 @@ export class Display {
       return `${glyph} ${verb}${dots.padEnd(3, ' ')}${elapsedStr}`;
     };
 
+    /**
+     * v4.1.5 Issue K — render the wave-bar row. A 3-cell `▰` block at
+     * positions `[waveFrame, waveFrame+1, waveFrame+2]` mod 10. The
+     * filled cells paint brand orange, empty cells paint warm-muted.
+     * Same width + glyph set as the token progress bar so the two
+     * rows feel like a coherent palette (one is heartbeat, the other
+     * is real progress).
+     *
+     * Heartbeat semantics: this is NOT progress. The wave moves at a
+     * constant 250ms cadence regardless of any backend metric. It
+     * exists purely so the user sees motion during the unobservable
+     * TTFT (time-to-first-token) wait. The verb row above carries
+     * any real lifecycle signal via `setVerb()`.
+     */
+    const buildWave = (): string => {
+      // v4.1.5 Phase 1d (Q-P1) — glyph palette switch. Was `▰`/`▱`
+      // (U+25B0/B1, Geometric Shapes) which legacy Windows console
+      // fonts render as tofu. Now `▓`/`░` (U+2593/91, Block Elements
+      // — in CP437, universally supported). Matches the existing
+      // statusFooter chrome that's shipped since v3 without ever
+      // being garbled.
+      const filled = new Set<number>();
+      for (let i = 0; i < WAVE_BLOCK; i += 1) {
+        filled.add((waveFrame + i) % WAVE_CELLS);
+      }
+      // Render cells in order so the snake-scroll visually slides:
+      // we paint cell-by-cell with the right color, joined into one
+      // string. ANSI runs reset per cell — slight overhead but keeps
+      // glyph order true to position. Brand orange filled, warm-muted
+      // empty.
+      const cells: string[] = [];
+      for (let c = 0; c < WAVE_CELLS; c += 1) {
+        cells.push(filled.has(c)
+          ? sk.applyColors('▓', 'brand')
+          : sk.applyColors('░', 'muted'));
+      }
+      return cells.join('');
+    };
+
+    // v4.1.5 Part 1a — Issue M (Windows ConPTY buffering fix).
+    //
+    // Prior pattern wrote `\r\x1b[K{indicator}` with NO trailing
+    // newline. On Windows ConPTY, `process.stdout` buffers no-newline
+    // writes — none of the 60 indicator ticks during a 15s gap
+    // actually rendered. The final reply's `\n` chars eventually
+    // flushed the buffer, but by then the indicator's stop()-erase
+    // had also been buffered + flushed, so the user saw 15s of blank
+    // followed by the reply dumping all at once.
+    //
+    // Fix: indicator OWNS one terminal row. Every write that paints
+    // the indicator ends with `\n`, which forces a flush on every
+    // platform. The cursor sits on the LINE BELOW the indicator
+    // while it's running (one visible empty row gap). When the
+    // indicator stops/pauses, we walk back UP to the indicator's
+    // row and erase it — the cursor then sits at col 0 of that
+    // (now empty) row, ready for the caller to write whatever
+    // content follows (header, tool row, stream output).
+    //
+    // ANSI primitives:
+    //   `\x1b[1A` — cursor up 1 line
+    //   `\x1b[2K` — erase the whole current line
+    // Sequence on tick:    walk up → erase → paint → `\n` → cursor below.
+    // Sequence on erase:   walk up → erase (no newline). Cursor on the
+    //                      now-empty indicator row, ready for caller.
+    const ANSI_UP_ERASE = '\x1b[1A\x1b[2K';
+
     const renderTick = (): void => {
       if (stopped || paused || !isTty) return;
       dotFrame = (dotFrame + 1) % 4;
-      // `\r\x1b[K` — carriage return + clear line — then write the
-      // fresh indicator. No newline at end: cursor stays at end of
-      // the indicator line, ready for the next overwrite.
-      out.write(`\r\x1b[K${buildLine()}`);
+      // v4.1.5 Issue K — wave snake-scroll advances 1 cell per tick.
+      // Same 250ms cadence as the dot pulse, so both rows move in
+      // visible lockstep. Modulo WAVE_CELLS wraps the leading block
+      // back to the left edge.
+      waveFrame = (waveFrame + 1) % WAVE_CELLS;
+      if (waveBarEnabled) {
+        // 2-row layout: walk up TWO rows (two separate up-1+erase
+        // sequences, which keeps the `\x1b[1A\x1b[2K` substring
+        // assertion-compatible), repaint both, drop newlines so the
+        // cursor lands on the row below the wave bar.
+        out.write(
+          `${ANSI_UP_ERASE}${ANSI_UP_ERASE}` +
+          `${buildLine()}\n` +
+          `${buildWave()}\n`,
+        );
+      } else {
+        // Single-row layout (back-compat with v4.1.4 tests).
+        out.write(`${ANSI_UP_ERASE}${buildLine()}\n`);
+      }
     };
 
     const startTick = (): void => {
@@ -1040,12 +1146,36 @@ export class Display {
     };
 
     const eraseLine = (): void => {
-      if (isTty && printed) out.write('\r\x1b[K');
+      // Walk up to the indicator's row(s) + erase. Cursor lands at
+      // col 0 of the (now empty) verb row. NO trailing newline here:
+      // the caller is about to write content on this row, and
+      // whatever they write will include their own `\n` to flush
+      // the buffer. If we emitted `\n` here, we'd leave a phantom
+      // blank row before the caller's content.
+      //
+      // v4.1.5 Issue K — with wave bar enabled, walk up 2 rows (two
+      // up-1+erase sequences). Without the bar, walk up 1 row.
+      if (!isTty || !printed) return;
+      if (waveBarEnabled) {
+        out.write(`${ANSI_UP_ERASE}${ANSI_UP_ERASE}`);
+      } else {
+        out.write(ANSI_UP_ERASE);
+      }
     };
 
-    // Initial paint — only on TTY.
+    // Initial paint — only on TTY. Indicator + `\n` so the buffer
+    // flushes and the cursor sits on the row below, ready for the
+    // first tick to walk back up.
+    //
+    // v4.1.5 Issue K — when wave bar is enabled, paint TWO rows:
+    // verb row + wave row, each with trailing `\n`. Cursor lands on
+    // the row below the wave bar. The first tick will walk up 2.
     if (isTty) {
-      out.write(buildLine());
+      if (waveBarEnabled) {
+        out.write(`${buildLine()}\n${buildWave()}\n`);
+      } else {
+        out.write(`${buildLine()}\n`);
+      }
       printed = true;
       startTick();
     }
@@ -1068,9 +1198,17 @@ export class Display {
         if (!isTty) return;
         // Caller has just finished writing its own content (typically
         // ending with `\n`), so the cursor is on a fresh line below
-        // whatever was there. Render the indicator there and arm the
-        // tick again.
-        out.write(buildLine());
+        // whatever was there. Paint the indicator + `\n` to claim the
+        // current row(s) and leave the cursor on the row below — same
+        // invariant the initial paint and tick maintain. Trailing `\n`
+        // also flushes Windows ConPTY buffering (Issue M).
+        //
+        // v4.1.5 Issue K — repaint BOTH rows when wave bar enabled.
+        if (waveBarEnabled) {
+          out.write(`${buildLine()}\n${buildWave()}\n`);
+        } else {
+          out.write(`${buildLine()}\n`);
+        }
         printed = true;
         startTick();
       },
@@ -1101,6 +1239,32 @@ export class Display {
   // ANSI cursor games on a dumb sink.
 
   toolRow(name: string, args: unknown): ToolRowHandle {
+    // v4.1.5 Phase 1d (Q-Q2-a) — TRAIL_HIDE_TOOLS suppression.
+    //
+    // Some tools are pure agent plumbing — the model calls them to
+    // introspect its own registry, not to do user-visible work.
+    // `lookup_tool_schema` is the canonical case: during planning
+    // the agent may invoke it 30+ times to discover unfamiliar tool
+    // shapes. Each call is a sub-millisecond in-memory lookup, but
+    // they flood the visible trail with noise that obscures the
+    // actual user-relevant tool calls.
+    //
+    // Short-circuit: hidden tools get a NO-OP handle that satisfies
+    // the `ToolRowHandle` contract (ok/fail/degraded/retry/blocked/
+    // emptyRetry/emptyFail all defined but write nothing). The
+    // execution path itself is unaffected — the agent still calls
+    // the tool, the planner / skill-enforcement trackers still
+    // record it. Only the visual row is suppressed.
+    //
+    // CRITICAL invariant: `setBeforeFirstToolHook` is fired by
+    // callbacks.ts BEFORE `toolRow()` is called (see callbacks.ts
+    // onToolCall 'before' branch), so `turnHadTools` flips even for
+    // hidden tools. The separator logic stays correct regardless of
+    // whether ONLY hidden tools fired this turn.
+    if (TRAIL_HIDE_TOOLS.has(name)) {
+      return makeNoOpToolRowHandle();
+    }
+
     const sk = this.skin;
 
     // ── Build the fixed left portion (icon + verb + detail) ────────────
@@ -1214,8 +1378,31 @@ export class Display {
             'warn',
           );
         } else {
-          // Clean success — SILENT. Erase on TTY; emit nothing on non-TTY.
-          eraseLast();
+          // v4.1.5 Issue N — persistent tool trail in scrollback.
+          //
+          // Prior behaviour: silent erase on clean success (`eraseLast()`
+          // with no replacement write). Tool rows for successful tools
+          // vanished, leaving only the markdown reply visible afterward.
+          // The user couldn't see WHAT actions Aiden took unless a tool
+          // failed or degraded.
+          //
+          // Fix: replace the silent erase with a completed-state row
+          // painted entirely in warm-muted (`#b8a89a` from v4.1.4). The
+          // duration suffix replaces the live `running Ns…` chrome; the
+          // whole row reads "done" via reduced visual weight. Failed /
+          // degraded / retry outcomes keep their existing coloured paint
+          // (error red, degraded yellow, warn amber) — only clean success
+          // shifts from "silent" to "muted-persistent."
+          //
+          // The persistence mechanism is the existing `writeFinal` path:
+          // it walks up + erases the running row, then writes the final
+          // row with trailing `\n`. The row sits in scrollback because
+          // `streamComplete` rerenders only the post-tool stream chunk
+          // (via `streamLineCount` which was reset to 0 inside
+          // `commitStreamChunk` before this row wrote). No additional
+          // isolation machinery needed — already verified by 13/13
+          // `smoke-stream-rerender.ts` regressions.
+          writeFinal(formatToolDuration(durationMs), 'muted');
         }
       },
       fail(durationMs: number, retries = 0) {
@@ -1967,7 +2154,64 @@ export const TOOL_ROW_NAME_PAD = TRAIL_VERB_PAD;
 /** @deprecated Use TRAIL_DETAIL_CAP. */
 export const TOOL_ROW_ARG_CAP = TRAIL_DETAIL_CAP;
 
-type ColorKindForBracket = 'success' | 'warn' | 'error' | 'degraded';
+/**
+ * v4.1.5 Phase 1d (Q-Q2-a) — names of tools that should be SUPPRESSED
+ * from the visible tool-trail row, even though they still execute
+ * normally through the agent loop.
+ *
+ * The canonical case is `lookup_tool_schema`: the agent calls it
+ * during planning to introspect tool registry entries (in-memory
+ * registry get, sub-millisecond per call). On complex prompts the
+ * model may fire it 30+ times in a row, flooding the visible trail
+ * with rows that don't represent user-meaningful work. Suppressing
+ * them keeps the trail focused on the tools that did real work
+ * (web_search, file_read, etc.).
+ *
+ * Suppression happens at `Display.toolRow()` entry — it returns a
+ * no-op handle that satisfies the `ToolRowHandle` contract but
+ * never writes to stdout. The agent's `callbacks.onToolCall`
+ * dispatch is unchanged: `setBeforeFirstToolHook` still fires (so
+ * `turnHadTools` flips for the separator-emission logic), and
+ * skill-enforcement / honesty-trace tracking still records the
+ * call. Only the visual row is hidden.
+ *
+ * Exported as a `Set` so callers can mutate at runtime if they
+ * need to hide additional tools (e.g. user customization, MCP
+ * plumbing tools). Mutation-of-shared-state is intentional — there's
+ * no per-session config plumbing for "trail hidden tools" yet, so
+ * the env-var pattern (`AIDEN_TRAIL_HIDE=tool1,tool2`) would be the
+ * v4.1.6 evolution.
+ */
+export const TRAIL_HIDE_TOOLS: Set<string> = new Set([
+  'lookup_tool_schema',
+]);
+
+/**
+ * v4.1.5 Phase 1d helper — produces a `ToolRowHandle` that satisfies
+ * the contract but writes nothing. Used by hidden tools (see
+ * `TRAIL_HIDE_TOOLS`) and as a safe fallback. All methods are inert.
+ *
+ * Pure — no side effects, no closures over Display state. Safe to
+ * call from any thread / phase.
+ */
+export function makeNoOpToolRowHandle(): ToolRowHandle {
+  return {
+    ok:         () => { /* no-op: hidden from trail */ },
+    fail:       () => { /* no-op: hidden from trail */ },
+    degraded:   () => { /* no-op: hidden from trail */ },
+    retry:      () => { /* no-op: hidden from trail */ },
+    blocked:    () => { /* no-op: hidden from trail */ },
+    emptyRetry: () => { /* no-op: hidden from trail */ },
+    emptyFail:  () => { /* no-op: hidden from trail */ },
+  };
+}
+
+// v4.1.5 Issue N — extended to include 'muted' for the new persistent
+// clean-success completed-row outcome. The whole row paints in
+// warm-muted (`#b8a89a`) so it reads "done" via reduced visual weight
+// while staying in scrollback. Failure / degraded / retry keep their
+// coloured outcomes.
+type ColorKindForBracket = 'success' | 'warn' | 'error' | 'degraded' | 'muted';
 
 /**
  * Handle returned by `Display.toolRow()`. Mutates the row in place once

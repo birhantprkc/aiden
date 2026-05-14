@@ -8,6 +8,8 @@ import {
   countNewlines,
   splitAtUnclosedBold,
   isPreFramedLine,
+  TRAIL_HIDE_TOOLS,
+  makeNoOpToolRowHandle,
 } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
 
@@ -272,32 +274,77 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
 
   // ── Success is SILENT ───────────────────────────────────────────────
 
-  it('non-TTY ok: nothing printed (success is silent)', () => {
+  // v4.1.5 Issue N — persistent tool trail in scrollback.
+  //
+  // Prior behaviour: clean success silently erased the running row,
+  // leaving no record in scrollback. Issue N changes this: clean
+  // success now writes a completed row painted entirely in muted
+  // colour (`#b8a89a`), surviving past the rerender + reply so the
+  // user can scroll up after the turn and see the action timeline.
+  // Failed / degraded / retry outcomes are unchanged — they already
+  // wrote coloured outcome rows.
+
+  it('non-TTY ok (v4.1.5 Issue N): completed row written for log persistence', () => {
     const { d, chunks } = captureDisplay({ tty: false });
     const row = d.toolRow('web_search', { query: 'bollywood top hindi songs' });
-    expect(chunks.join('')).toBe(''); // nothing before completion
+    expect(chunks.join('')).toBe(''); // nothing during execution (deferred)
     row.ok(220);
-    expect(chunks.join('')).toBe(''); // still nothing — success is silent
+    const out = chunks.join('');
+    // A completed row IS now written on non-TTY so log scrollback
+    // records the action + duration.
+    expect(out.length).toBeGreaterThan(0);
+    expect(stripAnsi(out)).toContain('fetching');
+    expect(stripAnsi(out)).toContain('220ms');
   });
 
-  it('TTY ok: running row printed, then erased silently', () => {
+  it('TTY ok (v4.1.5 Issue N): completed row replaces running row', () => {
     const { d, chunks } = captureDisplay({ tty: true });
-    // web_search is in the fetch category → verb "fetching". Picked
-    // here rather than youtube_search (which is mapped to media =
-    // "launching") so the assertion tracks the most common case.
     const row = d.toolRow('web_search', { query: 'Sahiba Jasleen Royal' });
     const first = chunks.join('');
-    // Running row uses new trail format
     expect(first).toContain('┊');
     expect(stripAnsi(first)).toContain('fetching');
     chunks.length = 0;
     row.ok(180);
     const second = chunks.join('');
-    // Only the erase escape — no final row printed.
+    // Erase ANSI (running row removed) AND a new completed row written.
     expect(second).toMatch(/\x1b\[1A\x1b\[2K\r/);
-    // After stripping ANSI sequences, only the carriage return from the
-    // erase sequence remains — no visible glyphs / text.
-    expect(stripAnsi(second).replace(/\r/g, '')).toBe('');
+    expect(stripAnsi(second)).toContain('fetching');
+    expect(stripAnsi(second)).toContain('180ms');
+  });
+
+  it('TTY ok (v4.1.5 Issue N): completed row paints in muted on coloured skin', () => {
+    // Separate test with a coloured skin so the muted RGB triplet
+    // is actually emitted (the forceMono captureDisplay helper
+    // strips colours for deterministic output).
+    const chunks: string[] = [];
+    const out = new Writable({
+      write(c, _e, cb) { chunks.push(c.toString()); cb(); },
+    }) as Writable & { isTTY?: boolean; columns?: number };
+    out.isTTY = true;
+    out.columns = 80;
+    const skin = new SkinEngine({ forceMono: false }); // coloured
+    const d = new Display({ stdout: out as unknown as NodeJS.WriteStream, skin });
+    const row = d.toolRow('web_search', { query: 'q' });
+    chunks.length = 0;
+    row.ok(180);
+    // Whole row paints in muted color: #b8a89a = rgb 184,168,154.
+    expect(chunks.join('')).toContain('\x1b[38;2;184;168;154m');
+  });
+
+  it('Issue N: completed row survives past streamComplete (persistence sentinel)', () => {
+    // Sequence: streamPartial → tool fires → tool completes (clean ok)
+    // → more streamPartial → streamComplete. The completed tool row
+    // should be present in the cumulative chunks AFTER streamComplete.
+    const { d, chunks } = captureDisplay({ tty: true });
+    d.streamPartial('Some preamble. ');
+    const row = d.toolRow('web_search', { query: 'q' });
+    row.ok(150); // clean success — must write completed row
+    d.streamPartial('More content.\n');
+    d.streamComplete();
+    const full = stripAnsi(chunks.join(''));
+    // Completed row text remains in scrollback (not erased by stream).
+    expect(full).toContain('fetching');
+    expect(full).toContain('150ms');
   });
 
   // ── v4.1.3-essentials: live tool indicator ──────────────────────────
@@ -1146,5 +1193,109 @@ describe('Display v4.1.4 F-B1 wrap-aware row counter', () => {
       d.streamPartial('a long line that would wrap if columns were known');
       d.streamComplete();
     }).not.toThrow();
+  });
+});
+
+
+// ── v4.1.5 Phase 1d (Q-Q2-a) — TRAIL_HIDE_TOOLS suppression ────────────────
+//
+// Tools listed in TRAIL_HIDE_TOOLS are agent-plumbing (e.g.
+// `lookup_tool_schema`) and shouldn't pollute the visible tool trail.
+// `Display.toolRow(name)` returns a no-op handle when `name` is in the
+// set, so writes are suppressed but the handle still satisfies the
+// ToolRowHandle contract for callers downstream.
+
+describe('TRAIL_HIDE_TOOLS (v4.1.5 Phase 1d Q-Q2-a)', () => {
+  it('exposes lookup_tool_schema as a hidden tool by default', () => {
+    expect(TRAIL_HIDE_TOOLS.has('lookup_tool_schema')).toBe(true);
+  });
+
+  it('Display.toolRow returns no-op handle for hidden tools (zero writes)', () => {
+    const chunks: string[] = [];
+    const out = new Writable({
+      write(c, _e, cb) { chunks.push(c.toString()); cb(); },
+    }) as Writable & { isTTY?: boolean; columns?: number };
+    out.isTTY = true;
+    out.columns = 80;
+    const skin = new SkinEngine({ forceMono: true });
+    const d = new Display({ stdout: out as unknown as NodeJS.WriteStream, skin });
+    chunks.length = 0;
+    const row = d.toolRow('lookup_tool_schema', { toolName: 'skill_view' });
+    // No bytes hit stdout — row is fully suppressed.
+    expect(chunks.length).toBe(0);
+    // All terminal methods still callable (contract satisfied).
+    expect(() => row.ok(0)).not.toThrow();
+    expect(() => row.fail(0)).not.toThrow();
+    expect(() => row.degraded(0, 'reason')).not.toThrow();
+    expect(() => row.retry(1, 3)).not.toThrow();
+    expect(() => row.blocked()).not.toThrow();
+    expect(() => row.emptyRetry()).not.toThrow();
+    expect(() => row.emptyFail()).not.toThrow();
+    // Still nothing in chunks after all those calls.
+    expect(chunks.length).toBe(0);
+  });
+
+  it('VISIBLE tools (not in set) still produce real rows', () => {
+    const chunks: string[] = [];
+    const out = new Writable({
+      write(c, _e, cb) { chunks.push(c.toString()); cb(); },
+    }) as Writable & { isTTY?: boolean; columns?: number };
+    out.isTTY = true;
+    out.columns = 80;
+    const skin = new SkinEngine({ forceMono: true });
+    const d = new Display({ stdout: out as unknown as NodeJS.WriteStream, skin });
+    // eslint-disable-next-line no-control-regex
+    const strip = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+    chunks.length = 0;
+    const row = d.toolRow('web_search', { query: 'q' });
+    // Real running row was written.
+    expect(chunks.length).toBeGreaterThan(0);
+    expect(strip(chunks.join(''))).toMatch(/fetching/);
+    row.ok(100);
+  });
+
+  it('makeNoOpToolRowHandle satisfies ToolRowHandle contract', () => {
+    const handle = makeNoOpToolRowHandle();
+    // All methods exist and are callable with no side effects.
+    expect(typeof handle.ok).toBe('function');
+    expect(typeof handle.fail).toBe('function');
+    expect(typeof handle.degraded).toBe('function');
+    expect(typeof handle.retry).toBe('function');
+    expect(typeof handle.blocked).toBe('function');
+    expect(typeof handle.emptyRetry).toBe('function');
+    expect(typeof handle.emptyFail).toBe('function');
+    // None throws.
+    expect(() => {
+      handle.ok(123);
+      handle.fail(456);
+      handle.degraded(789, 'partial');
+      handle.retry(1, 3);
+      handle.blocked();
+      handle.emptyRetry();
+      handle.emptyFail();
+    }).not.toThrow();
+  });
+
+  it('runtime mutation: adding a tool name to the set hides it too', () => {
+    const chunks: string[] = [];
+    const out = new Writable({
+      write(c, _e, cb) { chunks.push(c.toString()); cb(); },
+    }) as Writable & { isTTY?: boolean; columns?: number };
+    out.isTTY = true;
+    out.columns = 80;
+    const skin = new SkinEngine({ forceMono: true });
+    const d = new Display({ stdout: out as unknown as NodeJS.WriteStream, skin });
+    // 'skill_view' is normally VISIBLE.
+    TRAIL_HIDE_TOOLS.add('skill_view');
+    try {
+      chunks.length = 0;
+      const row = d.toolRow('skill_view', { name: 'demo' });
+      expect(chunks.length).toBe(0);
+      row.ok(50);
+      expect(chunks.length).toBe(0);
+    } finally {
+      // Restore default state so other tests aren't affected.
+      TRAIL_HIDE_TOOLS.delete('skill_view');
+    }
   });
 });

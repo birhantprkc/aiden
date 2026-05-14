@@ -15,6 +15,37 @@
 //   import { reliableWebSearch, deepResearch } from './webSearch'
 //   const result = await reliableWebSearch('query')
 
+// ── Debug logging (v4.1.5 Issue O) ────────────────────────────
+//
+// All `[webSearch]` / `[deepResearch]` chatter goes through these two
+// helpers, both gated on `process.env.AIDEN_DEBUG_WEB === '1'`. The
+// v4 REPL ran with these blasting unconditionally to stdout/stderr,
+// surfacing 20+ lines of fallback-chain diagnostics between the user
+// prompt and Aiden's reply on any web-search turn — overwhelming the
+// signal users actually wanted (the tool-trail row).
+//
+// Power users debugging a flaky search backend export the env var:
+//     AIDEN_DEBUG_WEB=1 aiden
+// Same pattern as `AIDEN_NO_REFORMAT`, `AIDEN_UI_ICONS`. Default off.
+//
+// `core/webSearch.ts` is shared with the legacy v3 path which has no
+// Display dependency, so we cannot route through `display.dim()` /
+// the v4 verbose-mode config. An env var is the lowest-friction
+// transport that works in both paths.
+function debugLog(...args: unknown[]): void {
+  if (process.env.AIDEN_DEBUG_WEB === '1') {
+    // eslint-disable-next-line no-console
+    console.log(...args);
+  }
+}
+
+function debugWarn(...args: unknown[]): void {
+  if (process.env.AIDEN_DEBUG_WEB === '1') {
+    // eslint-disable-next-line no-console
+    console.warn(...args);
+  }
+}
+
 // ── Types ─────────────────────────────────────────────────────
 
 interface SearchResult {
@@ -50,7 +81,7 @@ async function searchViaSearxNG(query: string): Promise<SearchResponse | null> {
       signal:  AbortSignal.timeout(SEARCH_TIMEOUT),
     })
     if (!res.ok) {
-      console.warn(`[webSearch] SearxNG returned ${res.status}`)
+      debugWarn(`[webSearch] SearxNG returned ${res.status}`)
       return null
     }
     const data = await res.json() as any
@@ -64,10 +95,10 @@ async function searchViaSearxNG(query: string): Promise<SearchResponse | null> {
 
     const lines = results.map(r => `**${r.title}**\n${r.snippet}\n${r.url}`)
     const output = `[SearxNG Results for "${query}"]\n\n${lines.join('\n\n')}`
-    console.log(`[webSearch] SearxNG: ${results.length} results`)
+    debugLog(`[webSearch] SearxNG: ${results.length} results`)
     return { success: true, output, method: 'searxng', results }
   } catch (e: any) {
-    console.warn(`[webSearch] SearxNG failed: ${e.message}`)
+    debugWarn(`[webSearch] SearxNG failed: ${e.message}`)
     return null
   }
 }
@@ -87,7 +118,7 @@ async function searchViaBrave(query: string): Promise<SearchResponse | null> {
       signal: AbortSignal.timeout(SEARCH_TIMEOUT),
     })
     if (!res.ok) {
-      console.warn(`[webSearch] Brave API returned ${res.status}`)
+      debugWarn(`[webSearch] Brave API returned ${res.status}`)
       return null
     }
     const data    = await res.json() as any
@@ -102,10 +133,10 @@ async function searchViaBrave(query: string): Promise<SearchResponse | null> {
     }))
     const lines  = results.map(r => `**${r.title}**\n${r.snippet}\n${r.url}`)
     const output = `[Brave Search Results for "${query}"]\n\n${lines.join('\n\n')}`
-    console.log(`[webSearch] Brave: ${results.length} results`)
+    debugLog(`[webSearch] Brave: ${results.length} results`)
     return { success: true, output, method: 'brave', results }
   } catch (e: any) {
-    console.warn(`[webSearch] Brave failed: ${e.message}`)
+    debugWarn(`[webSearch] Brave failed: ${e.message}`)
     return null
   }
 }
@@ -134,7 +165,7 @@ async function searchViaDDG(query: string): Promise<SearchResponse | null> {
       if (topics.length) parts.push(`Related: ${topics.join('. ')}`)
     }
   } catch (e: any) {
-    console.warn(`[webSearch] DDG Instant failed: ${e.message}`)
+    debugWarn(`[webSearch] DDG Instant failed: ${e.message}`)
   }
 
   // DDG HTML scrape — get snippet text + page content
@@ -191,13 +222,13 @@ async function searchViaDDG(query: string): Promise<SearchResponse | null> {
     if (validPages.length > 0) parts.push(...validPages)
 
   } catch (e: any) {
-    console.warn(`[webSearch] DDG HTML scrape failed: ${e.message}`)
+    debugWarn(`[webSearch] DDG HTML scrape failed: ${e.message}`)
   }
 
   if (parts.length === 0) return null
 
   const output = `[DuckDuckGo Results for "${query}"]\n\n${parts.join('\n\n')}`
-  console.log(`[webSearch] DDG: ${parts.length} sections`)
+  debugLog(`[webSearch] DDG: ${parts.length} sections`)
   return { success: true, output, method: 'ddg' }
 }
 
@@ -230,10 +261,10 @@ async function searchViaWikipedia(query: string): Promise<SearchResponse | null>
     const extra  = snippets.length > 0 ? `\n\nRelated: ${snippets.join(' | ')}` : ''
     const output = `[Wikipedia: ${wiki.title}]\n${wiki.extract.slice(0, 1500)}${extra}`
 
-    console.log(`[webSearch] Wikipedia: ${wiki.extract.length} chars for "${wiki.title}"`)
+    debugLog(`[webSearch] Wikipedia: ${wiki.extract.length} chars for "${wiki.title}"`)
     return { success: true, output, method: 'wikipedia' }
   } catch (e: any) {
-    console.warn(`[webSearch] Wikipedia failed: ${e.message}`)
+    debugWarn(`[webSearch] Wikipedia failed: ${e.message}`)
     return null
   }
 }
@@ -267,10 +298,10 @@ async function fetchWeather(query: string): Promise<SearchResponse | null> {
         out += `  ${day.date}: High ${day.maxtempC}°C / Low ${day.mintempC}°C${mid ? ' — ' + mid : ''}\n`
       }
     }
-    console.log(`[webSearch] Weather: retrieved for "${city}"`)
+    debugLog(`[webSearch] Weather: retrieved for "${city}"`)
     return { success: true, output: out.trim(), method: 'wttr.in' }
   } catch (e: any) {
-    console.warn(`[webSearch] Weather failed: ${e.message}`)
+    debugWarn(`[webSearch] Weather failed: ${e.message}`)
     return null
   }
 }
@@ -279,7 +310,7 @@ async function fetchWeather(query: string): Promise<SearchResponse | null> {
 
 export async function reliableWebSearch(query: string): Promise<{ success: boolean; output: string; error?: string }> {
   if (!query?.trim()) return { success: false, output: '', error: 'No query provided' }
-  console.log(`[webSearch] Query: "${query}"`)
+  debugLog(`[webSearch] Query: "${query}"`)
 
   // Weather shortcut
   if (/weather|temperature|forecast|rain|snow|sunny|cloudy|humidity|wind/i.test(query)) {
@@ -290,32 +321,32 @@ export async function reliableWebSearch(query: string): Promise<{ success: boole
   // Method 1 — SearxNG
   const searxResult = await searchViaSearxNG(query)
   if (searxResult) {
-    console.log(`[webSearch] ✓ SearxNG succeeded`)
+    debugLog(`[webSearch] ✓ SearxNG succeeded`)
     return { success: true, output: searxResult.output.slice(0, 10000) }
   }
 
   // Method 2 — Brave
   const braveResult = await searchViaBrave(query)
   if (braveResult) {
-    console.log(`[webSearch] ✓ Brave succeeded`)
+    debugLog(`[webSearch] ✓ Brave succeeded`)
     return { success: true, output: braveResult.output.slice(0, 10000) }
   }
 
   // Method 3 — DDG
   const ddgResult = await searchViaDDG(query)
   if (ddgResult) {
-    console.log(`[webSearch] ✓ DDG succeeded`)
+    debugLog(`[webSearch] ✓ DDG succeeded`)
     return { success: true, output: ddgResult.output.slice(0, 10000) }
   }
 
   // Method 4 — Wikipedia
   const wikiResult = await searchViaWikipedia(query)
   if (wikiResult) {
-    console.log(`[webSearch] ✓ Wikipedia fallback`)
+    debugLog(`[webSearch] ✓ Wikipedia fallback`)
     return { success: true, output: wikiResult.output }
   }
 
-  console.warn(`[webSearch] All methods failed for: "${query}"`)
+  debugWarn(`[webSearch] All methods failed for: "${query}"`)
   return {
     success: false,
     output:  '',
@@ -327,12 +358,12 @@ export async function reliableWebSearch(query: string): Promise<{ success: boole
 
 export async function deepResearch(topic: string): Promise<{ success: boolean; output: string; error?: string }> {
   if (!topic?.trim()) return { success: false, output: '', error: 'No topic provided' }
-  console.log(`[deepResearch] Topic: "${topic}"`)
+  debugLog(`[deepResearch] Topic: "${topic}"`)
 
   const parts: string[] = []
 
   // Pass 1: Broad
-  console.log(`[deepResearch] Pass 1: broad`)
+  debugLog(`[deepResearch] Pass 1: broad`)
   const broad = await reliableWebSearch(topic)
   if (broad.success && broad.output.length > 100) {
     parts.push(`=== PASS 1: BROAD RESEARCH ===\n${broad.output}`)
@@ -340,7 +371,7 @@ export async function deepResearch(topic: string): Promise<{ success: boolean; o
 
   // Pass 2: Latest 2026
   const latestQ = `${topic} 2026 latest`
-  console.log(`[deepResearch] Pass 2: latest — "${latestQ}"`)
+  debugLog(`[deepResearch] Pass 2: latest — "${latestQ}"`)
   const latest = await reliableWebSearch(latestQ)
   if (latest.success && latest.output.length > 100) {
     parts.push(`=== PASS 2: LATEST (2026) ===\n${latest.output}`)
@@ -348,7 +379,7 @@ export async function deepResearch(topic: string): Promise<{ success: boolean; o
 
   // Pass 3: Comparison / review
   const compareQ = `best top ${topic} comparison review`
-  console.log(`[deepResearch] Pass 3: comparison — "${compareQ}"`)
+  debugLog(`[deepResearch] Pass 3: comparison — "${compareQ}"`)
   const compare = await reliableWebSearch(compareQ)
   if (compare.success && compare.output.length > 100) {
     parts.push(`=== PASS 3: COMPARISON & REVIEWS ===\n${compare.output}`)
@@ -359,7 +390,7 @@ export async function deepResearch(topic: string): Promise<{ success: boolean; o
   }
 
   const combined = parts.join('\n\n')
-  console.log(`[deepResearch] Complete: ${combined.length} chars across ${parts.length} passes`)
+  debugLog(`[deepResearch] Complete: ${combined.length} chars across ${parts.length} passes`)
   return { success: true, output: combined.slice(0, 15000) }
 }
 

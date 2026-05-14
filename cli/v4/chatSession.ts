@@ -20,6 +20,11 @@
  */
 
 import type { AidenAgent } from '../../core/v4/aidenAgent';
+// v4.1.5+ Path A: env-var-gated loop trace logger. Captures tool-call
+// sequence + system prompt + memory hashes when a turn shows loop
+// symptoms (10+ calls OR 5+ consecutive same-name). Default off via
+// `AIDEN_DEBUG_LOOP=1` env-var. Zero overhead when disabled.
+import { LoopTracer } from '../../core/v4/loopTrace';
 import type { Display } from './display';
 import { summarizeChannelState, verbForActivity } from './display';
 // v4.1.4 Part 1.6 — per-turn token progress bar. Fed by `onProgress`
@@ -1152,6 +1157,59 @@ export class ChatSession implements ChatSessionLike {
     const indicator = this.opts.display.activityIndicator('thinking');
     let indicatorStopped = false;
     let streamingActive  = false;
+    // v4.1.5 Issue O — track whether this turn had any tool calls so
+    // we can emit a single muted rule between the tool trail and the
+    // reply header. Set true when the first tool's `before` phase
+    // fires (via the existing beforeFirstToolHook plumbing). Emitted
+    // once per turn — `separatorEmitted` gates idempotency against
+    // both streaming and non-streaming paths reaching the same hook.
+    //
+    // v4.1.5 Phase 1d (Q-OBV-b) — multi-tool separator regression:
+    // the prior v4.1.5 Phase 1c emission point was the streaming
+    // `onFirstDelta` callback, but that fires PER provider call
+    // (the agent resets `firstDeltaFired` each callProvider
+    // invocation), and on multi-tool turns where the model emits
+    // no preamble in early iterations + no preamble in the final
+    // reply iteration either, the relative ordering of "first
+    // delta" vs "first tool" could leave the flag/idempotency
+    // gate in an unexpected state. Definitive fix: tie emission
+    // to the FIRST STREAM BYTE LANDING ON SCREEN, which only
+    // happens once per turn regardless of how many provider
+    // iterations occurred. `firstStreamByteSeen` is the new gate;
+    // separator fires from inside `onDelta` BEFORE `streamPartial`
+    // writes the agent header.
+    let turnHadTools         = false;
+    let separatorEmitted     = false;
+    let firstStreamByteSeen  = false;
+
+    // v4.1.5+ Path A: per-turn loop tracer (env-var gated, default off).
+    // Captures tool-call sequence + assembled system prompt + memory
+    // hashes + recent skills when a turn trips loop thresholds. The
+    // `onLoopWarning` callback surfaces a one-line dim hint to the
+    // user when consecutive-same-tool count crosses 8 — gives them a
+    // chance to Ctrl+C before the agent burns more budget.
+    const loopTracer = new LoopTracer({
+      paths:      this.opts.paths!,
+      providerId: this.currentProviderId,
+      modelId:    this.currentModelId,
+      onLoopWarning: (line: string) => {
+        try { this.opts.display.dim(line); } catch { /* defensive */ }
+      },
+    });
+    if (loopTracer.isEnabled()) {
+      loopTracer.setHistory(baseHistory);
+    }
+    const emitToolReplySeparator = (): void => {
+      if (separatorEmitted || !turnHadTools) return;
+      separatorEmitted = true;
+      // Same chrome pattern as the existing pre-turn rule (line ~1100)
+      // and the post-reply rule (line ~1297): two-space indent + the
+      // body-width muted rule + newline. The 2-space indent is the
+      // legacy convention used by adjacent rules; the v4.1.5 frame
+      // gutter (3) is consciously NOT applied here so all three rules
+      // in a turn share one left edge.
+      this.opts.display.write(`  ${this.opts.display.rule()}\n`);
+    };
     const stopIndicatorOnce = (): void => {
       if (indicatorStopped) return;
       indicatorStopped = true;
@@ -1162,13 +1220,55 @@ export class ChatSession implements ChatSessionLike {
       try {
         this.opts.callbacks.setActivityIndicatorHooks?.({});
       } catch { /* defensive */ }
+      // v4.1.5 Issue K — also clear the phase-verb sink so lifecycle
+      // events fired during async cleanup don't try to update a
+      // stopped indicator.
+      try {
+        this.opts.callbacks.setPhaseVerbHook?.(undefined);
+      } catch { /* defensive */ }
+      // v4.1.5+ Path A — clear the loop-trace sink so subsequent
+      // turns don't fire into a stale tracer. Note: this clears the
+      // HOOK, not the tracer's accumulated state — finalize() still
+      // runs at end-of-try below to write the snapshot if thresholds
+      // tripped.
+      try {
+        this.opts.callbacks.setToolTraceHook?.({});
+      } catch { /* defensive */ }
     };
+
+    // v4.1.5 Issue K — wire the per-turn phase-verb sink. Each
+    // AidenAgent lifecycle event (memory refresh start, prompt built,
+    // provider request start) flows through CliCallbacks and lands
+    // here as a verb string ("refreshing memory" / "preparing prompt"
+    // / "calling provider"). The closure captures the per-turn
+    // indicator handle so verb mutations stay scoped to this turn.
+    this.opts.callbacks.setPhaseVerbHook?.((verb: string) => {
+      if (indicatorStopped) return;
+      indicator.setVerb(verb);
+    });
+
+    // v4.1.5+ Path A — wire the loop-trace sink. Fires for EVERY tool
+    // call (including hidden ones) so the trace captures the full
+    // agent loop. Defensive — when AIDEN_DEBUG_LOOP is unset, the
+    // tracer's `startTool`/`endTool` short-circuit immediately.
+    this.opts.callbacks.setToolTraceHook?.({
+      before: (id: string, name: string) => loopTracer.startTool(id, name),
+      after:  (id: string, name: string, args: unknown) => loopTracer.endTool(id, name, args),
+    });
 
     // Phase 23.5 carried forward: stop the indicator the moment the
     // first tool row prints — the row itself is the activity surface
     // during a tool. Part 1.6 then resumes via `afterEachTool` so the
     // post-tool gap has its own indicator paint.
-    this.opts.callbacks.setBeforeFirstToolHook?.(stopIndicatorOnce);
+    //
+    // v4.1.5 Issue O — also flip `turnHadTools = true` so the
+    // separator emits before the reply header. Single hook captures
+    // "any tool ran this turn" cleanly (it only fires for the FIRST
+    // tool of the turn — subsequent tools don't re-trigger).
+    this.opts.callbacks.setBeforeFirstToolHook?.(() => {
+      turnHadTools = true;
+      stopIndicatorOnce();
+    });
 
     // Part 1.6: pause/resume hooks around every tool row. The
     // `beforeTool` hook fires before EACH tool row writes (not just
@@ -1209,10 +1309,32 @@ export class ChatSession implements ChatSessionLike {
           ? () => {
               stopIndicatorOnce();
               streamingActive = true;
+              // v4.1.5 Phase 1d (Q-OBV-b) — separator emission MOVED
+              // out of onFirstDelta because that callback fires per
+              // provider-call iteration (firstDeltaFired resets each
+              // callProvider invocation). The separator-emit now
+              // lives in onDelta below, gated by `firstStreamByteSeen`
+              // which only flips once per turn.
             }
           : undefined,
         onDelta: streamingEnabled
           ? (text: string) => {
+              // v4.1.5 Phase 1d (Q-OBV-b) — definitive separator
+              // emission point. This is the FIRST text byte landing
+              // on screen this turn. Fires the muted rule BEFORE
+              // streamPartial writes the `┃ Aiden` header so the
+              // visual order is:
+              //   ┊ tool rows...
+              //   ────────────  ← separator
+              //   ┃ Aiden
+              //   {text}
+              // Idempotent via `firstStreamByteSeen` + the
+              // `separatorEmitted` flag inside emitToolReplySeparator.
+              // No-op when no tool fired (turnHadTools=false).
+              if (!firstStreamByteSeen) {
+                firstStreamByteSeen = true;
+                emitToolReplySeparator();
+              }
               // v4.1.4 Part 1.6: bar lives ABOVE streamed text. Hide
               // it before each delta writes so the stream output
               // doesn't land on the bar's line. The bar repaints on
@@ -1277,6 +1399,11 @@ export class ChatSession implements ChatSessionLike {
       // When streaming was active and emitted the final content already,
       // skip the markdown re-render — we'd otherwise duplicate text.
       if (result.finalContent && !streamingActive) {
+        // v4.1.5 Issue O — non-streaming reply path. Emit the muted
+        // rule between the tool trail and the agent header before
+        // the one-shot reply lands. Idempotent + tool-gated by
+        // `emitToolReplySeparator`.
+        emitToolReplySeparator();
         this.opts.display.write(this.opts.display.agentTurn(result.finalContent));
       }
 
@@ -1296,6 +1423,17 @@ export class ChatSession implements ChatSessionLike {
       // post-turn status footer.
       this.opts.display.write(`  ${this.opts.display.rule()}\n`);
       this.renderStatusLine();
+      // v4.1.5+ Path A — finalize the loop trace. No-op if the env
+      // var is unset OR if the turn didn't trip any threshold. When
+      // it DOES emit, the snapshot path goes to a dim status line so
+      // the user (and any teammate they're sharing the log with)
+      // knows where to grab the diagnostic file.
+      try {
+        const snapPath = await loopTracer.finalize();
+        if (snapPath) {
+          this.opts.display.dim(`[loop-trace] wrote ${snapPath}`);
+        }
+      } catch { /* defensive */ }
     } catch (err) {
       stopIndicatorOnce();
       // v4.1.4 Part 1.6: error path must also hide the progress bar
@@ -1345,6 +1483,15 @@ export class ChatSession implements ChatSessionLike {
       }
       this.setStatusState({ kind: 'ready' });
       this.lastTurnElapsedMs = Date.now() - turnStartedAt;
+      // v4.1.5+ Path A — finalize the loop trace on the error path
+      // too. Loop patterns that ended in an error are exactly the
+      // ones most worth capturing for diagnosis.
+      try {
+        const snapPath = await loopTracer.finalize();
+        if (snapPath) {
+          this.opts.display.dim(`[loop-trace] wrote ${snapPath}`);
+        }
+      } catch { /* defensive */ }
     }
   }
 

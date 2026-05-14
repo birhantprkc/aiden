@@ -140,6 +140,46 @@ describe('ensureSoulMdSeeded', () => {
     expect(content).not.toMatch(/^- Direct\. No fluff\./m);
   });
 
+  it('v4.1.5: silent-upgrades the v4.1.4 default to current', async () => {
+    // v4.1.5 Issue L — identity attribution rewrite ("Built by Shiva
+    // Deore at Taracod" on both top + behavior lines) AND catch-up
+    // append of the v4.1.4 SOUL snapshot to PREVIOUS_BUNDLED_SOULS.
+    // Without the catch-up, v4.1.4 users would NOT silent-upgrade
+    // because their on-disk SOUL had the v4.1.4 Voice rewrite that
+    // didn't match any prior entry.
+    const { PREVIOUS_BUNDLED_SOULS } = await import(
+      '../../cli/v4/defaultSoul'
+    );
+    expect(PREVIOUS_BUNDLED_SOULS.length).toBeGreaterThanOrEqual(5);
+    const root = await makeTempRoot();
+    const paths = resolveAidenPaths({ rootOverride: root });
+    await ensureAidenDirsExist(paths);
+    // Index 4 is the v4.1.4 snapshot (Voice rewrite, Taracod-only
+    // identity, no Shiva attribution yet).
+    await fs.writeFile(paths.soulMd, PREVIOUS_BUNDLED_SOULS[4], 'utf8');
+    const result = await ensureSoulMdSeeded(paths);
+    expect(result.outcome).toBe('upgraded');
+    const content = await fs.readFile(paths.soulMd, 'utf8');
+    expect(content).toBe(DEFAULT_SOUL_MD);
+    // New v4.1.5 identity attribution must be present on BOTH lines.
+    expect(content).toMatch(/built by Shiva Deore at Taracod/);
+    expect(content).toMatch(/identify as Aiden, built by Shiva Deore at Taracod/);
+    // Voice rewrite from v4.1.4 is preserved unchanged.
+    expect(content).toMatch(/Match the user's energy/);
+  });
+
+  it('v4.1.5: bundled default contains "Shiva Deore at Taracod" attribution', () => {
+    // Sentinel against accidental revert. Identity attribution must
+    // include Shiva Deore as the builder (v4.1.5 Issue L).
+    expect(DEFAULT_SOUL_MD).toMatch(/built by Shiva Deore at Taracod/);
+    expect(DEFAULT_SOUL_MD).toMatch(
+      /identify as Aiden, built by Shiva Deore at Taracod/,
+    );
+    // The old "built by Taracod" alone must NOT appear (regression
+    // guard — was the pre-v4.1.5 attribution).
+    expect(DEFAULT_SOUL_MD).not.toMatch(/^You are Aiden — a local-first AI agent built by Taracod\.\s*$/m);
+  });
+
   it('v4.1.4: bundled default lacks the unconditional Voice line', () => {
     // Regression sentinel — if we accidentally re-introduce the hard
     // "Direct. No fluff." Voice line in DEFAULT_SOUL_MD, this fires

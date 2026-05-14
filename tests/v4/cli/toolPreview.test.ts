@@ -162,4 +162,24 @@ describe('buildToolPreview — function extractors (v4.1.4 Phase 3b\')', () => {
     expect(buildToolPreview('file_read', { path: '/tmp/x' }))
       .toBe('/tmp/x');
   });
+
+  // v4.1.5 Phase 1d (Q-Q1-a) — lookup_tool_schema extractor.
+  //
+  // Args shape: `{ toolName: 'X' }`. Without an extractor the
+  // renderer falls back to JSON.stringify and the user saw raw
+  // `{"toolName":"web_search"}` chrome in the trail. With the
+  // extractor entry `lookup_tool_schema: 'toolName'`, the preview
+  // surfaces the target tool name. (Note: most callers see this
+  // tool fully suppressed via TRAIL_HIDE_TOOLS — but the extractor
+  // covers verbose-mode and log-capture paths.)
+  it('lookup_tool_schema extracts toolName field cleanly (v4.1.5 Q-Q1-a)', () => {
+    expect(buildToolPreview('lookup_tool_schema', { toolName: 'web_search' }))
+      .toBe('web_search');
+    expect(buildToolPreview('lookup_tool_schema', { toolName: 'file_read' }))
+      .toBe('file_read');
+  });
+
+  it('lookup_tool_schema with empty args degrades to empty preview', () => {
+    expect(buildToolPreview('lookup_tool_schema', {})).toBe('');
+  });
 });

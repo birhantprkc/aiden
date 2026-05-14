@@ -77,8 +77,22 @@ export interface ProgressBarHandle {
 const BAR_CELLS = 10;
 
 /** Glyphs. Chosen for clean visual weight at the standard mono font. */
-const FILLED = '▰';
-const EMPTY  = '▱';
+// v4.1.5 Phase 1d (Q-P1) — glyph palette switch.
+//
+// Was `▰` (U+25B0 BLACK RECTANGLE) + `▱` (U+25B1 WHITE RECTANGLE),
+// from Unicode's "Geometric Shapes" block. NOT in CP437; Windows
+// legacy console fonts (Lucida Console / Consolas defaults) render
+// them as tofu boxes. User visual smoke confirmed the regression
+// on Windows Terminal + ConPTY combinations.
+//
+// New: `▓` (U+2593 DARK SHADE) + `░` (U+2591 LIGHT SHADE), from
+// Unicode's "Block Elements" block AND CP437 — universally
+// supported on every Windows console going back to DOS. Same shade
+// family the existing `statusFooter` (display.ts:773) has shipped
+// with since v3 without ever being garbled. Cleaner palette
+// coherence across all bar surfaces.
+const FILLED = '▓';
+const EMPTY  = '░';
 
 /**
  * Create a progress-bar handle bound to a writable stream + skin.
@@ -121,18 +135,37 @@ export function createProgressBar(
     return `${gutter}${bar}  ${label}`;
   };
 
+  // v4.1.5 Part 1a — Issue M (Windows ConPTY buffering fix).
+  //
+  // Mirrors the activityIndicator pattern: the bar OWNS one terminal
+  // row. Every paint ends with `\n` so the buffer flushes; the cursor
+  // sits on the row BELOW the bar while it's visible. Erase walks
+  // up + clears the bar's row, leaving the cursor at col 0 of the
+  // now-empty row for the caller's next write. See activityIndicator
+  // for the full rationale (Windows ConPTY buffers no-newline writes
+  // until a `\n` arrives — without this, long-running stream paints
+  // never visually appeared).
+  const ANSI_UP_ERASE = '\x1b[1A\x1b[2K';
+
   const paint = (): void => {
     if (!isTty || hidden) return;
-    // `\r\x1b[K` — carriage return + erase to end of line, then
-    // rewrite. Same single-line overwrite pattern as the activity
-    // indicator and tool-row live tick.
-    out.write(`\r\x1b[K${buildLine()}`);
-    printed = true;
+    if (printed) {
+      // Subsequent paint: walk up to the bar's row, clear it, rewrite,
+      // drop a newline so the cursor lands on the row BELOW the bar.
+      out.write(`${ANSI_UP_ERASE}${buildLine()}\n`);
+    } else {
+      // First paint: just write the bar + `\n`. Cursor moves to the
+      // row below, ready for subsequent walk-up-and-erase ticks.
+      out.write(`${buildLine()}\n`);
+      printed = true;
+    }
     lastPaintTokens = outputTokens;
   };
 
   const erase = (): void => {
-    if (isTty && printed) out.write('\r\x1b[K');
+    // Walk up to the bar's row and clear it. No trailing `\n` — the
+    // caller will write content here and include its own newline.
+    if (isTty && printed) out.write(ANSI_UP_ERASE);
   };
 
   return {

@@ -178,6 +178,35 @@ export interface AidenAgentOptions {
   refreshMemorySnapshot?:  () => Promise<MemorySnapshot>;
   /** Diagnostic hook for the display layer when the prompt gets rebuilt. */
   onMemoryRefresh?:        (files: ReadonlyArray<MemoryFile>) => void;
+  /**
+   * v4.1.5 Issue K — pre-event for the memory-refresh phase. Fires BEFORE
+   * `refreshMemorySnapshot()` reads the dirty files, so the display
+   * layer can paint a `refreshing memory` verb on the activity
+   * indicator during the I/O wait. `onMemoryRefresh` (existing) fires
+   * AFTER the read; this fires BEFORE. Pairs as start/end.
+   */
+  onMemoryRefreshStart?:   () => void;
+  /**
+   * v4.1.5 Issue K — fires after the per-turn system prompt has been
+   * assembled (`ensureSystemPrompt()` completes). Carries cardinality
+   * metadata the display layer can surface in a status row or use
+   * verbatim as an activity verb context (e.g. "preparing prompt:
+   * 42 tools, 74 skills, 12 memory facts").
+   */
+  onPromptBuilt?:          (info: {
+    tools:        number;
+    skills:       number;
+    memoryFacts:  number;
+  }) => void;
+  /**
+   * v4.1.5 Issue K — fires just before the streaming HTTP request to
+   * the provider opens. The display layer transitions the activity
+   * indicator from local-prep verbs ("preparing prompt", "selecting
+   * tools") to a network verb ("calling provider"); the long wait
+   * for TTFT (time to first token, often 5–20s on large models) is
+   * the gap the rest of Issue K's wave bar covers.
+   */
+  onProviderRequestStart?: (providerId: string) => void;
   /** Stage-0 intent pre-arm: look up a skill's `required_tools`. */
   lookupSkillRequiredTools?: (skillName: string) => Promise<string[] | null>;
 }
@@ -264,6 +293,11 @@ export class AidenAgent {
   private readonly onCompression?:              AidenAgentOptions['onCompression'];
   private readonly refreshMemorySnapshot?:      AidenAgentOptions['refreshMemorySnapshot'];
   private readonly onMemoryRefresh?:            AidenAgentOptions['onMemoryRefresh'];
+  // v4.1.5 Issue K — pre/post lifecycle hooks for activity-indicator
+  // verb mutation during the pre-first-token gap.
+  private readonly onMemoryRefreshStart?:       AidenAgentOptions['onMemoryRefreshStart'];
+  private readonly onPromptBuilt?:              AidenAgentOptions['onPromptBuilt'];
+  private readonly onProviderRequestStart?:     AidenAgentOptions['onProviderRequestStart'];
   private readonly lookupSkillRequiredTools?:   AidenAgentOptions['lookupSkillRequiredTools'];
 
   // ── Cross-call state ─────────────────────────────────────────────────
@@ -330,6 +364,10 @@ export class AidenAgent {
     this.onCompression            = opts.onCompression;
     this.refreshMemorySnapshot    = opts.refreshMemorySnapshot;
     this.onMemoryRefresh          = opts.onMemoryRefresh;
+    // v4.1.5 Issue K — phase hooks (all optional, fire defensively).
+    this.onMemoryRefreshStart     = opts.onMemoryRefreshStart;
+    this.onPromptBuilt            = opts.onPromptBuilt;
+    this.onProviderRequestStart   = opts.onProviderRequestStart;
     this.lookupSkillRequiredTools = opts.lookupSkillRequiredTools;
     // Phase v4.1.2-slice3: optional health registry (constructor-
     // injected per the slice3 decision tree — no singleton). When
@@ -655,6 +693,11 @@ export class AidenAgent {
     const needsSnapshot =
       this.memoryDirty.has('memory') || this.memoryDirty.has('user');
     if (needsSnapshot && this.refreshMemorySnapshot) {
+      // v4.1.5 Issue K — fire BEFORE the file I/O so the display layer
+      // can switch the activity verb to "refreshing memory" while the
+      // read is in flight. Defensive try/catch so a misbehaving hook
+      // never blocks the refresh.
+      try { this.onMemoryRefreshStart?.(); } catch { /* defensive */ }
       let snapshot: MemorySnapshot;
       try {
         snapshot = await this.refreshMemorySnapshot();
@@ -677,6 +720,20 @@ export class AidenAgent {
     if (!this.promptBuilder || !this.promptBuilderOptions) return null;
     if (this.cachedSystemPrompt !== null) return this.cachedSystemPrompt;
     this.cachedSystemPrompt = await this.promptBuilder.build(this.promptBuilderOptions);
+    // v4.1.5 Issue K — fire AFTER the prompt has been assembled, with
+    // cardinality so the display layer can surface "preparing prompt:
+    // N tools, M skills" or similar. Only fires when the cache MISSED
+    // (which is what made us actually build); cached returns skip the
+    // hook because nothing was prepared this turn. Defensive try/catch.
+    if (this.onPromptBuilt) {
+      try {
+        this.onPromptBuilt({
+          tools:       this.tools.length,
+          skills:      this.promptBuilderOptions.skillsList?.length ?? 0,
+          memoryFacts: countMemoryFacts(this.promptBuilderOptions.memorySnapshot),
+        });
+      } catch { /* defensive */ }
+    }
     return this.cachedSystemPrompt;
   }
 
@@ -935,6 +992,17 @@ export class AidenAgent {
     runOptions:  RunConversationOptions,
   ): Promise<ProviderCallOutput> {
     const wantStream = runOptions.stream === true && typeof this.provider.callStream === 'function';
+    // v4.1.5 Issue K — fire just before the HTTP request opens, so the
+    // display layer can transition the activity verb from local-prep
+    // ("preparing prompt", "selecting tools") to a network verb
+    // ("calling provider"). The wait for TTFT (time-to-first-token) is
+    // the longest gap in most turns and is what the wave bar covers.
+    // Fires for both streaming and non-streaming paths — caller may use
+    // it to add a one-shot indicator on non-streaming providers too.
+    // Defensive try/catch (a misbehaving hook must not block dispatch).
+    try {
+      this.onProviderRequestStart?.(this.providerId);
+    } catch { /* defensive */ }
     if (!wantStream) {
       return this.provider.call({ messages, tools });
     }
@@ -974,6 +1042,28 @@ export class AidenAgent {
 }
 
 // ── Free helpers ────────────────────────────────────────────────────────
+
+/**
+ * v4.1.5 Issue K — best-effort count of "memory facts" from a
+ * MemorySnapshot. Counts markdown bullet-list lines (`- `) in both
+ * MEMORY.md and USER.md. This is a fuzzy proxy — the agent stores
+ * facts as bullets by convention but free-form prose can also carry
+ * fact-like content. Surfaced verbatim to the display layer; treat as
+ * "approximately N items in the persistent memory file" rather than
+ * a precise inventory.
+ */
+function countMemoryFacts(snapshot: unknown): number {
+  if (!snapshot || typeof snapshot !== 'object') return 0;
+  const s = snapshot as { memoryMd?: string; userMd?: string };
+  let count = 0;
+  for (const md of [s.memoryMd, s.userMd]) {
+    if (typeof md !== 'string' || md.length === 0) continue;
+    for (const line of md.split('\n')) {
+      if (line.trim().startsWith('- ')) count += 1;
+    }
+  }
+  return count;
+}
 
 function lastUserMessageContent(history: Message[]): string {
   for (let i = history.length - 1; i >= 0; i--) {

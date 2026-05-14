@@ -1425,7 +1425,13 @@ export const TOOLS: Record<string, (payload: any, ctx?: ToolContext) => Promise<
     }
 
     const combined = results.join('\n\n')
-    console.log(`[deep_research] Complete: ${combined.length} chars across ${results.length} passes`)
+    // v4.1.5 Issue O — gated behind AIDEN_DEBUG_WEB to match the
+    // webSearch.ts debug-helper convention. Default off; power users
+    // export the env var to see the research chain.
+    if (process.env.AIDEN_DEBUG_WEB === '1') {
+      // eslint-disable-next-line no-console
+      console.log(`[deep_research] Complete: ${combined.length} chars across ${results.length} passes`)
+    }
     return { success: true, output: combined.slice(0, 15000) }
   },
 

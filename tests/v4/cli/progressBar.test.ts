@@ -8,7 +8,7 @@
  * tests/v4/cli/progressBar.test.ts — Phase v4.1.4 Part 1.6.
  *
  * Coverage for the per-turn token progress bar:
- *   - Renders `▰▰▰▱▱▱▱▱▱▱  412/4096 tokens` style line
+ *   - Renders `▓▓▓░░░░░░░  412/4096 tokens` style line
  *   - Ratio math: 0%, 50%, 100% all snap to expected cell counts
  *   - Dedup: identical updates don't repaint
  *   - hide() erases the line + freezes further updates
@@ -46,7 +46,7 @@ describe('createProgressBar (v4.1.4 Part 1.6)', () => {
     bar.update(200, 1000);
     const full = stripAnsi(chunks.join(''));
     // 200/1000 = 20% → 2 filled cells, 8 empty cells
-    expect(full).toContain('▰▰▱▱▱▱▱▱▱▱');
+    expect(full).toContain('▓▓░░░░░░░░');
     // formatCompactTokens converts 1000 → "1K" (compact notation).
     expect(full).toContain('200/1K tokens');
   });
@@ -57,7 +57,7 @@ describe('createProgressBar (v4.1.4 Part 1.6)', () => {
     const bar = createProgressBar(out, skin);
     bar.update(2048, 4096);
     const full = stripAnsi(chunks.join(''));
-    expect(full).toContain('▰▰▰▰▰▱▱▱▱▱');
+    expect(full).toContain('▓▓▓▓▓░░░░░');
   });
 
   it('TTY: 100% fill renders all filled, none empty', () => {
@@ -66,8 +66,8 @@ describe('createProgressBar (v4.1.4 Part 1.6)', () => {
     const bar = createProgressBar(out, skin);
     bar.update(4096, 4096);
     const full = stripAnsi(chunks.join(''));
-    expect(full).toContain('▰▰▰▰▰▰▰▰▰▰');
-    expect(full).not.toContain('▱');
+    expect(full).toContain('▓▓▓▓▓▓▓▓▓▓');
+    expect(full).not.toContain('░');
   });
 
   it('TTY: 0 tokens with maxTokens renders all-empty', () => {
@@ -76,7 +76,7 @@ describe('createProgressBar (v4.1.4 Part 1.6)', () => {
     const bar = createProgressBar(out, skin);
     bar.update(0, 4096);
     const full = stripAnsi(chunks.join(''));
-    expect(full).toContain('▱▱▱▱▱▱▱▱▱▱');
+    expect(full).toContain('░░░░░░░░░░');
     // 4096 → "4.1K" via formatCompactTokens.
     expect(full).toContain('0/4.1K tokens');
   });
@@ -87,8 +87,8 @@ describe('createProgressBar (v4.1.4 Part 1.6)', () => {
     const bar = createProgressBar(out, skin);
     bar.update(5000, 4096); // overshoot
     const full = stripAnsi(chunks.join(''));
-    expect(full).toContain('▰▰▰▰▰▰▰▰▰▰');
-    expect(full).not.toContain('▱');
+    expect(full).toContain('▓▓▓▓▓▓▓▓▓▓');
+    expect(full).not.toContain('░');
   });
 
   it('TTY: no maxTokens → "N tokens" without denominator', () => {
@@ -100,7 +100,7 @@ describe('createProgressBar (v4.1.4 Part 1.6)', () => {
     expect(full).toContain('412 tokens');
     expect(full).not.toContain('/');
     // Without denom, the bar shows all-empty (no fill ratio to compute).
-    expect(full).toContain('▱▱▱▱▱▱▱▱▱▱');
+    expect(full).toContain('░░░░░░░░░░');
   });
 
   it('TTY: dedup — repeating the same count doesn\'t repaint', () => {
@@ -134,20 +134,45 @@ describe('createProgressBar (v4.1.4 Part 1.6)', () => {
     expect(chunks.length).toBe(0);
   });
 
-  it('hide() erases the line and freezes further updates', () => {
+  it('hide() walks up + erases the bar row (v4.1.5 Issue M)', () => {
     const { out, chunks } = makeStream(true);
     const skin = new SkinEngine({ forceMono: true });
     const bar = createProgressBar(out, skin);
     bar.update(100, 1000);
     chunks.length = 0;
     bar.hide();
-    // Eraser emitted.
-    expect(chunks.join('')).toContain('\r\x1b[K');
+    // v4.1.5 Part 1a Issue M: bar owns a row, cursor parked below.
+    // hide() walks up + erases that row. ANSI: \x1b[1A\x1b[2K.
+    expect(chunks.join('')).toContain('\x1b[1A\x1b[2K');
     expect(bar.isHidden()).toBe(true);
     // Further updates ignored.
     chunks.length = 0;
     bar.update(500, 1000);
     expect(chunks.length).toBe(0);
+  });
+
+  it('first paint ends with newline (v4.1.5 Issue M flush gate)', () => {
+    const { out, chunks } = makeStream(true);
+    const skin = new SkinEngine({ forceMono: true });
+    const bar = createProgressBar(out, skin);
+    bar.update(100, 1000);
+    // First paint must end with `\n` so Windows ConPTY flushes the
+    // buffered bar to the terminal.
+    expect(chunks.join('').endsWith('\n')).toBe(true);
+    bar.hide();
+  });
+
+  it('subsequent update repaints with walk-up + erase + newline (v4.1.5 Issue M)', () => {
+    const { out, chunks } = makeStream(true);
+    const skin = new SkinEngine({ forceMono: true });
+    const bar = createProgressBar(out, skin);
+    bar.update(100, 1000);
+    chunks.length = 0;
+    bar.update(200, 1000);
+    const second = chunks.join('');
+    expect(second).toContain('\x1b[1A\x1b[2K');
+    expect(second.endsWith('\n')).toBe(true);
+    bar.hide();
   });
 
   it('rejects malformed inputs gracefully (NaN, negative, non-finite)', () => {

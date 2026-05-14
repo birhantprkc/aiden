@@ -204,14 +204,17 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     nowSpy.mockRestore();
   });
 
-  it('pause() emits ANSI line-erase', () => {
+  it('pause() emits ANSI walk-up + line-erase (v4.1.5 Issue M)', () => {
     const { d, chunks } = makeDisplay({ tty: true });
     const handle = d.activityIndicator('thinking');
     chunks.length = 0; // reset
     handle.pause();
     const after = chunks.join('');
-    // \r\x1b[K = carriage return + erase to end of line
-    expect(after).toContain('\r\x1b[K');
+    // v4.1.5 Part 1a Issue M: the indicator now OWNS one terminal row
+    // with cursor parked on the row below. Pause walks up + erases
+    // (no trailing newline — caller will write on this row next).
+    // ANSI: \x1b[1A (up 1) + \x1b[2K (clear current line).
+    expect(after).toContain('\x1b[1A\x1b[2K');
     handle.stop();
   });
 
@@ -239,12 +242,121 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     handle.stop();
   });
 
-  it('stop() erases the indicator line', () => {
+  it('stop() walks up + erases the indicator row (v4.1.5 Issue M)', () => {
     const { d, chunks } = makeDisplay({ tty: true });
     const handle = d.activityIndicator('thinking');
     chunks.length = 0;
     handle.stop();
-    expect(chunks.join('')).toContain('\r\x1b[K');
+    expect(chunks.join('')).toContain('\x1b[1A\x1b[2K');
+  });
+
+  it('initial paint ends with newline (v4.1.5 Issue M flush gate)', () => {
+    const { d, chunks } = makeDisplay({ tty: true });
+    const handle = d.activityIndicator('thinking');
+    const initial = chunks.join('');
+    // First write must end with `\n` so Windows ConPTY flushes the
+    // buffered indicator to the terminal. The whole Issue M fix
+    // hinges on this trailing newline.
+    expect(initial.endsWith('\n')).toBe(true);
+    handle.stop();
+  });
+
+  it('tick writes walk up + erase + repaint + newline (v4.1.5 Issue M)', () => {
+    const { d, chunks } = makeDisplay({ tty: true });
+    const handle = d.activityIndicator('thinking');
+    chunks.length = 0;
+    // Advance one tick (250ms cadence).
+    vi.advanceTimersByTime(250);
+    const tickWrite = chunks.join('');
+    // Tick must include the walk-up + erase sequence (otherwise it
+    // would paint a second indicator below the first instead of
+    // overwriting). And it must end with `\n` for buffer flush.
+    expect(tickWrite).toContain('\x1b[1A\x1b[2K');
+    expect(tickWrite.endsWith('\n')).toBe(true);
+    handle.stop();
+  });
+
+  // ── v4.1.5 Issue K — wave-bar coverage ─────────────────────────────────
+  //
+  // The wave bar is a 10-cell `▰▱` snake-scroll that paints below
+  // the verb row. 3-cell `▰` block slides right by 1 cell per tick,
+  // wraps at the right edge. Same 250ms cadence as the verb dot pulse
+  // (single shared timer).
+
+  it('wave-bar default ON: initial paint emits 2 rows with CP437-safe glyphs (v4.1.5 Q-P1)', () => {
+    const { d, chunks } = makeDisplay({ tty: true });
+    const handle = d.activityIndicator('thinking');
+    const initial = stripAnsi(chunks.join(''));
+    // Both rows present.
+    expect(initial).toContain('thinking');
+    // v4.1.5 Phase 1d Q-P1: wave bar uses `▓` (U+2593 DARK SHADE)
+    // and `░` (U+2591 LIGHT SHADE) — CP437-safe glyphs. Was `▰`/`▱`
+    // (U+25B0/B1) which legacy Windows console fonts garble.
+    // At frame 0 leading 3-cell block sits at positions 0..2.
+    expect(initial).toContain('▓▓▓░░░░░░░');
+    // Regression sentinel: the old garbled glyphs must NOT appear.
+    expect(initial).not.toContain('▰');
+    expect(initial).not.toContain('▱');
+    handle.stop();
+  });
+
+  it('wave-bar: 3-cell ▓ block slides across 10 cells (Q-P1 glyphs)', () => {
+    const { d, chunks } = makeDisplay({ tty: true });
+    const handle = d.activityIndicator('thinking');
+    chunks.length = 0;
+    vi.advanceTimersByTime(500); // 2 ticks at 250ms
+    const tick2 = stripAnsi(chunks.join(''));
+    // waveFrame=2 → block at cells 2,3,4 with the new glyph palette.
+    expect(tick2).toMatch(/░░▓▓▓░░░░░/);
+    handle.stop();
+  });
+
+  it('wave-bar: wraps at right edge (frame 8 → block straddles), CP437 glyphs', () => {
+    const { d, chunks } = makeDisplay({ tty: true });
+    const handle = d.activityIndicator('thinking');
+    chunks.length = 0;
+    vi.advanceTimersByTime(250 * 8); // waveFrame=8
+    const tick8 = stripAnsi(chunks.join(''));
+    // Block straddles the wrap: cell 0 filled, cells 8,9 filled.
+    expect(tick8).toMatch(/▓░░░░░░░▓▓/);
+    handle.stop();
+  });
+
+  it('wave-bar opt-out: { waveBar: false } produces single-row paint', () => {
+    const { d, chunks } = makeDisplay({ tty: true });
+    const handle = d.activityIndicator('thinking', { waveBar: false });
+    const initial = stripAnsi(chunks.join(''));
+    expect(initial).toContain('thinking');
+    // Wave bar glyphs must NOT appear (neither old nor new).
+    expect(initial).not.toContain('▓');
+    expect(initial).not.toContain('░');
+    expect(initial).not.toContain('▰');
+    expect(initial).not.toContain('▱');
+    handle.stop();
+  });
+
+  it('wave-bar erase walks up TWO rows (verb + bar)', () => {
+    const { d, chunks } = makeDisplay({ tty: true });
+    const handle = d.activityIndicator('thinking'); // wave-bar default on
+    chunks.length = 0;
+    handle.stop();
+    const after = chunks.join('');
+    // Two `\x1b[1A\x1b[2K` sequences chained for the 2-row erase.
+    const occurrences = (after.match(/\x1b\[1A\x1b\[2K/g) ?? []).length;
+    expect(occurrences).toBe(2);
+  });
+
+  it('wave-bar setVerb mutates verb row, bar continues animating', () => {
+    const { d, chunks } = makeDisplay({ tty: true });
+    const handle = d.activityIndicator('thinking');
+    chunks.length = 0;
+    handle.setVerb('refreshing memory');
+    vi.advanceTimersByTime(250);
+    const full = stripAnsi(chunks.join(''));
+    expect(full).toContain('refreshing memory');
+    // Wave bar still present in the same tick output (CP437 glyphs).
+    expect(full).toMatch(/▓{1,3}/);
+    handle.stop();
   });
 
   it('initial paint includes brand-paint ▲ glyph (skin-aware)', () => {

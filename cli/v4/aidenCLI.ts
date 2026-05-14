@@ -1212,6 +1212,25 @@ export async function buildAgentRuntime(
         // diagnostics must not break the loop
       }
     },
+    // v4.1.5 Issue K — phase lifecycle hooks for the activity indicator
+    // verb mutation. Each fires at a specific point in runConversation:
+    //   - onMemoryRefreshStart: before memory I/O begins
+    //   - onPromptBuilt: after system prompt assembly
+    //   - onProviderRequestStart: just before the HTTP request opens
+    // chatSession registers handlers that call `indicator.setVerb()` so
+    // the user sees the model's actual workflow phase during the gap.
+    // All three are forwarded through `callbacks` so chatSession owns
+    // the indicator handle (created per-turn). Defensive try/catch on
+    // each — a misbehaving display sink never blocks the agent loop.
+    onMemoryRefreshStart: () => {
+      try { callbacks.onMemoryRefreshStart?.(); } catch { /* defensive */ }
+    },
+    onPromptBuilt: (info) => {
+      try { callbacks.onPromptBuilt?.(info); } catch { /* defensive */ }
+    },
+    onProviderRequestStart: (id) => {
+      try { callbacks.onProviderRequestStart?.(id); } catch { /* defensive */ }
+    },
     // Phase 23.4b — feed the agent's Stage-0 intent pre-arm with the
     // skill's `required_tools` from its SKILL.md frontmatter.  Returns
     // null when the skill is unknown / unloaded / empty so the agent

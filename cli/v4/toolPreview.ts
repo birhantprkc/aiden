@@ -87,6 +87,16 @@ export const TOOL_PRIMARY_ARG: Record<string, ToolPreviewExtractor> = {
   skill_view:        'name',
   skill_manage:      'action',
   skills_list:       '',
+  // v4.1.5 Phase 1d (Q-Q1-a) — registry introspection tool. Args
+  // shape: `{ toolName: 'web_search' }`. The agent uses this to
+  // discover unfamiliar tool schemas during planning. Surface the
+  // target tool name so the trail row (when not suppressed via
+  // TRAIL_HIDE_TOOLS) reads as the introspected tool, not raw JSON.
+  // Note: most callers see this tool suppressed entirely from the
+  // visible trail via the TRAIL_HIDE_TOOLS set in display.ts; the
+  // extractor exists for code paths that DON'T suppress (verbose
+  // mode, log-file capture).
+  lookup_tool_schema: 'toolName',
 
   // ── sessions ─────────────────────────────────────────────────────────
   session_search:    'query',

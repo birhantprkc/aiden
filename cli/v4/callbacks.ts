@@ -112,6 +112,25 @@ export class CliCallbacks {
   private beforeToolHook?:    () => void;
   private afterEachToolHook?: (toolName: string) => void;
 
+  // v4.1.5 Issue K — phase-verb hook. AidenCLI's `onMemoryRefreshStart`,
+  // `onPromptBuilt`, `onProviderRequestStart` agent-option callbacks
+  // route to `firePhaseVerb(verb)` here; chatSession registers a fn
+  // that calls `indicator.setVerb(verb)` on the per-turn indicator.
+  // Single setter (one fn) rather than three because the indicator
+  // only cares about the current phase verb — older phases are no
+  // longer meaningful once a newer one fires.
+  private phaseVerbHook?: (verb: string) => void;
+
+  // v4.1.5+ Path A — tool-trace hooks for the loop-trace logger.
+  // Fire alongside the existing tool-row + indicator-pause machinery
+  // but capture the full call id + args (the indicator hooks only see
+  // the tool name). Hidden tools (TRAIL_HIDE_TOOLS) DO fire through
+  // here — the trace must see them even when the visible trail
+  // doesn't, since `lookup_tool_schema` is exactly the kind of tool
+  // that participates in loop patterns.
+  private toolTraceBeforeHook?: (id: string, name: string) => void;
+  private toolTraceAfterHook?:  (id: string, name: string, args: unknown) => void;
+
   constructor(opts: CliCallbacksOptions) {
     this.display = opts.display;
     this.auxiliaryClient = opts.auxiliaryClient;
@@ -157,6 +176,52 @@ export class CliCallbacks {
   }
 
   /**
+   * v4.1.5 Issue K — set/clear the phase-verb sink. chatSession
+   * registers a closure that captures the per-turn indicator handle
+   * and forwards calls to `indicator.setVerb(verb)`. Cleared between
+   * turns by passing `undefined`. Optional — non-indicator callers
+   * (test harnesses with stub displays) get no-op behaviour.
+   */
+  setPhaseVerbHook(fn?: (verb: string) => void): void {
+    this.phaseVerbHook = fn;
+  }
+
+  /**
+   * v4.1.5+ Path A — register a per-turn tool-trace sink for the
+   * loop-trace logger. `before` fires with the call's id+name BEFORE
+   * the row writes; `after` fires post-execution with the same id +
+   * the call's args (for skill-name extraction in trace context).
+   * Cleared between turns by passing `undefined`.
+   *
+   * Separate from `setActivityIndicatorHooks` because the activity
+   * hook is name-only and fires for visible-trail purposes; this
+   * one captures FULL call data including hidden tools (which the
+   * trail suppresses via TRAIL_HIDE_TOOLS but the trace must see).
+   */
+  setToolTraceHook(opts: {
+    before?: (id: string, name: string) => void;
+    after?:  (id: string, name: string, args: unknown) => void;
+  }): void {
+    this.toolTraceBeforeHook = opts.before;
+    this.toolTraceAfterHook  = opts.after;
+  }
+
+  // v4.1.5 Issue K — `firePhaseVerb` is the public entry point for the
+  // AidenCLI bridge. AidenAgent fires `onMemoryRefreshStart` etc.,
+  // aidenCLI's adapter calls into one of these `onPhase…` shims, each
+  // mapping a lifecycle event to a verb string. Defensive try/catch so
+  // a misbehaving display sink can't unwind the agent loop.
+  onMemoryRefreshStart = (): void => {
+    try { this.phaseVerbHook?.('refreshing memory'); } catch { /* defensive */ }
+  };
+  onPromptBuilt = (_info: { tools: number; skills: number; memoryFacts: number }): void => {
+    try { this.phaseVerbHook?.('preparing prompt'); } catch { /* defensive */ }
+  };
+  onProviderRequestStart = (_providerId: string): void => {
+    try { this.phaseVerbHook?.('calling provider'); } catch { /* defensive */ }
+  };
+
+  /**
    * Phase 23.5 — bound to AidenAgent.onToolCall. Emits one event row
    * per tool call: prints `[running]` on `before`, mutates the bracket
    * to `[ok N ms]` / `[fail N ms]` / `[blocked]` on `after`. Recognises
@@ -184,6 +249,11 @@ export class CliCallbacks {
       // the first. Defensive try/catch — a misbehaving hook must not
       // block tool dispatch.
       try { this.beforeToolHook?.(); } catch { /* defensive */ }
+      // v4.1.5+ Path A — fire the loop-trace sink BEFORE row writes.
+      // Captures every tool's call.id + name (including hidden ones
+      // suppressed from the visible trail) so the trace covers the
+      // full agent loop, not just user-visible work.
+      try { this.toolTraceBeforeHook?.(call.id, call.name); } catch { /* defensive */ }
       const handle = this.display.toolRow(call.name, call.arguments);
       this.toolRows.set(call.id, handle);
       this.toolStartTimes.set(call.id, Date.now());
@@ -199,12 +269,23 @@ export class CliCallbacks {
       // be re-armed so the next gap shows activity. Tool-name-aware
       // verb selection happens in the hook itself.
       try { this.afterEachToolHook?.(call.name); } catch { /* defensive */ }
+      // v4.1.5+ Path A — loop-trace sink fires even when handle was
+      // lost (rare; happens if before/after pairing slipped) so the
+      // trace never under-counts tool calls.
+      try {
+        this.toolTraceAfterHook?.(call.id, call.name, call.arguments);
+      } catch { /* defensive */ }
       return;
     }
     const ms = Date.now() - startedAt;
     const err = result?.error;
     if (typeof err === 'string' && err.includes('URL provenance gate')) {
       handle.blocked();
+      // v4.1.5+ Path A — blocked path still needs the trace sink so
+      // the URL-provenance failure mode shows up in loop diagnostics.
+      try {
+        this.toolTraceAfterHook?.(call.id, call.name, call.arguments);
+      } catch { /* defensive */ }
       return;
     }
     // v4.1.4 reply-quality polish — Part 1.6. Helper used by ALL
@@ -214,6 +295,13 @@ export class CliCallbacks {
     // wires it through `verbForActivity`).
     const fireAfter = (): void => {
       try { this.afterEachToolHook?.(call.name); } catch { /* defensive */ }
+      // v4.1.5+ Path A — also fire the loop-trace `after` sink so the
+      // tracer can compute duration + capture args (hidden-from-trail
+      // tools still flow through here, by design — the trace must see
+      // them to detect lookup_tool_schema / skill_view loops).
+      try {
+        this.toolTraceAfterHook?.(call.id, call.name, call.arguments);
+      } catch { /* defensive */ }
     };
 
     if (typeof err === 'string' && err.includes('URL provenance gate')) {
