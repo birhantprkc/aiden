@@ -385,6 +385,68 @@ describe('CliCallbacks Phase 23.5 onToolCall', () => {
     expect(text).toContain('partial distillation data');
   });
 
+  it('renders capability card after fail row when result.capabilityCard is present (v4.1.3-essentials)', () => {
+    const { display, output } = makeDisplay();
+    const cb = new CliCallbacks({ display });
+    cb.onToolCall(
+      { id: 'c5', name: 'media_transport', arguments: { action: 'pause' } },
+      'before',
+    );
+    cb.onToolCall(
+      { id: 'c5', name: 'media_transport', arguments: { action: 'pause' } },
+      'after',
+      {
+        id: 'c5',
+        name: 'media_transport',
+        result: null,
+        error: "Tool 'media_transport' is Windows-only.",
+        requires: ['Windows'],
+        capabilityCard: {
+          title: 'media_transport requires Windows',
+          canStill: ['Use shell_exec with playerctl'],
+          cannotReliably: ['Native GSMTC control'],
+          fix: 'Run Aiden on Windows.',
+        },
+      },
+    );
+    const text = output();
+    // Fail row is still emitted (timeline anchor).
+    expect(text).toMatch(/fail \d+ms/);
+    // Card body shows.
+    expect(text).toContain('media_transport requires Windows');
+    expect(text).toContain('Can still:');
+    expect(text).toContain('playerctl');
+    expect(text).toContain('Cannot reliably:');
+    expect(text).toContain('GSMTC');
+    expect(text).toContain('Fix:');
+    expect(text).toContain('Run Aiden on Windows');
+  });
+
+  it('does NOT render a capability card when result.error is present but capabilityCard is not', () => {
+    const { display, output } = makeDisplay();
+    const cb = new CliCallbacks({ display });
+    cb.onToolCall(
+      { id: 'c6', name: 'shell_exec', arguments: { command: 'foo' } },
+      'before',
+    );
+    cb.onToolCall(
+      { id: 'c6', name: 'shell_exec', arguments: { command: 'foo' } },
+      'after',
+      {
+        id: 'c6',
+        name: 'shell_exec',
+        result: null,
+        error: 'command not found',
+        // No capabilityCard — bare error.
+      },
+    );
+    const text = output();
+    expect(text).toMatch(/fail \d+ms/);
+    // The card sections must NOT leak into the output.
+    expect(text).not.toContain('Can still:');
+    expect(text).not.toContain('Cannot reliably:');
+  });
+
   it('fires beforeFirstToolHook exactly once per turn', () => {
     const { display } = makeDisplay();
     const cb = new CliCallbacks({ display });

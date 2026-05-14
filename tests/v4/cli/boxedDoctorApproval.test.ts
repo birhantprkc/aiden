@@ -23,19 +23,24 @@ function makeDisplay(opts: { mono: boolean }): Display {
   });
 }
 
+// v4.1.3-essentials doctor-polish: every CheckResult now carries a
+// `group` field that the renderer buckets by. Fixtures updated to
+// match the production shape — fixtures without `group` would render
+// as empty (groupResults drops them).
 const SAMPLE_REPORT: DoctorReport = {
   results: [
-    { name: 'config file', passed: true, message: '/home/x/.aiden/config.yaml', durationMs: 1 },
-    { name: 'provider auth', passed: true, message: '1 provider key (TOGETHER_API_KEY)', durationMs: 1 },
+    { name: 'config file',   group: 'Storage',   passed: true,  message: '/home/x/.aiden/config.yaml', durationMs: 1 },
+    { name: 'provider auth', group: 'Providers', passed: true,  message: '1 provider key (TOGETHER_API_KEY)', durationMs: 1 },
     {
       name: 'ollama',
+      group: 'Inference',
       passed: false,
       message: 'not reachable',
       suggestion: 'install from https://ollama.com',
       durationMs: 5,
     },
-    { name: 'python', passed: true, message: '3.11.9', durationMs: 30 },
-    { name: 'docker', passed: true, message: '29.2.1', durationMs: 28 },
+    { name: 'python', group: 'System tools', passed: true, message: '3.11.9', durationMs: 30 },
+    { name: 'docker', group: 'System tools', passed: true, message: '29.2.1', durationMs: 28 },
   ],
   passed: false,
   totalMs: 468,
@@ -70,10 +75,15 @@ describe('renderHealthBox (Phase 22 Task 5A)', () => {
     expect(out).toMatch(/hint: install from https:\/\/ollama\.com/);
   });
 
-  it('footer summary shows passedCount of total + duration', () => {
+  it('top summary shows passing/warning/failing counts + total + duration', () => {
+    // v4.1.3-essentials doctor-polish: bottom `N of M checks passed in
+    // Xms` replaced by a TOP summary with three buckets — passing
+    // (clean ok), warning (passed-with-suggestion), failing (not
+    // passed). SAMPLE_REPORT: 4 passing, 0 warning, 1 failing.
     const display = makeDisplay({ mono: true });
     const out = stripAnsi(renderHealthBox(SAMPLE_REPORT, display));
-    expect(out).toMatch(/4 of 5 checks passed in 468 ms/);
+    expect(out).toMatch(/Overall:.*4 passing.*0 warning.*1 failing/);
+    expect(out).toMatch(/5 checks, 468 ms/);
   });
 
   it('coloured output uses the brand orange #FF6B35 for box borders', () => {
@@ -92,12 +102,14 @@ describe('renderHealthBox (Phase 22 Task 5A)', () => {
       results: [
         {
           name: 'config file',
+          group: 'Storage',
           passed: true,
           message: 'found at C:\\Users\\shiva\\AppData\\Local\\aiden\\config.yaml',
           durationMs: 1,
         },
         {
           name: 'bundled manifest',
+          group: 'Storage',
           passed: true,
           message: 'present at C:\\Users\\shiva\\AppData\\Local\\aiden\\.bundled_manifest',
           durationMs: 1,
@@ -119,7 +131,7 @@ describe('renderHealthBox (Phase 22 Task 5A)', () => {
 
   it('floors at the 60-char minimum even with trivially short rows', () => {
     const tinyReport: DoctorReport = {
-      results: [{ name: 'x', passed: true, message: 'ok', durationMs: 1 }],
+      results: [{ name: 'x', group: 'Storage', passed: true, message: 'ok', durationMs: 1 }],
       passed: true,
       totalMs: 1,
     };
@@ -134,6 +146,7 @@ describe('renderHealthBox (Phase 22 Task 5A)', () => {
       results: [
         {
           name: 'oversized',
+          group: 'Storage',
           passed: true,
           message: 'x'.repeat(500),
           durationMs: 1,

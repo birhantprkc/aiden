@@ -1,9 +1,13 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Writable } from 'node:stream';
-import { Display } from '../../../cli/v4/display';
+import {
+  Display,
+  countNewlines,
+  splitAtUnclosedBold,
+} from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
 
 // Strip ANSI escape sequences so assertions stay terminal-agnostic.
@@ -295,6 +299,385 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     expect(stripAnsi(second).replace(/\r/g, '')).toBe('');
   });
 
+  // ── v4.1.3-essentials: live tool indicator ──────────────────────────
+  //
+  // Long-running tools (web_fetch on slow URLs, app_launch with Spotify
+  // cold-boot ~21s, GSMTC roundtrips) used to leave the user staring at
+  // a frozen running row. The live indicator updates the row every 1s
+  // with the elapsed time so the user has continuous feedback.
+  //
+  // Tests use vitest fake timers to advance wall-clock past the 1s tick
+  // without burning real seconds. `Date.now()` and `setInterval` both
+  // honor `vi.useFakeTimers()` — the row renderer reads `Date.now()` for
+  // the elapsed calculation so advancing fake time gets the suffix.
+
+  it('TTY live indicator: sub-second ok shows no running suffix', () => {
+    vi.useFakeTimers();
+    try {
+      const { d, chunks } = captureDisplay({ tty: true });
+      const row = d.toolRow('web_search', { query: 'fast call' });
+      // Initial running row prints without the elapsed suffix.
+      const first = stripAnsi(chunks.join(''));
+      expect(first).not.toMatch(/running \d+/);
+      // Tool completes before the 1s tick fires.
+      vi.advanceTimersByTime(400);
+      row.ok(400);
+      // No "running …" suffix ever appeared.
+      const total = stripAnsi(chunks.join(''));
+      expect(total).not.toMatch(/running \d+/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('TTY live indicator: row updates with elapsed at 1s, 2s, 3s', () => {
+    vi.useFakeTimers();
+    try {
+      const { d, chunks } = captureDisplay({ tty: true });
+      d.toolRow('app_launch', { app: 'spotify' });
+      chunks.length = 0;
+
+      // Advance to the 1s tick — interval fires, eraseLast + rewrite.
+      vi.advanceTimersByTime(1000);
+      let flat = stripAnsi(chunks.join(''));
+      expect(flat).toMatch(/running 1\.0s…|running 1000ms…/);
+
+      // 2s tick.
+      chunks.length = 0;
+      vi.advanceTimersByTime(1000);
+      flat = stripAnsi(chunks.join(''));
+      expect(flat).toMatch(/running 2\.0s…|running 2000ms…/);
+
+      // 3s tick.
+      chunks.length = 0;
+      vi.advanceTimersByTime(1000);
+      flat = stripAnsi(chunks.join(''));
+      expect(flat).toMatch(/running 3\.0s…|running 3000ms…/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('TTY live indicator: ok() stops the tick (no leaked timer)', () => {
+    vi.useFakeTimers();
+    try {
+      const { d, chunks } = captureDisplay({ tty: true });
+      const row = d.toolRow('web_search', { query: 'q' });
+      vi.advanceTimersByTime(1500);  // one tick fired
+      chunks.length = 0;
+      row.ok(1500);                   // SUCCESS path — silent + stop tick
+      // Advance another 5 seconds; no further writes should land.
+      vi.advanceTimersByTime(5000);
+      // Only the erase escape from ok() is allowed; no further "running"
+      // suffix writes from a leaked interval.
+      const post = stripAnsi(chunks.join(''));
+      expect(post).not.toMatch(/running \d+/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('TTY live indicator: fail() stops the tick and shows final row', () => {
+    vi.useFakeTimers();
+    try {
+      const { d, chunks } = captureDisplay({ tty: true });
+      const row = d.toolRow('web_search', { query: 'q' });
+      vi.advanceTimersByTime(2500);
+      chunks.length = 0;
+      row.fail(2500);
+      // Final row carries the fail suffix, not "running …".
+      const post = stripAnsi(chunks.join(''));
+      expect(post).toMatch(/fail/);
+      // Advance — no further writes.
+      chunks.length = 0;
+      vi.advanceTimersByTime(5000);
+      expect(stripAnsi(chunks.join(''))).toBe('');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('TTY live indicator: degraded() stops the tick and shows partial row', () => {
+    vi.useFakeTimers();
+    try {
+      const { d, chunks } = captureDisplay({ tty: true });
+      const row = d.toolRow('media_transport', { target: 'spotify' });
+      vi.advanceTimersByTime(1200);
+      chunks.length = 0;
+      row.degraded(1200, 'launched; PID unknown');
+      const post = stripAnsi(chunks.join(''));
+      expect(post).toMatch(/partial/);
+      // Tick should be cleared — no leaked writes.
+      chunks.length = 0;
+      vi.advanceTimersByTime(3000);
+      expect(stripAnsi(chunks.join(''))).toBe('');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('TTY live indicator: retry() stops the tick (retry counter holds static)', () => {
+    vi.useFakeTimers();
+    try {
+      const { d, chunks } = captureDisplay({ tty: true });
+      const row = d.toolRow('web_search', { query: 'q' });
+      vi.advanceTimersByTime(1100);
+      chunks.length = 0;
+      row.retry(1, 3);
+      const post = stripAnsi(chunks.join(''));
+      // Retry counter present.
+      expect(post).toMatch(/retry 1\/3/);
+      // Tick MUST be stopped — racing tick would overwrite the retry
+      // counter with `running Ns…` on the next 1s. v4.1.3-essentials
+      // contract: retry is a state announcement; the counter should
+      // hold until the next state change (next retry / final outcome).
+      chunks.length = 0;
+      vi.advanceTimersByTime(3000);
+      expect(stripAnsi(chunks.join(''))).toBe('');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('non-TTY: no live indicator scheduled (no "running …" ever appears)', () => {
+    vi.useFakeTimers();
+    try {
+      const { d, chunks } = captureDisplay({ tty: false });
+      d.toolRow('web_search', { query: 'q' });
+      // Non-TTY paths don't print the running row; advancing time
+      // must not surface any "running …" suffix from a tick interval
+      // that should never have been scheduled.
+      vi.advanceTimersByTime(5000);
+      const flat = stripAnsi(chunks.join(''));
+      expect(flat).not.toMatch(/running \d+/);
+      expect(flat).toBe('');  // truly silent until completion
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // ── v4.1.3-essentials: per-chunk commit-and-rerender (replaces the
+  //    Option A streamInterrupted-skip pattern) ────────────────────────
+  //
+  // Old pattern: any tool/indicator firing during a stream set a flag;
+  // streamComplete checked the flag and SKIPPED the markdown rerender
+  // entirely → tool-using turns got raw streamed text forever.
+  //
+  // New pattern (Option C): each interrupt point eagerly rerenders the
+  // pre-interrupt chunk in place, then resets the per-chunk window.
+  // Multi-chunk turns get every chunk rerendered as markdown.
+
+  it('tool-less turn: streamComplete rerenders markdown (regression guard)', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    // Stream a chunk WITH markdown structure (heading + list) so the
+    // rerender heuristic engages.
+    d.streamPartial('# Title\n');
+    d.streamPartial('- item 1\n');
+    d.streamPartial('- item 2\n');
+    chunks.length = 0;
+    d.streamComplete();
+    const total = chunks.join('');
+    // Eraser ANSI fires (\x1b[<n>F\x1b[J).
+    expect(total).toMatch(/\x1b\[\d+F\x1b\[J/);
+    // Rerendered output contains the formatted body (indented per the
+    // streamComplete pattern). The exact format depends on marked but
+    // the heading text must survive.
+    const stripped = stripAnsi(total);
+    // Markdown renderer uppercases headings — match case-insensitively.
+    expect(stripped.toLowerCase()).toContain('title');
+    expect(stripped).toContain('item 1');
+  });
+
+  it('tool-using turn: pre-tool chunk rerenders on toolRow interrupt', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    // Pre-tool chunk with markdown structure — the kind of body the
+    // model says before calling a tool ("Here's what I'll do: ...").
+    d.streamPartial('# Plan\n');
+    d.streamPartial('- step 1\n');
+    d.streamPartial('- step 2\n');
+    chunks.length = 0;
+    // Tool fires — should rerender the chunk in place before the row.
+    d.toolRow('web_search', { query: 'q' });
+    const total = chunks.join('');
+    // Eraser fired (chunk got rerendered).
+    expect(total).toMatch(/\x1b\[\d+F\x1b\[J/);
+    // Rerendered markdown survives. Heading uppercased by the renderer.
+    const stripped = stripAnsi(total);
+    expect(stripped.toLowerCase()).toContain('plan');
+    // Tool row landed below.
+    expect(stripped).toMatch(/┊/);
+    expect(stripped).toMatch(/fetching/);
+  });
+
+  it('multi-chunk turn: each chunk gets its own rerender on tool interrupts', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    // Chunk 1: pre-tool prose with structure.
+    d.streamPartial('# Chunk 1\n');
+    d.streamPartial('- a\n');
+    // Tool 1 interrupts → commit-and-rerender chunk 1.
+    const row1 = d.toolRow('web_search', { query: 'q1' });
+    row1.degraded(50, 'cached');
+    // Chunk 2: post-tool prose with structure.
+    d.streamPartial('# Chunk 2\n');
+    d.streamPartial('- b\n');
+    // Tool 2 interrupts → commit-and-rerender chunk 2.
+    const row2 = d.toolRow('web_search', { query: 'q2' });
+    row2.degraded(50, 'cached');
+    // Chunk 3: final prose.
+    d.streamPartial('# Chunk 3\n');
+    d.streamPartial('- c\n');
+    chunks.length = 0;
+    d.streamComplete();
+    // Final chunk rerendered too — eraser ANSI present in the streamComplete output.
+    const totalAtCompletion = chunks.join('');
+    expect(totalAtCompletion).toMatch(/\x1b\[\d+F\x1b\[J/);
+    // Heading uppercased by renderer; match case-insensitively.
+    expect(stripAnsi(totalAtCompletion).toLowerCase()).toContain('chunk 3');
+  });
+
+  it('plain prose (no structure): no eraser fires on tool interrupt or streamComplete', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    // No headers, lists, fences, blockquotes — heuristic should bail.
+    d.streamPartial('just some plain prose without any structure\n');
+    chunks.length = 0;
+    d.toolRow('web_search', { query: 'q' });
+    // No eraser fired for the chunk — saves a flicker on short replies.
+    const afterToolRow = chunks.join('');
+    expect(afterToolRow).not.toMatch(/\x1b\[\d+F\x1b\[J/);
+    // But the trail row still printed (interrupt path still fenced
+    // the chunk with a newline so the row landed cleanly).
+    expect(stripAnsi(afterToolRow)).toMatch(/┊/);
+  });
+
+  // ── v4.1.3-essentials post-ship: inline markdown in heuristic ──────
+  //
+  // Bug: plain prose with ONLY inline `**bold**` (no headings / lists /
+  // code blocks) skipped tryRerenderInPlace's structure-check → marked
+  // was never invoked → `paintBoldWhite` was never called → literal
+  // `**` asterisks stayed in the user-visible output. Same gap existed
+  // for inline `` `code` ``. Fix added both to the heuristic.
+
+  it('plain prose with inline **bold**: rerender fires, ANSI bold + underline emitted, asterisks gone', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    d.streamPartial('Here is some **bold text** in plain prose.\n');
+    chunks.length = 0;
+    d.streamComplete();
+    const total = chunks.join('');
+    // Rerender fired (eraser ANSI present).
+    expect(total).toMatch(/\x1b\[\d+F\x1b\[J/);
+    // paintBoldUnderline emits both bold-on (\x1b[1m) and underline-on
+    // (\x1b[4m) for the open wrap, and both underline-off (\x1b[24m)
+    // and bold-off (\x1b[22m) for the close. All four must appear.
+    expect(total).toMatch(/\x1b\[1m/);
+    expect(total).toMatch(/\x1b\[4m/);
+    expect(total).toMatch(/\x1b\[24m/);
+    expect(total).toMatch(/\x1b\[22m/);
+    // Literal asterisks REPLACED by the rendered form.
+    expect(stripAnsi(total)).not.toMatch(/\*\*bold text\*\*/);
+    // Word still present (just no longer wrapped in asterisks).
+    expect(stripAnsi(total)).toContain('bold text');
+  });
+
+  it('plain prose with inline `code`: rerender fires', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    d.streamPartial('Run `npm test` to verify.\n');
+    chunks.length = 0;
+    d.streamComplete();
+    const total = chunks.join('');
+    // Rerender fired.
+    expect(total).toMatch(/\x1b\[\d+F\x1b\[J/);
+    // `npm test` content survives the rerender (renderer wraps it in
+    // accent-colored backticks but the inner text is preserved).
+    expect(stripAnsi(total)).toContain('npm test');
+  });
+
+  it('math expression "2 ** 3": NOT a false positive (no rerender)', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    // Bare `2 ** 3` — looks like bold opener but the `**` is followed
+    // by space, which the heuristic explicitly rejects (\S right after
+    // the **). No rerender should fire.
+    d.streamPartial('The result is 2 ** 3 = 8.\n');
+    // Don't clear chunks here — we want to assert the streamPartial
+    // output passed through verbatim AND no eraser fired on completion.
+    const beforeComplete = chunks.length;
+    d.streamComplete();
+    const completionOnly = chunks.slice(beforeComplete).join('');
+    // streamComplete should write nothing extra — no rerender fired.
+    expect(completionOnly).not.toMatch(/\x1b\[\d+F\x1b\[J/);
+    // Original prose, including the literal `**`, present in the
+    // streamPartial output that came before.
+    expect(stripAnsi(chunks.join(''))).toContain('2 ** 3');
+  });
+
+  it('no inline markers anywhere: rerender still skipped (no flicker regression)', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    d.streamPartial('Just a sentence with no markdown at all.\n');
+    chunks.length = 0;
+    d.streamComplete();
+    const total = chunks.join('');
+    expect(total).not.toMatch(/\x1b\[\d+F\x1b\[J/);
+  });
+
+  it('triple-backtick fence (existing pattern) takes precedence over inline-code: no double-trigger', () => {
+    // Mainly a sanity check — fence and inline-code patterns coexist
+    // in the heuristic; either being true is sufficient. This test
+    // confirms the fenced path still works as before.
+    const { d, chunks } = captureDisplay({ tty: true });
+    d.streamPartial('```ts\nconst x = 1;\n```\n');
+    chunks.length = 0;
+    d.streamComplete();
+    const total = chunks.join('');
+    expect(total).toMatch(/\x1b\[\d+F\x1b\[J/);
+  });
+
+  it('markdown parse failure: raw text fallback prevents body from vanishing', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    // Spy on the markdown method (defined on the Display instance) and
+    // make it throw — simulating a marked.parse() failure on
+    // pathological input.
+    const spy = vi.spyOn(d, 'markdown').mockImplementation(() => {
+      throw new Error('simulated marked failure');
+    });
+    try {
+      d.streamPartial('# Important content\n');
+      d.streamPartial('- must not vanish\n');
+      chunks.length = 0;
+      d.streamComplete();
+      const total = stripAnsi(chunks.join(''));
+      // Eraser fired BUT the raw buffered text was written back —
+      // the body did not vanish into the void.
+      expect(total).toContain('Important content');
+      expect(total).toContain('must not vanish');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('streamComplete with empty buffer (all chunks already committed): no-op', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    d.streamPartial('# Pre-tool\n');
+    d.streamPartial('- a\n');
+    d.toolRow('web_search', { query: 'q' });   // commits chunk 1
+    // No streamPartial after the tool — final chunk is empty.
+    chunks.length = 0;
+    d.streamComplete();
+    // No second rerender (buffer was empty). The output should be
+    // empty or at most a trailing newline cleanup — definitely no
+    // eraser sequence.
+    const total = chunks.join('');
+    expect(total).not.toMatch(/\x1b\[\d+F\x1b\[J/);
+  });
+
+  it('non-TTY: commitStreamChunk never fires the eraser even with structure', () => {
+    const { d, chunks } = captureDisplay({ tty: false });
+    d.streamPartial('# Heading\n');
+    d.streamPartial('- list\n');
+    d.toolRow('web_search', { query: 'q' });
+    // tryRerenderInPlace early-returns on !isTTY — no eraser written
+    // and the raw streamed text stays as the only output for that chunk.
+    expect(chunks.join('')).not.toMatch(/\x1b\[\d+F\x1b\[J/);
+  });
+
   // ── Fail row ────────────────────────────────────────────────────────
 
   it('non-TTY fail: trail row with "fail Ns" suffix', () => {
@@ -361,6 +744,47 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     expect(detailMatch?.[1]?.length ?? 0).toBeLessThanOrEqual(40);
   });
 
+  // ── v4.1.4-media — empty-args + per-tool preview surface ───────────
+
+  it('empty args object renders no detail (not "{}")', () => {
+    const { d, chunks } = captureDisplay({ tty: false });
+    // media_sessions has no args by schema. fail() so the row prints.
+    d.toolRow('media_sessions', {}).fail(50);
+    const flat = stripAnsi(chunks.join(''));
+    // Must NOT contain the literal "{}" — the v4.1.4-media fix.
+    expect(flat).not.toMatch(/\{\}/);
+    // Must still contain the verb (it's the trail's identity anchor).
+    expect(flat).toMatch(/media\s/);
+  });
+
+  it('media_transport row previews target arg (not raw JSON)', () => {
+    const { d, chunks } = captureDisplay({ tty: false });
+    d.toolRow('media_transport', { action: 'pause', target: 'spotify' }).fail(80);
+    const flat = stripAnsi(chunks.join(''));
+    // buildToolPreview routes media_transport via TOOL_PRIMARY_ARG to
+    // the `target` field — should surface "spotify" verbatim, NOT the
+    // serialized {"action":"pause","target":"spotify"} JSON.
+    expect(flat).toContain('spotify');
+    expect(flat).not.toMatch(/"action":/);
+  });
+
+  it('media_key row previews action arg (no target to show)', () => {
+    const { d, chunks } = captureDisplay({ tty: false });
+    d.toolRow('media_key', { action: 'play_pause' }).fail(40);
+    const flat = stripAnsi(chunks.join(''));
+    expect(flat).toContain('play_pause');
+  });
+
+  it('app_input row previews app arg', () => {
+    const { d, chunks } = captureDisplay({ tty: false });
+    d.toolRow('app_input', { app: 'chrome', keys: '{SPACE}' }).fail(60);
+    const flat = stripAnsi(chunks.join(''));
+    expect(flat).toContain('chrome');
+    // SendKeys grammar shouldn't leak into the trail — only the app
+    // identifier matters at a glance.
+    expect(flat).not.toContain('{SPACE}');
+  });
+
   // ── Verb padding ────────────────────────────────────────────────────
 
   it('verb column is padded to 12 chars so detail fields align', () => {
@@ -370,5 +794,112 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     const flat = stripAnsi(chunks.join(''));
     // "calling" padded to 12 => 5 trailing spaces before the detail
     expect(flat).toMatch(/calling {5}/);
+  });
+});
+
+// ── v4.1.3-essentials boldwrap-fix — pure helpers ──────────────────────────
+//
+// Regression coverage for the bold-split-across-chunk fix in
+// commitStreamChunk. Both helpers are pure, exported for test access.
+
+describe('countNewlines (v4.1.3-essentials)', () => {
+  it('returns 0 for the empty string', () => {
+    expect(countNewlines('')).toBe(0);
+  });
+
+  it('returns 0 when the buffer has no newlines', () => {
+    expect(countNewlines('plain prose with no line breaks')).toBe(0);
+  });
+
+  it('counts a single trailing newline', () => {
+    expect(countNewlines('one line\n')).toBe(1);
+  });
+
+  it('counts multiple newlines exactly', () => {
+    expect(countNewlines('a\nb\nc\n')).toBe(3);
+  });
+
+  it('counts blank lines (consecutive newlines)', () => {
+    expect(countNewlines('a\n\n\nb')).toBe(3);
+  });
+});
+
+describe('splitAtUnclosedBold (v4.1.3-essentials)', () => {
+  it('fast path: no `**` at all → carry empty, whole buffer rerenderable', () => {
+    const r = splitAtUnclosedBold('plain text with no bold markers');
+    expect(r.carry).toBe('');
+    expect(r.rerenderable).toBe('plain text with no bold markers');
+  });
+
+  it('balanced `**bold**` → carry empty', () => {
+    const r = splitAtUnclosedBold('this is **bold** text');
+    expect(r.carry).toBe('');
+    expect(r.rerenderable).toBe('this is **bold** text');
+  });
+
+  it('multiple balanced `**bold**` pairs → carry empty', () => {
+    const r = splitAtUnclosedBold('**a** and **b** and **c**');
+    expect(r.carry).toBe('');
+    expect(r.rerenderable).toBe('**a** and **b** and **c**');
+  });
+
+  it('unmatched trailing `**` → carry starts at the unmatched marker', () => {
+    const r = splitAtUnclosedBold('finished part **carry-start');
+    expect(r.rerenderable).toBe('finished part ');
+    expect(r.carry).toBe('**carry-start');
+  });
+
+  it('one closed pair + one open trailing → carry is the open tail', () => {
+    const r = splitAtUnclosedBold('**closed** and **open-tail');
+    expect(r.rerenderable).toBe('**closed** and ');
+    expect(r.carry).toBe('**open-tail');
+  });
+
+  it('`***` (three stars) does not double-count: still balanced', () => {
+    // `***` = one `**` pair start, plus a stray `*`. Single pair → odd.
+    // Then a closing `**` balances it. Final count = 2 (even).
+    const r = splitAtUnclosedBold('***bold and italic** rest');
+    expect(r.carry).toBe('');
+  });
+
+  it('code-fence safety: open ``` defers entire buffer', () => {
+    const r = splitAtUnclosedBold('prose\n```ts\ncode with **stars** inside');
+    expect(r.rerenderable).toBe('');
+    expect(r.carry).toBe('prose\n```ts\ncode with **stars** inside');
+  });
+
+  it('code-fence safety: closed ``` ... ``` does NOT defer', () => {
+    const r = splitAtUnclosedBold('```ts\ncode\n```\nthen **bold** text');
+    expect(r.carry).toBe('');
+  });
+
+  it('inline-backtick safety: `**` inside an open `…` defers', () => {
+    // Single backtick before unmatched `**` on same line → literal code.
+    const r = splitAtUnclosedBold('see `inline **stars defers');
+    expect(r.rerenderable).toBe('');
+    expect(r.carry).toBe('see `inline **stars defers');
+  });
+
+  it('inline-backtick safety: balanced `code` before `**bold` does NOT defer', () => {
+    const r = splitAtUnclosedBold('see `inline` code then **bold-open');
+    expect(r.rerenderable).toBe('see `inline` code then ');
+    expect(r.carry).toBe('**bold-open');
+  });
+
+  it('regression: tool-firing-mid-bold pattern preserves split semantics', () => {
+    // Real-world repro from visual smoke: heading bold opens mid-chunk,
+    // tool fires before the close arrives.
+    const chunk = '**Live tool indi';
+    const r = splitAtUnclosedBold(chunk);
+    expect(r.rerenderable).toBe('');
+    expect(r.carry).toBe('**Live tool indi');
+  });
+
+  it('regression: carry concatenates with next chunk to render cleanly', () => {
+    // After tool completes, the carry+next-chunk should be balanced.
+    const next = '**Live tool indi' + 'cator** working';
+    const r = splitAtUnclosedBold(next);
+    expect(r.carry).toBe('');
+    expect(r.rerenderable).toBe('**Live tool indicator** working');
   });
 });

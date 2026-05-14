@@ -148,6 +148,26 @@ const RULES: KeywordRule[] = [
       /\b(process|background|long.?running|server|spawn|kill|daemon)\b/i,
     toolsets: ['process'],
   },
+  // Media playback control (v4.1.4-media)
+  //
+  // Without this, intents like "list media sessions" matched the
+  // `sessions` rule via the bare word "session" → narrowed surface to
+  // toolset `sessions` only → `media_sessions` (toolset `system`) was
+  // filtered out and the model honestly reported it as unavailable.
+  // UNION semantics mean both rules contribute on phrases that hit
+  // both ("media sessions" → sessions + system), giving the model the
+  // full picture without needing a dedicated `media` toolset.
+  //
+  // Toolset is `system` (broad but minimal blast radius): the bundle
+  // covers media_sessions, media_transport, media_key, app_input,
+  // now_playing, plus the plausibly-relevant app_launch / volume_set /
+  // os_process_list. Carving out a dedicated `media` toolset is a
+  // separate slice if the surface noise becomes a real problem.
+  {
+    keywords:
+      /\b(play|pause|skip|spotify|music|song|video|youtube|track|playback|media)\b/i,
+    toolsets: ['system'],
+  },
 ];
 
 /** Always-on tools regardless of mode. The agent needs schema lookup

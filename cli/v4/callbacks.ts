@@ -168,6 +168,15 @@ export class CliCallbacks {
     }
     if (err) {
       handle.fail(ms);
+      // v4.1.3-essentials: when the tool's failure payload includes a
+      // structured capability card (auth missing, platform unsupported),
+      // render the card immediately after the fail row. The card sits
+      // on its own multi-line block — the fail row is still useful as
+      // the action timeline anchor; the card adds the state assessment
+      // the user actually needs. No card → plain failure surface.
+      if (result?.capabilityCard) {
+        this.display.capabilityCard(result.capabilityCard);
+      }
       return;
     }
     // v4.1.3-repl-polish: degraded outcome — tool completed but with a

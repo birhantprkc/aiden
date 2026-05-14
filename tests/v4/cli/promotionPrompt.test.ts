@@ -126,11 +126,18 @@ function mkDisplay() {
   };
 }
 
-describe('promptForApproval', () => {
+// v4.1.3-essentials promotion-ux: existing tests now explicitly force
+// the text-input path (`forceTextInput: true`) so they remain
+// deterministic regardless of whether the test runner inherits a real
+// TTY. Before v4.1.3 these relied on `process.stdout.isTTY` being
+// falsy in CI; on dev machines running vitest in a real terminal,
+// they would have routed to the interactive path and broken.
+
+describe('promptForApproval — text-input path (non-TTY / forced)', () => {
   it('empty candidates → empty array, no prompts fired', async () => {
     const { api } = mkApi([]);
     const disp = mkDisplay();
-    const out = await promptForApproval(api, disp, []);
+    const out = await promptForApproval(api, disp, [], { forceTextInput: true });
     expect(out).toEqual([]);
     expect(api.readLine).not.toHaveBeenCalled();
   });
@@ -139,7 +146,7 @@ describe('promptForApproval', () => {
     const { api } = mkApi(['1,3']);
     const disp = mkDisplay();
     const candidates = [c('a'), c('b'), c('c')];
-    const out = await promptForApproval(api, disp, candidates);
+    const out = await promptForApproval(api, disp, candidates, { forceTextInput: true });
     expect(out.map((c) => c.text)).toEqual(['a', 'c']);
     expect(api.readLine).toHaveBeenCalledTimes(1);
   });
@@ -148,14 +155,14 @@ describe('promptForApproval', () => {
     const { api } = mkApi(['all']);
     const disp = mkDisplay();
     const candidates = [c('a'), c('b')];
-    const out = await promptForApproval(api, disp, candidates);
+    const out = await promptForApproval(api, disp, candidates, { forceTextInput: true });
     expect(out.map((c) => c.text)).toEqual(['a', 'b']);
   });
 
   it('"skip" reply → empty + dim note', async () => {
     const { api } = mkApi(['skip']);
     const disp = mkDisplay();
-    const out = await promptForApproval(api, disp, [c('a')]);
+    const out = await promptForApproval(api, disp, [c('a')], { forceTextInput: true });
     expect(out).toEqual([]);
     expect(disp.dimCalls.some((d) => d.includes('Nothing promoted'))).toBe(true);
   });
@@ -164,7 +171,7 @@ describe('promptForApproval', () => {
     const { api } = mkApi(['hello', '2']);
     const disp = mkDisplay();
     const candidates = [c('a'), c('b'), c('c')];
-    const out = await promptForApproval(api, disp, candidates);
+    const out = await promptForApproval(api, disp, candidates, { forceTextInput: true });
     expect(out.map((c) => c.text)).toEqual(['b']);
     expect(api.readLine).toHaveBeenCalledTimes(2);
     expect(disp.warnCalls[0]).toMatch(/Could not parse/);
@@ -173,10 +180,115 @@ describe('promptForApproval', () => {
   it('two consecutive unparseable replies → skip + dim line, no third prompt', async () => {
     const { api } = mkApi(['banana', 'tomato']);
     const disp = mkDisplay();
-    const out = await promptForApproval(api, disp, [c('a')]);
+    const out = await promptForApproval(api, disp, [c('a')], { forceTextInput: true });
     expect(out).toEqual([]);
     expect(api.readLine).toHaveBeenCalledTimes(2);
     expect(disp.dimCalls.some((d) => d.includes('still unparseable'))).toBe(true);
+  });
+});
+
+// ── promptForApproval (interactive checkbox path) ──────────────────────────
+//
+// v4.1.3-essentials promotion-ux: the TTY path uses @inquirer/prompts.
+// checkbox for multi-select. Tests mock that module via vi.mock so the
+// path can run in any environment without a real TTY.
+
+vi.mock('@inquirer/prompts', () => {
+  const checkbox = vi.fn();
+  return { checkbox };
+});
+
+describe('promptForApproval — interactive checkbox path (TTY / forced)', () => {
+  it('user confirms with multiple selections → returns those candidates', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const inq = await import('@inquirer/prompts') as unknown as {
+      checkbox: ReturnType<typeof vi.fn>;
+    };
+    inq.checkbox.mockResolvedValueOnce([0, 2]);
+    const { api } = mkApi([]);  // shouldn't be called
+    const disp = mkDisplay();
+    const candidates = [c('alpha'), c('bravo'), c('charlie')];
+    const out = await promptForApproval(api, disp, candidates, { forceInteractive: true });
+    expect(out.map((c) => c.text)).toEqual(['alpha', 'charlie']);
+    expect(api.readLine).not.toHaveBeenCalled();
+    // Choice labels included the source-type tags.
+    const args = inq.checkbox.mock.calls.at(-1)?.[0] as { choices: Array<{ name: string }> };
+    expect(args.choices[0].name).toContain('[user said]');
+    expect(args.choices[0].name).toContain('alpha');
+  });
+
+  it('user confirms with single selection → returns one candidate', async () => {
+    const inq = await import('@inquirer/prompts') as unknown as {
+      checkbox: ReturnType<typeof vi.fn>;
+    };
+    inq.checkbox.mockResolvedValueOnce([1]);
+    const disp = mkDisplay();
+    const out = await promptForApproval(
+      { readLine: vi.fn() }, disp,
+      [c('a'), c('b'), c('c')],
+      { forceInteractive: true },
+    );
+    expect(out.map((c) => c.text)).toEqual(['b']);
+  });
+
+  it('user confirms with zero selections → returns [] + dim note', async () => {
+    const inq = await import('@inquirer/prompts') as unknown as {
+      checkbox: ReturnType<typeof vi.fn>;
+    };
+    inq.checkbox.mockResolvedValueOnce([]);
+    const disp = mkDisplay();
+    const out = await promptForApproval(
+      { readLine: vi.fn() }, disp,
+      [c('a'), c('b')],
+      { forceInteractive: true },
+    );
+    expect(out).toEqual([]);
+    expect(disp.dimCalls.some((d) => d.includes('Nothing promoted'))).toBe(true);
+  });
+
+  it('user hits Esc / Ctrl+C (inquirer throws) → returns [] + dim note', async () => {
+    const inq = await import('@inquirer/prompts') as unknown as {
+      checkbox: ReturnType<typeof vi.fn>;
+    };
+    inq.checkbox.mockRejectedValueOnce(new Error('User force closed the prompt'));
+    const disp = mkDisplay();
+    const out = await promptForApproval(
+      { readLine: vi.fn() }, disp,
+      [c('a')],
+      { forceInteractive: true },
+    );
+    expect(out).toEqual([]);
+    expect(disp.dimCalls.some((d) => d.includes('Skipped'))).toBe(true);
+  });
+
+  it('default selection is NONE checked (user opts in explicitly)', async () => {
+    const inq = await import('@inquirer/prompts') as unknown as {
+      checkbox: ReturnType<typeof vi.fn>;
+    };
+    inq.checkbox.mockResolvedValueOnce([]);
+    await promptForApproval(
+      { readLine: vi.fn() }, mkDisplay(),
+      [c('a'), c('b'), c('c')],
+      { forceInteractive: true },
+    );
+    const args = inq.checkbox.mock.calls.at(-1)?.[0] as {
+      choices: Array<{ name: string; value: number; checked?: boolean }>;
+    };
+    expect(args.choices.every((ch) => ch.checked === false)).toBe(true);
+  });
+
+  it('empty candidate list → empty result, inquirer NOT called', async () => {
+    const inq = await import('@inquirer/prompts') as unknown as {
+      checkbox: ReturnType<typeof vi.fn>;
+    };
+    inq.checkbox.mockClear();
+    const out = await promptForApproval(
+      { readLine: vi.fn() }, mkDisplay(),
+      [],
+      { forceInteractive: true },
+    );
+    expect(out).toEqual([]);
+    expect(inq.checkbox).not.toHaveBeenCalled();
   });
 });
 

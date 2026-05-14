@@ -258,11 +258,44 @@ export interface DistillSessionOptions {
   /** Accumulated tool trace across all turns this session. */
   toolTrace:       ReadonlyArray<HonestyTraceEntry>;
   auxiliaryClient: AuxiliaryClient;
-  /** Wall-clock cap on the auxiliary LLM call. Default 4000 ms. */
+  /** Wall-clock cap on the auxiliary LLM call. Default 12000 ms
+   *  (raised from 4000 ms in v4.1.3-essentials — see DEFAULT_TIMEOUT_MS). */
   timeoutMs?:      number;
+  /**
+   * v4.1.3-essentials distillation-fix: optional diagnostic sink.
+   * Receives a single-string explanation when the distillation falls
+   * back to `partial:true`. Three classes:
+   *
+   *   - "auxiliary call timed out after <ms>ms"
+   *   - "auxiliary call failed: <message>"
+   *   - "auxiliary returned unparseable JSON (first 200 chars: ...)"
+   *
+   * Caller routes this to `display.dim()` (or stderr in CLI contexts)
+   * so the user can see WHY their session produced no semantic
+   * fields. Before this hook the failure was completely silent —
+   * the only visible artifact was the downstream "no bullets" warning
+   * which didn't distinguish among the three causes.
+   *
+   * Callback runs synchronously inside `distillSession`; errors thrown
+   * from it bubble out, so consumers should be defensive (the
+   * built-in caller wraps it in try/catch).
+   */
+  onDiagnostic?:   (message: string) => void;
 }
 
-const DEFAULT_TIMEOUT_MS = 4_000;
+/**
+ * v4.1.3-essentials distillation-fix: default raised from 4000ms to
+ * 12000ms after visual smoke showed chatgpt-plus Codex regularly
+ * exceeded the original budget for 800-token summaries on
+ * cold-start. Symptom: every `/quit` distillation returned
+ * `partial:true` with empty bullets/decisions/open_items, killing
+ * both the MEMORY.md update path AND the promotion prompt.
+ *
+ * 12s gives comfortable headroom while still aborting genuinely
+ * stuck calls. Power users can override via `AIDEN_SUMMARY_TIMEOUT_MS`
+ * env var (consumed by `resolveSummaryTimeoutMs()` in chatSession).
+ */
+const DEFAULT_TIMEOUT_MS = 12_000;
 
 /**
  * Phase v4.1.2-bug-Y: max chars of tool-result content surfaced to the
@@ -461,10 +494,41 @@ export async function distillSession(
     }),
   ]);
 
+  // v4.1.3-essentials distillation-fix: emit a diagnostic line for
+  // each of the three failure classes so the caller can surface the
+  // root cause. Previously all three paths produced an identical
+  // `partial:true + empty` result with no signal about WHICH failure
+  // fired. Safe to call onDiagnostic synchronously — caller wraps in
+  // try/catch so a throwing sink doesn't break distillation.
+  const diag = (msg: string): void => {
+    if (!opts.onDiagnostic) return;
+    try { opts.onDiagnostic(msg); } catch { /* never break distillation */ }
+  };
+
   let semantic: ReturnType<typeof parseLLMDistillation>;
   if (llmRaw.ok) {
     semantic = parseLLMDistillation(llmRaw.content);
+    if (semantic.partial) {
+      // Parser fell back to bullets-only or fully-empty — the LLM
+      // returned content but it wasn't valid JSON. First-200-chars
+      // hint lets the user / debugger see what shape the model
+      // actually emitted (often a chatty preamble that confused
+      // the JSON extractor).
+      const head = llmRaw.content.trim().slice(0, 200).replace(/\n/g, ' ');
+      diag(`auxiliary returned unparseable JSON (first 200 chars: ${head})`);
+    }
   } else {
+    // Race resolved with the failure branch — either the timeout
+    // fired or auxiliaryClient.call threw. Hoist `error` into a
+    // local so the narrowed type stays stable inside the branch
+    // (TS can't infer `error` exists on `llmRaw` because the union
+    // overlaps with the success branch in its type literal).
+    const failure = llmRaw as { error: Error; timedOut?: boolean };
+    if (failure.timedOut === true) {
+      diag(`auxiliary call timed out after ${timeoutMs}ms`);
+    } else {
+      diag(`auxiliary call failed: ${failure.error.message}`);
+    }
     semantic = {
       bullets:    [],
       decisions:  [],

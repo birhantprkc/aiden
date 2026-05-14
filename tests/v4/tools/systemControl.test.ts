@@ -52,10 +52,17 @@ import { screenshotTool } from '../../../tools/v4/system/screenshot';
 import { osProcessListTool } from '../../../tools/v4/system/osProcessList';
 import { mediaKeyTool } from '../../../tools/v4/system/mediaKey';
 import { volumeSetTool } from '../../../tools/v4/system/volumeSet';
-import { appLaunchTool } from '../../../tools/v4/system/appLaunch';
+import {
+  appLaunchTool,
+  processNameFromApp,
+} from '../../../tools/v4/system/appLaunch';
 import { appCloseTool } from '../../../tools/v4/system/appClose';
 import { clipboardReadTool } from '../../../tools/v4/system/clipboardRead';
 import { clipboardWriteTool } from '../../../tools/v4/system/clipboardWrite';
+// v4.1.4-media — three-layer media-control bundle under test.
+import { mediaSessionsTool } from '../../../tools/v4/system/mediaSessions';
+import { mediaTransportTool } from '../../../tools/v4/system/mediaTransport';
+import { appInputTool } from '../../../tools/v4/system/appInput';
 
 const ORIGINAL_PLATFORM = process.platform;
 
@@ -266,6 +273,34 @@ describe('volumeSetTool', () => {
   });
 });
 
+// ── processNameFromApp (v4.1.3-essentials helper) ──────────────────────
+//
+// The launch-verification poll calls Get-Process with a bare process
+// name (no path, no .exe). This helper does that derivation; tests
+// pin the contract so future refactors don't silently break the probe.
+
+describe('processNameFromApp', () => {
+  it('strips Windows backslash path components', () => {
+    expect(processNameFromApp('C:\\Program Files\\Spotify\\Spotify.exe'))
+      .toBe('spotify');
+  });
+  it('strips forward-slash path components (tolerant of cross-platform paths)', () => {
+    expect(processNameFromApp('C:/Apps/notepad.exe')).toBe('notepad');
+  });
+  it('strips a trailing .exe (case-insensitive)', () => {
+    expect(processNameFromApp('Notepad.EXE')).toBe('notepad');
+    expect(processNameFromApp('chrome.exe')).toBe('chrome');
+  });
+  it('passes a bare name through unchanged (lowercased)', () => {
+    expect(processNameFromApp('spotify')).toBe('spotify');
+    expect(processNameFromApp('SPOTIFY')).toBe('spotify');
+  });
+  it('preserves non-.exe suffixes (e.g. notepad++)', () => {
+    expect(processNameFromApp('notepad++.exe')).toBe('notepad++');
+    expect(processNameFromApp('notepad++')).toBe('notepad++');
+  });
+});
+
 // ── app_launch ─────────────────────────────────────────────────────────
 describe('appLaunchTool', () => {
   it('refuses on non-Windows', async () => {
@@ -307,14 +342,66 @@ describe('appLaunchTool', () => {
     expect(cmd).toContain('https://example.com');
   });
 
-  it('returns pid=null when only the cmd-start fallback succeeded', async () => {
+  // ── v4.1.3-essentials: Path C launch verification ────────────────────
+  //
+  // The PS script now emits exactly ONE of three sentinels:
+  //   `PID=<n>` (optionally with `(verified via Get-Process)` suffix),
+  //   `LAUNCH_FAILED=<msg>` (.NET Process.Start threw — popup-error case),
+  //   `LAUNCH_UNVERIFIED=<name>` (ShellExecute returned null AND no process
+  //                               named <name> appeared in 300ms).
+  // These tests verify each branch maps to the correct surface-level
+  // outcome — pre-fix the cmd-fallback path returned "launched" even when
+  // Windows showed a "cannot find ''" popup; that lie is now impossible.
+
+  it('verified PID via Get-Process: success + degraded + verified flag set', async () => {
     setPlatform('win32');
-    execReturns('PID=unknown (launched via cmd start fallback)');
+    execReturns('PID=12345 (verified via Get-Process)');
     const res = await appLaunchTool.execute({ app: 'spotify' }, fakeCtx('/tmp')) as {
-      success: boolean; pid: number | null;
+      success: boolean; pid: number; verified: boolean;
+      degraded: boolean; degradedReason: string;
     };
     expect(res.success).toBe(true);
-    expect(res.pid).toBeNull();
+    expect(res.pid).toBe(12345);
+    expect(res.verified).toBe(true);
+    // Still degraded — verified launch ≠ verified-still-running.
+    expect(res.degraded).toBe(true);
+    expect(res.degradedReason).toMatch(/verified via Get-Process/);
+  });
+
+  it('LAUNCH_FAILED sentinel maps to success:false with the .NET exception text', async () => {
+    setPlatform('win32');
+    execReturns('LAUNCH_FAILED=The system cannot find the file specified.');
+    const res = await appLaunchTool.execute({ app: 'totally-fake-app' }, fakeCtx('/tmp')) as {
+      success: boolean; error: string;
+    };
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/Could not launch 'totally-fake-app'/);
+    expect(res.error).toMatch(/cannot find the file/);
+  });
+
+  it('LAUNCH_UNVERIFIED sentinel maps to success:false (regression guard for the broken cmd-fallback "launched" lie)', async () => {
+    setPlatform('win32');
+    execReturns('LAUNCH_UNVERIFIED=spotify');
+    const res = await appLaunchTool.execute({ app: 'spotify' }, fakeCtx('/tmp')) as {
+      success: boolean; error: string;
+    };
+    // CRITICAL: pre-fix this scenario returned success:true with the
+    // misleading "launched via cmd fallback" — the Windows popup error
+    // was invisible to the tool. Now it surfaces honestly.
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/no process named 'spotify'/);
+    expect(res.error).toMatch(/300ms/);
+    expect(res.error).toMatch(/Windows may have shown an error dialog/);
+  });
+
+  it('unexpected stdout (no sentinel) surfaces as success:false rather than a silent assume-success', async () => {
+    setPlatform('win32');
+    execReturns('Some other unexpected output');
+    const res = await appLaunchTool.execute({ app: 'spotify' }, fakeCtx('/tmp')) as {
+      success: boolean; error: string;
+    };
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/unexpected stdout/);
   });
 });
 
@@ -453,5 +540,353 @@ describe('error propagation', () => {
     };
     expect(res.success).toBe(false);
     expect(res.error).toMatch(/SendKeys/);
+  });
+});
+
+// ── media_sessions (v4.1.4-media — GSMTC enumerator) ───────────────────
+describe('mediaSessionsTool', () => {
+  it('refuses on non-Windows with a clear error', async () => {
+    setPlatform('linux');
+    const res = await mediaSessionsTool.execute({}, fakeCtx('/tmp')) as {
+      success: boolean; error: string;
+    };
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/Windows-only/);
+  });
+
+  // ── v4.1.3-essentials: capability card attached to non-Windows refuse ──
+  it('non-Windows refuse attaches a capability card with platform-specific alternatives', async () => {
+    setPlatform('linux');
+    const res = await mediaSessionsTool.execute({}, fakeCtx('/tmp')) as {
+      success:         boolean;
+      error:           string;
+      requires:        string[];
+      capabilityCard: {
+        title:          string;
+        canStill:       string[];
+        cannotReliably: string[];
+        fix:            string;
+      };
+    };
+    expect(res.requires).toEqual(['Windows']);
+    expect(res.capabilityCard).toBeTruthy();
+    expect(res.capabilityCard.title).toMatch(/media_sessions/);
+    expect(res.capabilityCard.title).toMatch(/Windows/);
+    // Tool supplied tailored alternatives, not the generic fallback.
+    const canStillJoined = res.capabilityCard.canStill.join(' ');
+    expect(canStillJoined).toMatch(/playerctl|now_playing|os_process_list/);
+    // Fix points at the obvious remediation.
+    expect(res.capabilityCard.fix).toMatch(/Windows|MPRIS/);
+  });
+
+  it('empty session list — PS prints "[]" — returns count:0 and empty array', async () => {
+    setPlatform('win32');
+    execReturns('[]');
+    const res = await mediaSessionsTool.execute({}, fakeCtx('/tmp')) as {
+      success: boolean; sessions: unknown[]; count: number;
+    };
+    expect(res.success).toBe(true);
+    expect(res.count).toBe(0);
+    expect(res.sessions).toEqual([]);
+  });
+
+  it('truly empty stdout (whitespace only) also routes to count:0', async () => {
+    setPlatform('win32');
+    execReturns('   \n   ');
+    const res = await mediaSessionsTool.execute({}, fakeCtx('/tmp')) as {
+      success: boolean; sessions: unknown[]; count: number;
+    };
+    expect(res.success).toBe(true);
+    expect(res.count).toBe(0);
+  });
+
+  it('single session — PS emits object, not array — is normalized to one-element array', async () => {
+    setPlatform('win32');
+    execReturns(JSON.stringify({
+      appUserModelId: 'Spotify.exe',
+      isCurrent:      true,
+      playbackStatus: 'Playing',
+      title:          'Yesterday',
+      artist:         'The Beatles',
+      album:          'Help!',
+    }));
+    const res = await mediaSessionsTool.execute({}, fakeCtx('/tmp')) as {
+      success: boolean;
+      sessions: Array<{ friendlyApp: string; isCurrent: boolean; appUserModelId: string }>;
+      count: number;
+    };
+    expect(res.success).toBe(true);
+    expect(res.count).toBe(1);
+    expect(res.sessions[0].appUserModelId).toBe('Spotify.exe');
+    // friendlyAppName maps "spotify" → "Spotify".
+    expect(res.sessions[0].friendlyApp).toBe('Spotify');
+    expect(res.sessions[0].isCurrent).toBe(true);
+  });
+
+  it('multi-session array — preserves order, marks the current one', async () => {
+    setPlatform('win32');
+    execReturns(JSON.stringify([
+      { appUserModelId: 'Spotify.exe', isCurrent: false, playbackStatus: 'Paused' },
+      { appUserModelId: 'msedge.exe',  isCurrent: true,  playbackStatus: 'Playing', title: 'YouTube tab' },
+    ]));
+    const res = await mediaSessionsTool.execute({}, fakeCtx('/tmp')) as {
+      success: boolean;
+      sessions: Array<{ friendlyApp: string; isCurrent: boolean }>;
+      count: number;
+    };
+    expect(res.count).toBe(2);
+    expect(res.sessions[0].friendlyApp).toBe('Spotify');
+    expect(res.sessions[0].isCurrent).toBe(false);
+    expect(res.sessions[1].friendlyApp).toBe('Microsoft Edge');
+    expect(res.sessions[1].isCurrent).toBe(true);
+  });
+
+  it('surfaces PowerShell errors as success:false', async () => {
+    setPlatform('win32');
+    execThrows('Unable to load Windows.Media.Control');
+    const res = await mediaSessionsTool.execute({}, fakeCtx('/tmp')) as {
+      success: boolean; error: string;
+    };
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/Windows\.Media\.Control/);
+  });
+});
+
+// ── media_transport (v4.1.4-media — verified GSMTC controller) ─────────
+describe('mediaTransportTool', () => {
+  it('refuses on non-Windows', async () => {
+    setPlatform('linux');
+    const res = await mediaTransportTool.execute({ action: 'pause' }, fakeCtx('/tmp')) as {
+      success: boolean; error: string;
+    };
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/Windows-only/);
+  });
+
+  it('non-Windows refuse attaches a capability card naming layer-1 / layer-3b alternatives', async () => {
+    setPlatform('linux');
+    const res = await mediaTransportTool.execute({ action: 'pause' }, fakeCtx('/tmp')) as {
+      requires: string[];
+      capabilityCard: { title: string; canStill: string[]; cannotReliably: string[]; fix: string };
+    };
+    expect(res.requires).toEqual(['Windows']);
+    const canStillJoined = res.capabilityCard.canStill.join(' ');
+    // Layer 1 (Spotify Web API), layer 3b (CDP / browser_*), and
+    // platform-native shell utilities all surface as alternatives.
+    expect(canStillJoined).toMatch(/Spotify Web API/);
+    expect(canStillJoined).toMatch(/Chrome DevTools|browser_/);
+    expect(canStillJoined).toMatch(/playerctl|osascript|shell_exec/);
+  });
+
+  it('rejects an unknown action without invoking PowerShell', async () => {
+    setPlatform('win32');
+    const res = await mediaTransportTool.execute({ action: 'launch_nukes' }, fakeCtx('/tmp')) as {
+      success: boolean; error: string;
+    };
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/Unknown action/);
+    expect(execMock).not.toHaveBeenCalled();
+  });
+
+  it('matched=true + result=Success returns success without degraded flag (OS-confirmed)', async () => {
+    setPlatform('win32');
+    execReturns(JSON.stringify({
+      matched:        true,
+      result:         'Success',
+      appUserModelId: 'Spotify.exe',
+    }));
+    const res = await mediaTransportTool.execute(
+      { action: 'pause', target: 'spotify' },
+      fakeCtx('/tmp'),
+    ) as { success: boolean; action: string; appUserModelId: string; degraded?: boolean };
+    expect(res.success).toBe(true);
+    expect(res.action).toBe('pause');
+    expect(res.appUserModelId).toBe('Spotify.exe');
+    // CRITICAL: NOT degraded — this is the whole point of the slice.
+    // mediaKey's blind keystroke surfaces degraded:true; mediaTransport
+    // has GSMTC's enum result and reports honestly.
+    expect(res.degraded).toBeUndefined();
+  });
+
+  it('matched=true + result=Failed surfaces a specific GSMTC failure', async () => {
+    setPlatform('win32');
+    execReturns(JSON.stringify({
+      matched:        true,
+      result:         'Failed',
+      appUserModelId: 'Spotify.exe',
+    }));
+    const res = await mediaTransportTool.execute(
+      { action: 'next', target: 'spotify' },
+      fakeCtx('/tmp'),
+    ) as { success: boolean; error: string };
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/GSMTC next returned Failed/);
+    expect(res.error).toMatch(/Spotify\.exe/);
+  });
+
+  it('matched=false with a target tells the model to call media_sessions', async () => {
+    setPlatform('win32');
+    execReturns(JSON.stringify({ matched: false, result: 'NoSession', appUserModelId: null }));
+    const res = await mediaTransportTool.execute(
+      { action: 'pause', target: 'nonexistent-app' },
+      fakeCtx('/tmp'),
+    ) as { success: boolean; error: string };
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/No media session matched target/);
+    expect(res.error).toMatch(/media_sessions/);
+  });
+
+  it('matched=false without a target points at opening a media app', async () => {
+    setPlatform('win32');
+    execReturns(JSON.stringify({ matched: false, result: 'NoSession', appUserModelId: null }));
+    const res = await mediaTransportTool.execute(
+      { action: 'toggle' },
+      fakeCtx('/tmp'),
+    ) as { success: boolean; error: string };
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/No active media session/);
+  });
+
+  it('empty PowerShell stdout reports an honest "empty output" error', async () => {
+    setPlatform('win32');
+    execReturns('');
+    const res = await mediaTransportTool.execute(
+      { action: 'pause' },
+      fakeCtx('/tmp'),
+    ) as { success: boolean; error: string };
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/empty output/);
+  });
+
+  it('escapes single-quotes in target so PS script literal stays well-formed', async () => {
+    setPlatform('win32');
+    execReturns(JSON.stringify({ matched: false, result: 'NoSession', appUserModelId: null }));
+    await mediaTransportTool.execute(
+      { action: 'play', target: "It's a kind of magic" },
+      fakeCtx('/tmp'),
+    );
+    const cmd = String(execMock.mock.calls[0][0]);
+    // Single quote doubled per PowerShell escape rules.
+    expect(cmd).toContain("It''s a kind of magic");
+  });
+});
+
+// ── app_input (v4.1.4-media — focus + SendKeys fallback) ───────────────
+describe('appInputTool', () => {
+  it('refuses on non-Windows', async () => {
+    setPlatform('linux');
+    const res = await appInputTool.execute(
+      { app: 'chrome', keys: '{SPACE}' },
+      fakeCtx('/tmp'),
+    ) as { success: boolean; error: string };
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/Windows-only/);
+  });
+
+  it('non-Windows refuse attaches a capability card pointing at xdotool / osascript / playwright', async () => {
+    setPlatform('linux');
+    const res = await appInputTool.execute(
+      { app: 'chrome', keys: '{SPACE}' },
+      fakeCtx('/tmp'),
+    ) as {
+      requires: string[];
+      capabilityCard: { title: string; canStill: string[]; fix: string };
+    };
+    expect(res.requires).toEqual(['Windows']);
+    const canStillJoined = res.capabilityCard.canStill.join(' ');
+    expect(canStillJoined).toMatch(/browser_|Playwright/);
+    expect(canStillJoined).toMatch(/xdotool|osascript/);
+  });
+
+  it('rejects empty app without invoking PowerShell', async () => {
+    setPlatform('win32');
+    const res = await appInputTool.execute(
+      { app: '   ', keys: '{SPACE}' },
+      fakeCtx('/tmp'),
+    ) as { success: boolean; error: string };
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/`app` is required/);
+    expect(execMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects empty keys without invoking PowerShell', async () => {
+    setPlatform('win32');
+    const res = await appInputTool.execute(
+      { app: 'chrome', keys: '' },
+      fakeCtx('/tmp'),
+    ) as { success: boolean; error: string };
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/`keys` is required/);
+    expect(execMock).not.toHaveBeenCalled();
+  });
+
+  it('activated=true success path: degraded=true with permissive reason', async () => {
+    setPlatform('win32');
+    execReturns(JSON.stringify({ activated: true }));
+    const res = await appInputTool.execute(
+      { app: 'Spotify', keys: '{SPACE}' },
+      fakeCtx('/tmp'),
+    ) as {
+      success: boolean; app: string; activated: boolean;
+      degraded?: boolean; degradedReason?: string;
+    };
+    expect(res.success).toBe(true);
+    expect(res.activated).toBe(true);
+    // SendKeys can't verify receipt — every success path is degraded.
+    expect(res.degraded).toBe(true);
+    expect(res.degradedReason).toMatch(/activation reported success/);
+    expect(res.degradedReason).toContain('Spotify');
+  });
+
+  it('activated=false success path: degraded=true with the more dire reason', async () => {
+    setPlatform('win32');
+    execReturns(JSON.stringify({ activated: false }));
+    const res = await appInputTool.execute(
+      { app: 'NotepadXX', keys: 'hi' },
+      fakeCtx('/tmp'),
+    ) as {
+      success: boolean; activated: boolean;
+      degraded?: boolean; degradedReason?: string;
+    };
+    expect(res.success).toBe(true);
+    expect(res.activated).toBe(false);
+    expect(res.degraded).toBe(true);
+    expect(res.degradedReason).toMatch(/activation reported failure/);
+    expect(res.degradedReason).toMatch(/receipt unlikely/);
+  });
+
+  it('non-JSON stdout (malformed PS output) still resolves success with activated=false', async () => {
+    setPlatform('win32');
+    execReturns('garbage not-json output');
+    const res = await appInputTool.execute(
+      { app: 'chrome', keys: '{SPACE}' },
+      fakeCtx('/tmp'),
+    ) as { success: boolean; activated: boolean; degraded?: boolean };
+    expect(res.success).toBe(true);
+    expect(res.activated).toBe(false);
+    expect(res.degraded).toBe(true);
+  });
+
+  it('surfaces PowerShell errors as success:false', async () => {
+    setPlatform('win32');
+    execThrows('Add-Type : Could not load assembly Microsoft.VisualBasic');
+    const res = await appInputTool.execute(
+      { app: 'chrome', keys: '{SPACE}' },
+      fakeCtx('/tmp'),
+    ) as { success: boolean; error: string };
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/Microsoft\.VisualBasic/);
+  });
+
+  it('escapes single-quotes in both app and keys', async () => {
+    setPlatform('win32');
+    execReturns(JSON.stringify({ activated: true }));
+    await appInputTool.execute(
+      { app: "It's running", keys: "Hello 'world'" },
+      fakeCtx('/tmp'),
+    );
+    const cmd = String(execMock.mock.calls[0][0]);
+    expect(cmd).toContain("It''s running");
+    expect(cmd).toContain("Hello ''world''");
   });
 });

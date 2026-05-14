@@ -62,6 +62,13 @@ const FULL_REGISTRY = new MockRegistry([
   handler('lookup_tool_schema', 'meta'),
   handler('session_search', 'sessions'),
   handler('process_spawn', 'process'),
+  // v4.1.4-media: media-control bundle lives in toolset 'system'.
+  // Without the media plannerGuard rule "list media sessions"
+  // matched only the 'sessions' rule and filtered these out.
+  handler('media_sessions', 'system'),
+  handler('media_transport', 'system'),
+  handler('media_key', 'system'),
+  handler('now_playing', 'system'),
 ]);
 
 class FakeAdapter implements ProviderAdapter {
@@ -82,7 +89,9 @@ describe('PlannerGuard — off mode', () => {
   it('1. off mode returns all tools as selected, none excluded', async () => {
     const guard = new PlannerGuard(FULL_REGISTRY, 'off');
     const decision = await guard.decide('anything', []);
-    expect(decision.selectedTools).toHaveLength(15);
+    // v4.1.4-media: FULL_REGISTRY grew by 4 (media_sessions,
+    // media_transport, media_key, now_playing).
+    expect(decision.selectedTools).toHaveLength(19);
     expect(decision.excludedTools).toEqual([]);
     expect(decision.reason).toBe('no_filter');
   });
@@ -285,5 +294,59 @@ describe('PlannerGuard — llm_classified', () => {
     const decision = await guard.decide('please save my file', []);
     expect(decision.reason).toBe('fallback');
     expect(decision.selectedTools).toContain('file_write');
+  });
+
+  // ── v4.1.4-media — plannerGuard media-control rule ─────────────────
+  //
+  // Visual-smoke regression: "list media sessions" matched only the
+  // existing 'sessions' rule (via the bare word "sessions") which
+  // narrowed the surface to toolset 'sessions'. media_sessions lives
+  // in toolset 'system' so it got filtered out, and the model
+  // honestly reported it as unavailable. These guards make sure the
+  // media rule fires on natural media-control language and that
+  // UNION semantics keep both surfaces visible on combined phrases.
+
+  it('16. "pause spotify" exposes media_transport (media rule fires)', async () => {
+    const guard = new PlannerGuard(FULL_REGISTRY, 'rule_based');
+    const decision = await guard.decide('pause spotify', []);
+    expect(decision.reason).toBe('rule_match');
+    expect(decision.selectedTools).toContain('media_transport');
+    expect(decision.selectedTools).toContain('media_key');
+    expect(decision.selectedTools).toContain('media_sessions');
+  });
+
+  it('17. "list media sessions" exposes BOTH media_sessions AND session_search (UNION)', async () => {
+    const guard = new PlannerGuard(FULL_REGISTRY, 'rule_based');
+    const decision = await guard.decide('list media sessions', []);
+    expect(decision.reason).toBe('rule_match');
+    // Media rule contribution.
+    expect(decision.selectedTools).toContain('media_sessions');
+    // Sessions rule still fires too — the keyword UNION means the
+    // model can see both surfaces and pick the right one.
+    expect(decision.selectedTools).toContain('session_search');
+  });
+
+  it('18. "play me a song" matches the media rule', async () => {
+    const guard = new PlannerGuard(FULL_REGISTRY, 'rule_based');
+    const decision = await guard.decide('play me a song', []);
+    expect(decision.reason).toBe('rule_match');
+    expect(decision.selectedTools).toContain('media_transport');
+  });
+
+  it('19. "skip this track" matches the media rule', async () => {
+    const guard = new PlannerGuard(FULL_REGISTRY, 'rule_based');
+    const decision = await guard.decide('skip this track', []);
+    expect(decision.reason).toBe('rule_match');
+    expect(decision.selectedTools).toContain('media_transport');
+  });
+
+  it('20. "search my past sessions" does NOT trigger the media rule alone', async () => {
+    const guard = new PlannerGuard(FULL_REGISTRY, 'rule_based');
+    const decision = await guard.decide('search my past sessions', []);
+    // The sessions rule fires; the media rule should NOT, because no
+    // media-vocabulary token is present. media_transport must NOT be
+    // in the selection.
+    expect(decision.selectedTools).toContain('session_search');
+    expect(decision.selectedTools).not.toContain('media_transport');
   });
 });

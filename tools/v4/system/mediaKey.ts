@@ -34,7 +34,13 @@ export const mediaKeyTool: ToolHandler = {
   schema: {
     name: 'media_key',
     description:
-      'Send a media-control key to the active media session (Spotify, YouTube, etc.). Pair with `now_playing` to inspect current state. Windows-only in v4.1.2.',
+      'FALLBACK ONLY — prefer `media_transport(action, target)` for verified ' +
+      'control of named apps (Spotify, YouTube, etc.). Use `media_key` only ' +
+      'when (1) the target app is unknown / not registered with the OS media ' +
+      'bus, or (2) `media_transport` returned `NoSession`. Blind global ' +
+      'keystroke (VK_MEDIA_PLAY_PAUSE and friends) — Windows doesn\'t surface ' +
+      'routing outcome, so this tool always reports `degraded:true`. Pair ' +
+      'with `now_playing` to inspect state first. Windows-only.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -53,7 +59,21 @@ export const mediaKeyTool: ToolHandler = {
   mutates: true,
   toolset: 'system',
   async execute(args, _ctx) {
-    if (!isWindows()) return windowsOnlyError('media_key');
+    if (!isWindows()) {
+      return windowsOnlyError('media_key', {
+        canStill: [
+          '`shell_exec` with `xdotool key XF86AudioPlay` on Linux X11',
+          '`shell_exec` with `osascript -e \'tell application "Spotify" to playpause\'` on macOS',
+          'Use `media_transport` if a layer-1 skill (Spotify Web API) is installed',
+        ],
+        cannotReliably: [
+          'Blind global VK_MEDIA_PLAY_PAUSE keystroke via SendKeys',
+        ],
+        fix:
+          'Run Aiden on Windows for direct media-key emission, or use the ' +
+          'platform-native helpers above via `shell_exec`.',
+      });
+    }
     const action = args.action as MediaAction;
     if (!ACTION_KEYS[action]) {
       return {

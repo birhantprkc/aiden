@@ -32,6 +32,9 @@ import {
   TRAIL_VERB_PAD,
   TRAIL_DETAIL_CAP,
 } from './display/toolTrail';
+// v4.1.3-essentials — capability card renderer (auth/platform failures).
+import { renderCapabilityCard } from './display/capabilityCard';
+import type { CapabilityCardData } from '../../providers/v4/types';
 // Phase v4.1-reply-formatting: skin-aware markdown renderer that
 // replaces marked-terminal's defaults with structured headers, lists,
 // code blocks, blockquotes, and links.
@@ -899,14 +902,33 @@ export class Display {
     const { icon, verb } = trailIconForTool(name);
     const glyph = useIcons ? icon : sk.applyColors('·', 'muted');
 
-    // Detail field: reuse previewToolArgs for scalar-field extraction.
-    const detail = truncDetail(previewToolArgs(args));
+    // Detail field: v4.1.4-media — consult `buildToolPreview` first so
+    // tools registered in `TOOL_PRIMARY_ARG` (media_transport → 'target',
+    // media_key → 'action', file_read → 'path', etc.) get their
+    // meaningful primary-arg preview instead of a JSON blob. Fall back
+    // to the generic `previewToolArgs` scan for tools the map doesn't
+    // know about so unregistered MCP tools etc. still render readably.
+    const mapped = buildToolPreview(name, args);
+    const detail = truncDetail(mapped ?? previewToolArgs(args));
+
+    // v4.1.3-essentials: live tool indicator. Capture wall-clock start
+    // so the running-row renderer can append an elapsed-time suffix
+    // ("running 3s…") after the first second. Sub-second tools render
+    // without the suffix — no flash of `running 0s` for fast paths.
+    const startedAt = Date.now();
 
     // Running row — muted pipe, raw icon, tool-colored verb, muted detail.
-    const runningRow = (): string =>
-      `${sk.applyColors(TRAIL_PIPE, 'muted')} ${glyph} ` +
-      `${sk.applyColors(padVerb(verb), 'tool')} ` +
-      `${sk.applyColors(detail, 'muted')}\n`;
+    // The optional `running Ns…` tail appears once the tool crosses the
+    // 1-second mark; the tick interval below redraws this row every 1s.
+    const runningRow = (): string => {
+      const elapsed = Date.now() - startedAt;
+      const liveSuffix = elapsed >= 1000
+        ? `  ${sk.applyColors(`running ${formatToolDuration(elapsed)}…`, 'muted')}`
+        : '';
+      return `${sk.applyColors(TRAIL_PIPE, 'muted')} ${glyph} ` +
+             `${sk.applyColors(padVerb(verb), 'tool')} ` +
+             `${sk.applyColors(detail, 'muted')}${liveSuffix}\n`;
+    };
 
     // Outcome row — entire line colored by outcome kind.
     const outcomeRow = (suffix: string, kind: ColorKindForBracket): string => {
@@ -921,30 +943,60 @@ export class Display {
     const isTty = !!out.isTTY;
     let printed = false;
 
+    // v4.1.3-essentials: tick handle for the live-elapsed update. Set
+    // when we start the interval; cleared by every terminal method
+    // (ok / fail / degraded / blocked / emptyFail / emptyRetry) AND by
+    // `retry` (retry is a state announcement and should hold static
+    // until the next state change — race-free).
+    let tickTimer: ReturnType<typeof setInterval> | null = null;
+    const stopTick = (): void => {
+      if (tickTimer !== null) {
+        clearInterval(tickTimer);
+        tickTimer = null;
+      }
+    };
+
     // Erase the last printed line (TTY only).
     const eraseLast = (): void => {
       if (isTty && printed) out.write('\x1b[1A\x1b[2K\r');
     };
 
     const writeFinal = (suffix: string, kind: ColorKindForBracket): void => {
+      stopTick();
       eraseLast();
       out.write(outcomeRow(suffix, kind));
       printed = true;
     };
 
     if (isTty) {
+      // v4.1.3-essentials (replaces v4.1.3-repl-polish streamInterrupted
+      // flag pattern): if a stream is active, fence off the current
+      // chunk BEFORE the running row writes. `commitStreamChunk` does
+      // its own newline-fencing + in-place rerender of the just-streamed
+      // chunk so this row lands cleanly on its own line below.
+      this.commitStreamChunk();
       out.write(runningRow());
       printed = true;
-      // v4.1.3-repl-polish bug1: signal the stream re-render path
-      // that an unaccounted-for write landed mid-stream so it skips
-      // the cursor-up + erase-to-EOS rerender (which would otherwise
-      // nuke this row on streamComplete).
-      this.streamInterrupted = true;
+      // v4.1.3-essentials: start the live-elapsed ticker. Fires every
+      // 1s; first tick at +1s, when `runningRow()` starts emitting the
+      // `running 1s…` suffix. Cleared by every terminal method via
+      // `stopTick()` — no leaked timers across the tool lifecycle.
+      // Tool dispatch in aidenAgent is sequential (one tool at a time
+      // per turn) so the assumption "running row is the last written
+      // line" holds for the whole tick lifetime; `eraseLast()` is safe.
+      tickTimer = setInterval(() => {
+        if (!printed) return;
+        eraseLast();
+        out.write(runningRow());
+      }, 1000);
     }
     // Non-TTY: hold off until completion (log lines carry final state).
+    // No tick — non-TTY sinks (pipes, CI logs) get one line per call
+    // with the final state; live updates would be noise in scrollback.
 
     return {
       ok(durationMs: number, retries = 0) {
+        stopTick();
         if (retries > 0) {
           // Showed retries — surface the eventual success in warn so the
           // user knows it took multiple attempts.
@@ -971,6 +1023,11 @@ export class Display {
         writeFinal(suffix, 'degraded');
       },
       retry(n: number, m: number) {
+        // v4.1.3-essentials: retry is a state-change announcement —
+        // freeze the row at the retry counter until next state change.
+        // Stopping the ticker prevents the next 1s tick from racing
+        // back over the retry counter with `running Ns…`.
+        stopTick();
         // Update the running row with retry count.
         eraseLast();
         const content =
@@ -1178,6 +1235,31 @@ export class Display {
     this.out.write(this.error(message, suggestion));
   }
 
+  /**
+   * v4.1.3-essentials: render a structured capability card. Used when
+   * a tool fails because a capability is missing (platform unsupported,
+   * auth not present, key env-var unset) and a generic error wouldn't
+   * give the user enough signal. The card lists what the user CAN
+   * still do, what's blocked, and a one-line fix.
+   *
+   * Delegates the layout to the pure renderer in `./display/capability-
+   * Card.ts`. This method is the I/O boundary — caller passes data, we
+   * write lines to the configured stdout. Trailing newline ensures the
+   * card sits clean above whatever renders next (typically the prompt).
+   */
+  capabilityCard(data: CapabilityCardData): void {
+    // v4.1.3-essentials: fence off any active stream chunk before the
+    // card writes so the chunk gets rerendered as markdown and the
+    // card lands below it on its own line. Same pattern as toolRow /
+    // streamToolIndicator.
+    this.commitStreamChunk();
+    const lines = renderCapabilityCard(data, (t, k) => this.applyColors(t, k));
+    for (const line of lines) {
+      this.out.write(line + '\n');
+    }
+    this.out.write('\n');
+  }
+
   // ── Phase 16c: streaming surface ─────────────────────────────────────
   // Tracks whether a streaming "Aiden" header has been written for the
   // current turn. `streamPartial` writes the header on the first call,
@@ -1195,18 +1277,6 @@ export class Display {
   // reprints the formatted output.
   private streamBuffer = '';
   private streamLineCount = 0;
-  /**
-   * v4.1.3-repl-polish bug1: tracks whether any non-streamPartial write
-   * happened during a stream cycle (a `toolRow` running/outcome row, a
-   * `streamToolIndicator` line, etc). When set, `streamComplete` skips
-   * the cursor-up + erase-to-end-of-screen re-render path — the erase
-   * walks back `streamLineCount` rows, but the cursor has descended
-   * further than that because the interruption writes weren't counted.
-   * Erasing then would nuke the tool rows along with the streamed body.
-   * Reset on each new stream cycle (in `streamPartial`'s first-call
-   * init block) and after `streamComplete` consumes it.
-   */
-  private streamInterrupted = false;
 
   /**
    * Append a streamed text fragment. Writes a styled "Aiden" header on
@@ -1227,11 +1297,6 @@ export class Display {
       this.streamHeaderShown = true;
       this.streamBuffer = '';
       this.streamLineCount = 0;
-      // v4.1.3-repl-polish bug1: fresh stream cycle — clear any
-      // interrupt flag left over from the prior cycle (the consume
-      // path in streamComplete also resets it, but a stream that
-      // never reaches completion shouldn't leave the flag stuck).
-      this.streamInterrupted = false;
     }
     this.out.write(text);
     this.streamLastEndedNewline = text.endsWith('\n');
@@ -1243,64 +1308,57 @@ export class Display {
   }
 
   /**
-   * Mark the end of a streaming turn. Adds a trailing newline if the
-   * stream didn't end with one so the next CLI line doesn't visually
-   * butt up against the model's last token. Resets the per-turn state
-   * so the next `streamPartial` re-emits the header.
+   * v4.1.3-essentials: rerender a buffered stream chunk in place. Walks
+   * the cursor back `lines` rows, erases to end-of-screen, and reprints
+   * the chunk as skin-aware markdown.
+   *
+   * Pure side-effect; returns nothing. Used by:
+   *   - `commitStreamChunk()`        — when a tool row interrupts the
+   *                                    stream, render the pre-tool
+   *                                    chunk before the row writes.
+   *   - `streamComplete()`           — final chunk at end of turn.
+   *
+   * Heuristic gate avoids flicker on plain prose (no structure → no
+   * rerender, no eraser fires). The catch block writes the RAW buffered
+   * text as a fallback if `marked` throws — without this the eraser
+   * would already have run and the body would silently vanish.
+   * v4.1.3-essentials raw-text fallback per "make state legible" thesis.
    */
-  streamComplete(): void {
-    if (!this.streamHeaderShown) return;
-    if (!this.streamLastEndedNewline) this.out.write('\n');
-
-    // Phase v4.1-reply-formatting: re-render the buffered stream as
-    // structured markdown — but ONLY when stdout is a TTY and the
-    // buffer actually contains markdown structure worth rendering.
-    // Plain prose with no headers / lists / fences gets left alone
-    // (no flicker, identical output). Otherwise we erase the raw
-    // streamed body via cursor-up + erase-line and reprint via the
-    // skin-aware renderer.
-    const buffered = this.streamBuffer;
-    const lines = this.streamLineCount;
-    // v4.1.3-repl-polish bug1: capture + drain the interrupt flag in
-    // lockstep with the other per-cycle stream state. Anything writing
-    // directly to stdout during the cycle (toolRow's running/outcome
-    // rows, streamToolIndicator) sets it; we use it below to decide
-    // whether the cursor-walk-up + erase rerender is safe.
-    const interrupted = this.streamInterrupted;
-    this.streamBuffer = '';
-    this.streamLineCount = 0;
-    this.streamHeaderShown = false;
-    this.streamLastEndedNewline = false;
-    this.streamInterrupted = false;
-
+  private tryRerenderInPlace(buffered: string, lines: number): void {
     if (!this.out.isTTY) return;
     if (process.env.AIDEN_NO_REFORMAT === '1') return;
-    // v4.1.3-repl-polish bug1: skip the rerender entirely when a tool
-    // row / indicator wrote mid-stream — the cursor has descended past
-    // what `lines` tracks, so `\x1b[<lines>F\x1b[J` would erase the
-    // tool rows along with the streamed body. Leaving the raw streamed
-    // text in place is the honest fallback (markdown formatting is a
-    // polish, not a correctness invariant).
-    if (interrupted) return;
-    // Cheap heuristic: only re-render when there's structure that
-    // benefits from formatting. Avoids flicker on short prose replies.
+    if (lines === 0) return;
+    // Cheap structural heuristic — only re-render when formatting
+    // actually helps. Plain prose chunks stay raw (no flicker).
+    //
+    // v4.1.3-essentials post-ship: inline `**bold**` and `` `code` ``
+    // added to the heuristic. Before this, a chunk that contained ONLY
+    // inline markdown (no headings / lists / code blocks) skipped
+    // rerender entirely, leaving the literal `**bold**` asterisks in
+    // user-visible output. The `paintBoldWhite` strong renderer was
+    // never invoked for those chunks.
+    //
+    // Patterns:
+    //   - `**bold**`: requires non-space immediately after the opening
+    //     `**` so `2 ** 3` math expressions don't false-positive.
+    //     Tolerates multi-line bold via `[\s\S]*?`.
+    //   - `` `code` ``: negative-lookarounds for the triple-backtick
+    //     fence so we don't double-trigger when ``` lines are present
+    //     (those already match the fence pattern above).
     const hasStructure =
       /^#{1,6}\s/m.test(buffered) ||
       /^\s*[-*+]\s/m.test(buffered) ||
       /^\s*\d+\.\s/m.test(buffered) ||
       /^>\s/m.test(buffered) ||
-      /```/.test(buffered);
+      /```/.test(buffered) ||
+      /\*\*\S[\s\S]*?\*\*/.test(buffered) ||
+      /(?<![`])`[^`\n]+`(?![`])/.test(buffered);
     if (!hasStructure) return;
 
     try {
-      // Erase the raw streamed body in place. We wrote `lines + 1`
-      // rows (header + body) — the header (`┃ Aiden`) stays, so we
-      // walk back `lines` rows and clear each.
-      // `\x1b[<n>F` = cursor-up-and-to-column-0 N times.
-      // `\x1b[J`    = erase from cursor to end of screen.
-      if (lines > 0) {
-        this.out.write(`\x1b[${lines}F\x1b[J`);
-      }
+      // \x1b[<n>F = cursor-up-and-to-column-0 N times.
+      // \x1b[J   = erase from cursor to end of screen.
+      this.out.write(`\x1b[${lines}F\x1b[J`);
       const formatted = this.markdown(buffered).trimEnd();
       const indented = formatted
         .split('\n')
@@ -1308,10 +1366,128 @@ export class Display {
         .join('\n');
       this.out.write(indented + '\n');
     } catch {
-      // If anything goes wrong with the re-render, leave the raw
-      // streamed text in place — graceful degradation beats flicker
-      // + corrupted output.
+      // Eraser already ran. v4.1.3-essentials: write the raw buffered
+      // text back so the body doesn't vanish silently. The user sees
+      // unformatted markdown rather than a missing reply — the honest
+      // failure mode.
+      this.out.write(buffered);
+      if (!buffered.endsWith('\n')) this.out.write('\n');
     }
+  }
+
+  /**
+   * v4.1.3-essentials: fence off the current stream chunk before a
+   * non-stream write (tool row, tool indicator, capability card) lands.
+   *
+   * Replaces the v4.1.3-repl-polish `streamInterrupted` flag pattern.
+   * Old pattern: set flag mid-stream → on streamComplete, check flag
+   * and SKIP rerender entirely (lost markdown on every tool-using
+   * turn). New pattern: at each interrupt point, eagerly rerender THIS
+   * chunk in place, then reset the per-chunk window so the next
+   * streamPartial starts a fresh count. The cursor is at the end of
+   * this chunk when commit fires, so `streamLineCount` is correct for
+   * the eraser — tool rows write below without being clobbered.
+   *
+   * Multi-chunk turns (model says X, calls tool, says Y, calls tool,
+   * says Z) get all three chunks rerendered as markdown.
+   *
+   * Idempotent: no-op when no stream cycle is active or when the buffer
+   * is empty (consecutive tool calls). Always ensures the cursor sits
+   * at start-of-line before returning so the caller can write its own
+   * row cleanly.
+   */
+  private commitStreamChunk(): void {
+    if (!this.streamHeaderShown) return;
+    // Ensure the streamed chunk ends with a newline so the interrupt
+    // row doesn't stick to mid-token text from the prior delta.
+    if (!this.streamLastEndedNewline) {
+      this.out.write('\n');
+      this.streamLastEndedNewline = true;
+      // The trailing newline we just wrote DOES bump the cursor's row,
+      // but only by 1 — and `streamLineCount` should reflect physical
+      // rows of the chunk. Add it so the eraser walks back the right
+      // amount.
+      this.streamLineCount += 1;
+    }
+
+    // v4.1.3-essentials boldwrap-fix: if the chunk ends mid-bold-pair
+    // (e.g. tool fired between the model emitting `**` and the closing
+    // `**`), splitting here would leave literal asterisks in the
+    // rerendered output and a matching orphan in the next chunk.
+    // `splitAtUnclosedBold` finds the last unmatched `**` and carves
+    // the buffer into two parts: the closed-bold prefix we CAN
+    // rerender now, and the carry tail that we keep for the next
+    // chunk (where the closing `**` will eventually arrive).
+    //
+    // Code-fence safety (carried in the helper): if the would-be
+    // unmatched `**` is inside an open ``` fence, we defer the whole
+    // chunk — bold-syntax inside code blocks isn't markdown bold and
+    // splitting there would corrupt the fence.
+    const split = splitAtUnclosedBold(this.streamBuffer);
+
+    if (split.carry === '') {
+      // Common case: buffer is balanced (or has no `**` at all).
+      // Same behavior as before — rerender the whole chunk in place
+      // and reset the per-chunk window.
+      this.tryRerenderInPlace(this.streamBuffer, this.streamLineCount);
+      this.streamBuffer = '';
+      this.streamLineCount = 0;
+      return;
+    }
+
+    // Split path: erase the WHOLE chunk (because the cursor is at the
+    // end of the full buffer), rerender the closed prefix, then
+    // re-emit the carry as raw text. The carry visibly stays on
+    // screen as raw `**Live tool indi`-style text — ugly for the
+    // ~milliseconds until the next streamPartial extends it past the
+    // closing `**`, at which point the next commit will rerender
+    // cleanly.
+    const rerenderableLines = countNewlines(split.rerenderable);
+    const carryLines        = this.streamLineCount - rerenderableLines;
+    if (this.out.isTTY && this.streamLineCount > 0) {
+      // \x1b[<n>F = cursor-up-and-to-column-0 N times.
+      // \x1b[J   = erase from cursor to end of screen.
+      this.out.write(`\x1b[${this.streamLineCount}F\x1b[J`);
+    }
+    // Rerender the closed prefix (handles its own heuristic gate
+    // internally — a prefix without structure stays raw, which is
+    // identical to the pre-split behavior).
+    this.tryRerenderInPlace(split.rerenderable, rerenderableLines);
+    // Re-emit the carry verbatim. It's intentionally raw because the
+    // unmatched `**` can't be rendered without its closing pair.
+    this.out.write(split.carry);
+    // Reset the per-chunk window to the carry only. Next streamPartial
+    // extends it; when the closing `**` lands, the next commit (or
+    // streamComplete) rerenders cleanly.
+    this.streamBuffer    = split.carry;
+    this.streamLineCount = carryLines;
+    this.streamLastEndedNewline = split.carry.endsWith('\n');
+  }
+
+  /**
+   * Mark the end of a streaming turn. Adds a trailing newline if the
+   * stream didn't end with one so the next CLI line doesn't visually
+   * butt up against the model's last token. Rerenders the FINAL chunk
+   * (post-last-tool prose, or the whole body if no tools fired this
+   * turn) and resets the per-turn state so the next `streamPartial`
+   * re-emits the header.
+   */
+  streamComplete(): void {
+    if (!this.streamHeaderShown) return;
+    if (!this.streamLastEndedNewline) {
+      this.out.write('\n');
+      this.streamLineCount += 1;
+    }
+    // Final chunk: same in-place rerender path as commitStreamChunk
+    // (factored shared helper). Tool-row interrupts have already
+    // committed their preceding chunks; what's left in the buffer here
+    // is the post-final-tool prose — typically the bulk of the
+    // user-visible body in well-behaved turns.
+    this.tryRerenderInPlace(this.streamBuffer, this.streamLineCount);
+    this.streamBuffer = '';
+    this.streamLineCount = 0;
+    this.streamHeaderShown = false;
+    this.streamLastEndedNewline = false;
   }
 
   /**
@@ -1335,16 +1511,16 @@ export class Display {
    * newline if the prior delta ran past column N without one.
    */
   streamToolIndicator(name: string): void {
+    // v4.1.3-essentials (replaces v4.1.3-repl-polish streamInterrupted
+    // flag pattern): fence off the streamed chunk before the indicator
+    // writes. `commitStreamChunk` handles the newline-or-not and
+    // in-place rerenders the pre-indicator chunk so this row lands
+    // below well-formed markdown rather than below raw streamed text.
+    this.commitStreamChunk();
     const sk = this.skin;
     const arrow = sk.getActive().glyphs?.arrow ?? '>';
-    const prefix = this.streamLastEndedNewline ? '' : '\n';
-    this.out.write(`${prefix}${sk.applyColors(`${arrow} ${name}…`, 'tool')}\n`);
+    this.out.write(`${sk.applyColors(`${arrow} ${name}…`, 'tool')}\n`);
     this.streamLastEndedNewline = true;
-    // v4.1.3-repl-polish bug1: an untracked row landed mid-stream —
-    // tell streamComplete to skip the cursor-up + erase-to-EOS rerender
-    // (it would otherwise erase this indicator + every tool outcome row
-    // that printed between deltas).
-    this.streamInterrupted = true;
   }
 }
 
@@ -1493,6 +1669,14 @@ export function previewToolArgs(args: unknown): string {
   } catch {
     serialized = String(obj);
   }
+  // v4.1.4-media: an empty object serializes to '{}'. Rendering that
+  // literal in the trail row is honest but ugly and reads as "buggy
+  // empty args". When the model legitimately passes an empty args
+  // object (e.g. `media_sessions({})`, `system_info()`), show nothing
+  // rather than the braces — `buildToolPreview` already does this for
+  // tools mapped in `TOOL_PRIMARY_ARG`; here we extend the same UX to
+  // any unmapped-tool fallback that bottoms out at `{}`.
+  if (serialized === '{}') return '';
   return truncToolArg(serialized);
 }
 
@@ -1500,6 +1684,86 @@ function truncToolArg(s: string): string {
   const flat = s.replace(/\s+/g, ' ').trim();
   if (flat.length <= TOOL_ROW_ARG_CAP) return flat;
   return flat.slice(0, TOOL_ROW_ARG_CAP - 1) + '…';
+}
+
+/**
+ * v4.1.3-essentials boldwrap-fix: count `\n` occurrences in `s`.
+ * Used by `commitStreamChunk` to recompute `streamLineCount` after
+ * splitting a buffer at an unclosed-bold boundary. Pure helper —
+ * exported for unit-test access.
+ */
+export function countNewlines(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i += 1) if (s[i] === '\n') n += 1;
+  return n;
+}
+
+/**
+ * v4.1.3-essentials boldwrap-fix: split a streamed-chunk buffer at the
+ * last unmatched `**` so the closed-bold prefix can be rerendered now
+ * and the open-bold tail can be carried into the next chunk.
+ *
+ * Returns `{ rerenderable, carry }`:
+ *   - rerenderable: the prefix with all `**` pairs balanced
+ *   - carry:        the suffix starting at the last unmatched `**`
+ *
+ * `carry === ''` signals "balanced — render the whole buffer". Caller
+ * uses this as the fast-path discriminator.
+ *
+ * Code-fence safety: if the buffer contains an UNCLOSED fenced code
+ * block (` ``` ` count is odd), defer the entire chunk by returning
+ * `{ rerenderable: '', carry: buffer }`. Bold-syntax inside code
+ * blocks is literal text — splitting there would corrupt the fence
+ * AND likely produce nonsensical rerender output. Trade-off: a chunk
+ * that ends mid-code-block doesn't rerender at all until the closing
+ * ``` arrives; acceptable because code blocks have their own
+ * styling (dark bg + left rail) that doesn't depend on the markdown
+ * rerender step.
+ *
+ * Pure function. Tested via `tests/v4/cli/display.test.ts`.
+ */
+export function splitAtUnclosedBold(
+  buffer: string,
+): { rerenderable: string; carry: string } {
+  // Fast path: no `**` at all → balanced.
+  if (!buffer.includes('**')) return { rerenderable: buffer, carry: '' };
+
+  // Code-fence safety: count triple-backtick fences. Odd = open fence,
+  // defer the whole buffer.
+  const fenceMatches = buffer.match(/```/g);
+  if (fenceMatches && fenceMatches.length % 2 === 1) {
+    return { rerenderable: '', carry: buffer };
+  }
+
+  // Count `**` occurrences. Even → balanced. Odd → there's an
+  // unmatched `**` — find the LAST one (the open).
+  const positions: number[] = [];
+  for (let i = 0; i < buffer.length - 1; i += 1) {
+    if (buffer[i] === '*' && buffer[i + 1] === '*') {
+      positions.push(i);
+      i += 1; // skip the second `*` so `***` doesn't double-count
+    }
+  }
+  if (positions.length % 2 === 0) {
+    return { rerenderable: buffer, carry: '' };
+  }
+
+  const lastUnmatched = positions[positions.length - 1];
+
+  // Inline-backtick safety: if the unmatched `**` sits inside an
+  // open single-backtick span on the same line, the `**` is literal
+  // code, not a bold marker. Defer the whole chunk.
+  const lineStart = buffer.lastIndexOf('\n', lastUnmatched) + 1;
+  const lineUpToBold = buffer.slice(lineStart, lastUnmatched);
+  const backticksOnLine = (lineUpToBold.match(/`/g) ?? []).length;
+  if (backticksOnLine % 2 === 1) {
+    return { rerenderable: '', carry: buffer };
+  }
+
+  return {
+    rerenderable: buffer.slice(0, lastUnmatched),
+    carry:        buffer.slice(lastUnmatched),
+  };
 }
 
 /**

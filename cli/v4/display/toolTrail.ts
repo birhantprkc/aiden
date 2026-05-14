@@ -104,9 +104,21 @@ const TRAIL_MAP: readonly TrailEntry[] = [
            'computer', 'upload_image', 'read_media_file'],
     icon: '🖥',  verb: 'capturing' },
 
-  // ── Media / launch / open ────────────────────────────────────────────
-  { keys: ['now_playing', 'app_launch', 'open_url', 'open',
-           'youtube_search', 'media'],
+  // ── Media control ────────────────────────────────────────────────────
+  // v4.1.4-media: the new three-layer media-control bundle.
+  // Listed BEFORE the launch category so substring matching on `media_*`
+  // tool names hits this category first — without this split, every
+  // media_* name's substring would collide with the 'media' key in the
+  // launch bucket and render as verb "launching".
+  { keys: ['media_key', 'media_sessions', 'media_transport',
+           'now_playing', 'youtube_search'],
+    icon: '▶',   verb: 'media'     },
+
+  // ── Media launch / open ──────────────────────────────────────────────
+  // Note: `'media'` as a substring key was removed in v4.1.4 because it
+  // false-matched the new media_* control tools above. Launch tools
+  // (`app_launch`, `open_url`, etc.) are explicit-keyed.
+  { keys: ['app_launch', 'open_url', 'open', 'launch'],
     icon: '▶',   verb: 'launching' },
 
   // ── Deploy / build / publish ─────────────────────────────────────────

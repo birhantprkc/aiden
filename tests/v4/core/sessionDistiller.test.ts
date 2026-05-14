@@ -536,3 +536,147 @@ describe('distillSession — boilerplate-resistance smoke (bug-Y regression guar
     expect(dist.partial).toBeUndefined();        // honest empty, NOT partial
   });
 });
+
+// ── v4.1.3-essentials distillation-fix — onDiagnostic callback ──────────────
+//
+// The `/quit` distillation can fail silently in three ways: timeout,
+// auxiliary-call throw, or unparseable JSON. Before this fix all three
+// produced an identical `partial:true + empty` result with no signal
+// about WHICH failure fired. The onDiagnostic callback emits a
+// human-readable line per failure class so the caller (chatSession)
+// can surface the root cause via display.dim.
+
+describe('distillSession — onDiagnostic callback (v4.1.3-essentials)', () => {
+  it('fires on timeout with the exact ms in the message', async () => {
+    const aux = makeAux({ content: '{}', delayMs: 200 });
+    const diags: string[] = [];
+    await distillSession({
+      sessionId: 'diag-1',
+      startedAt: '2026-05-13T00:00:00Z',
+      exitPath:  'quit',
+      userTurns: 1,
+      messages:  msgs,
+      toolTrace: [],
+      auxiliaryClient: aux as unknown as Parameters<typeof distillSession>[0]['auxiliaryClient'],
+      timeoutMs: 25,
+      onDiagnostic: (m) => diags.push(m),
+    });
+    expect(diags).toHaveLength(1);
+    expect(diags[0]).toBe('auxiliary call timed out after 25ms');
+  });
+
+  it('fires on auxiliary throw with the error message inline', async () => {
+    const aux = makeAux({ rejectWith: new Error('aux exploded mid-call') });
+    const diags: string[] = [];
+    await distillSession({
+      sessionId: 'diag-2',
+      startedAt: '2026-05-13T00:00:00Z',
+      exitPath:  'crash',
+      userTurns: 1,
+      messages:  msgs,
+      toolTrace: [],
+      auxiliaryClient: aux as unknown as Parameters<typeof distillSession>[0]['auxiliaryClient'],
+      onDiagnostic: (m) => diags.push(m),
+    });
+    expect(diags).toHaveLength(1);
+    expect(diags[0]).toBe('auxiliary call failed: aux exploded mid-call');
+  });
+
+  it('fires on unparseable JSON with a first-200-chars preview', async () => {
+    const aux = makeAux({ content: 'sorry, I cannot output JSON today — here is prose instead' });
+    const diags: string[] = [];
+    await distillSession({
+      sessionId: 'diag-3',
+      startedAt: '2026-05-13T00:00:00Z',
+      exitPath:  'quit',
+      userTurns: 1,
+      messages:  msgs,
+      toolTrace: [],
+      auxiliaryClient: aux as unknown as Parameters<typeof distillSession>[0]['auxiliaryClient'],
+      onDiagnostic: (m) => diags.push(m),
+    });
+    expect(diags).toHaveLength(1);
+    expect(diags[0]).toMatch(/^auxiliary returned unparseable JSON \(first 200 chars: /);
+    expect(diags[0]).toContain('sorry, I cannot output JSON today');
+  });
+
+  it('truncates the JSON preview to 200 chars and flattens newlines', async () => {
+    const huge = 'a'.repeat(300) + '\nb\nc';
+    const aux = makeAux({ content: huge });
+    const diags: string[] = [];
+    await distillSession({
+      sessionId: 'diag-4',
+      startedAt: '2026-05-13T00:00:00Z',
+      exitPath:  'quit',
+      userTurns: 1,
+      messages:  msgs,
+      toolTrace: [],
+      auxiliaryClient: aux as unknown as Parameters<typeof distillSession>[0]['auxiliaryClient'],
+      onDiagnostic: (m) => diags.push(m),
+    });
+    // Header "auxiliary returned unparseable JSON (first 200 chars: " (54 chars)
+    // + 200-char content slice + `)` = 255 total. Header length is an
+    // implementation detail; what matters is the cap and the no-newlines.
+    expect(diags[0].length).toBeLessThanOrEqual(260);
+    expect(diags[0]).toContain('a'.repeat(200)); // the full slice survived
+    expect(diags[0]).not.toContain('a'.repeat(201)); // but no more than that
+    expect(diags[0]).not.toContain('\n');
+  });
+
+  it('does NOT fire on a successful clean-JSON distillation', async () => {
+    const aux = makeAux({
+      content: JSON.stringify({
+        bullets:    ['ok'],
+        decisions:  [],
+        open_items: [],
+        keywords:   [],
+      }),
+    });
+    const diags: string[] = [];
+    const dist = await distillSession({
+      sessionId: 'diag-5',
+      startedAt: '2026-05-13T00:00:00Z',
+      exitPath:  'quit',
+      userTurns: 1,
+      messages:  msgs,
+      toolTrace: [],
+      auxiliaryClient: aux as unknown as Parameters<typeof distillSession>[0]['auxiliaryClient'],
+      onDiagnostic: (m) => diags.push(m),
+    });
+    expect(dist.partial).toBeUndefined();
+    expect(diags).toEqual([]);
+  });
+
+  it('swallows throws from a buggy onDiagnostic sink — distillation still ships', async () => {
+    const aux = makeAux({ rejectWith: new Error('aux failed') });
+    const dist = await distillSession({
+      sessionId: 'diag-6',
+      startedAt: '2026-05-13T00:00:00Z',
+      exitPath:  'quit',
+      userTurns: 1,
+      messages:  msgs,
+      toolTrace: [{ name: 'file_write', result: { path: '/tmp/x' } } as HonestyTraceEntry],
+      auxiliaryClient: aux as unknown as Parameters<typeof distillSession>[0]['auxiliaryClient'],
+      onDiagnostic: () => { throw new Error('sink is broken'); },
+    });
+    // Diagnostic sink threw but distillation still produced a valid
+    // partial result with deterministic fields populated.
+    expect(dist.partial).toBe(true);
+    expect(dist.files_touched).toEqual(['/tmp/x']);
+  });
+
+  it('absent onDiagnostic — no crash on any failure path', async () => {
+    const aux = makeAux({ rejectWith: new Error('aux failed') });
+    const dist = await distillSession({
+      sessionId: 'diag-7',
+      startedAt: '2026-05-13T00:00:00Z',
+      exitPath:  'quit',
+      userTurns: 1,
+      messages:  msgs,
+      toolTrace: [],
+      auxiliaryClient: aux as unknown as Parameters<typeof distillSession>[0]['auxiliaryClient'],
+      // no onDiagnostic
+    });
+    expect(dist.partial).toBe(true);
+  });
+});

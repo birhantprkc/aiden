@@ -103,7 +103,41 @@ export const model: SlashCommand = {
         return {};
       }
     }
-    ctx.display.success(`Now using ${providerId}:${modelId}`);
+
+    // v4.1.3-prebump: persist the selection to config.yaml so the NEXT
+    // boot honours the user's choice. Without this, `/model` only
+    // updated the live session — and the persisted `model.provider /
+    // model.modelId` keys (which Case 3 in providerBootSelector
+    // consults first) silently kept their stale values from the
+    // previous wizard run. Result: every reboot snapped the user back
+    // to the wizard's original pick (typically groq + llama-3.3-70b),
+    // confusing /model into looking like a "session-only" switch.
+    //
+    // The `aiden model` CLI subcommand (aidenCLI.ts:1773-1777) has
+    // always persisted; this brings the REPL `/model` path in line.
+    // Best-effort: if `ctx.config` isn't plumbed (test harness, etc.)
+    // we still succeeded for the live session — emit a subtle warning
+    // instead of failing the whole switch.
+    let persisted = false;
+    if (ctx.config) {
+      try {
+        ctx.config.set('model.provider', providerId);
+        ctx.config.set('model.modelId', modelId);
+        await ctx.config.save();
+        persisted = true;
+      } catch (err) {
+        ctx.display.warn(
+          `Switched the live session but could not persist to config.yaml: ` +
+          `${(err as Error).message}. Next boot may revert.`,
+        );
+      }
+    }
+
+    ctx.display.success(
+      persisted
+        ? `Now using ${providerId}:${modelId}  (saved to config.yaml)`
+        : `Now using ${providerId}:${modelId}  (session only — not persisted)`,
+    );
     return {};
   },
 };

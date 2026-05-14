@@ -252,3 +252,115 @@ describe('Doctor — runDoctor aggregator', () => {
     expect(report.totalMs).toBeLessThan(5_000);
   });
 });
+
+// ── v4.1.3-essentials doctor-polish: sessionCounterResults ───────────────
+//
+// Adapter that folds the live agent's three session-scoped counter
+// surfaces (skill enforcement / URL provenance / empty response) into
+// CheckResult rows so they render inside the grouped health box as a
+// "Session counters" group instead of as orphan `display.write` lines
+// after the box closes.
+//
+// Outcome rule: all-zero per row → passing (no suggestion attached).
+// Any non-zero → passed:true + suggestion → outcomeBucket() routes
+// to 'warning' (yellow). Simple, predictable, accepts the minor noise
+// of `recovered>0` flagging as warning.
+
+import { sessionCounterResults } from '../../../cli/v4/doctor';
+
+function makeAgent(opts: {
+  skill?: { armed?: number; preArmed?: number; recovered?: number; failed?: number };
+  url?:   { blocked?: number; recovered?: number; failed?: number };
+  empty?: { detected?: number; retried?: number; recovered?: number };
+}) {
+  return {
+    getSkillEnforcementMetrics: () => ({
+      armed:     opts.skill?.armed ?? 0,
+      preArmed:  opts.skill?.preArmed ?? 0,
+      recovered: opts.skill?.recovered ?? 0,
+      failed:    opts.skill?.failed ?? 0,
+    }),
+    getUrlProvenanceMetrics: () => ({
+      blocked:   opts.url?.blocked ?? 0,
+      recovered: opts.url?.recovered ?? 0,
+      failed:    opts.url?.failed ?? 0,
+    }),
+    getEmptyResponseMetrics: () => ({
+      detected:  opts.empty?.detected ?? 0,
+      retried:   opts.empty?.retried ?? 0,
+      recovered: opts.empty?.recovered ?? 0,
+    }),
+  };
+}
+
+describe('sessionCounterResults (v4.1.3-essentials doctor-polish)', () => {
+  it('undefined agent → empty array (CLI doctor / no live agent)', () => {
+    expect(sessionCounterResults(undefined)).toEqual([]);
+  });
+
+  it('all-zero session: 3 rows, all passing, no suggestion', () => {
+    const rows = sessionCounterResults(makeAgent({}));
+    expect(rows).toHaveLength(3);
+    for (const r of rows) {
+      expect(r.group).toBe('Session counters');
+      expect(r.passed).toBe(true);
+      expect(r.suggestion).toBeUndefined();
+    }
+    // Sanity: row order is skill / url / empty.
+    expect(rows.map((r) => r.name)).toEqual([
+      'skill enforcement',
+      'url provenance',
+      'empty response',
+    ]);
+  });
+
+  it('all-zero session: message format readable + matches the counter shape', () => {
+    const rows = sessionCounterResults(makeAgent({}));
+    expect(rows[0].message).toBe('armed=0, pre-armed=0, recovered=0, failed=0');
+    expect(rows[1].message).toBe('blocked=0, recovered=0, failed=0');
+    expect(rows[2].message).toBe('detected=0, retried=0, recovered=0');
+  });
+
+  it('skill enforcement non-zero: row gets a suggestion (→ warning bucket)', () => {
+    const rows = sessionCounterResults(makeAgent({ skill: { armed: 2, recovered: 1 } }));
+    const skillRow = rows.find((r) => r.name === 'skill enforcement');
+    expect(skillRow?.passed).toBe(true);
+    expect(skillRow?.suggestion).toBeTruthy();
+    expect(skillRow?.message).toContain('armed=2');
+    expect(skillRow?.message).toContain('recovered=1');
+    // Other rows still all-zero → no suggestion.
+    const urlRow = rows.find((r) => r.name === 'url provenance');
+    expect(urlRow?.suggestion).toBeUndefined();
+  });
+
+  it('URL provenance non-zero: row gets a suggestion', () => {
+    const rows = sessionCounterResults(makeAgent({ url: { blocked: 1 } }));
+    const urlRow = rows.find((r) => r.name === 'url provenance');
+    expect(urlRow?.suggestion).toBeTruthy();
+    expect(urlRow?.message).toContain('blocked=1');
+  });
+
+  it('empty response non-zero: row gets a suggestion', () => {
+    const rows = sessionCounterResults(makeAgent({ empty: { detected: 1, recovered: 1 } }));
+    const emptyRow = rows.find((r) => r.name === 'empty response');
+    // detected=1 recovered=1 — fully recovered, BUT the simple-rule
+    // classifier still treats any non-zero as warning. Documented
+    // tradeoff in the adapter's docstring.
+    expect(emptyRow?.suggestion).toBeTruthy();
+    expect(emptyRow?.message).toContain('detected=1');
+  });
+
+  it('mixed: only the non-zero rows warn; clean rows stay passing', () => {
+    const rows = sessionCounterResults(
+      makeAgent({
+        skill: { failed: 1 },        // non-zero
+        url: {},                     // all-zero
+        empty: { detected: 2 },      // non-zero
+      }),
+    );
+    const warnNames = rows.filter((r) => r.suggestion).map((r) => r.name);
+    expect(warnNames).toEqual(['skill enforcement', 'empty response']);
+    const passName = rows.find((r) => !r.suggestion)?.name;
+    expect(passName).toBe('url provenance');
+  });
+});

@@ -54,15 +54,50 @@ Replace the clipboard with new text. Handles multi-line strings safely
 { "tool": "clipboard_write", "input": { "text": "Hello, world!" } }
 ```
 
+### media_sessions
+Enumerate every Windows media session registered with the OS (Spotify,
+YouTube in browser, VLC, etc.). One entry per app, with which one is
+the OS-routed target for global media keys. Use this BEFORE
+`media_transport` when controlling a specific app.
+```json
+{ "tool": "media_sessions", "input": {} }
+```
+
+### media_transport
+Verified play / pause / skip against a specific GSMTC media session.
+Targets by `AppUserModelId` substring (case-insensitive — "spotify"
+matches `Spotify.exe`), then by track title as a softer fallback. Omit
+`target` to act on the OS-routed current session. Returns OS-level
+success/failure — NOT a blind keystroke like `media_key`.
+```json
+{ "tool": "media_transport", "input": { "action": "pause", "target": "spotify" } }
+{ "tool": "media_transport", "input": { "action": "play",  "target": "spotify" } }
+{ "tool": "media_transport", "input": { "action": "next",  "target": "youtube" } }
+{ "tool": "media_transport", "input": { "action": "toggle" } }
+```
+
 ### media_key
-Send a media-control key to the active media session (Spotify, YouTube
-in browser, Windows Media Player, etc.). Pair with `now_playing` to
-inspect state first.
+Blind global media keypress (`VK_MEDIA_PLAY_PAUSE` and friends). Layer-3
+fallback for the rare case where neither a semantic API nor GSMTC can
+act. Prefer `media_transport` whenever the user names an app — this
+tool returns `degraded:true` because Windows doesn't surface the SMTC
+routing outcome to user-mode, so we can't verify any app received it.
 ```json
 { "tool": "media_key", "input": { "action": "play_pause" } }
 { "tool": "media_key", "input": { "action": "next" } }
 { "tool": "media_key", "input": { "action": "previous" } }
 { "tool": "media_key", "input": { "action": "stop" } }
+```
+
+### app_input
+Focus a Windows application by process name and send a SendKeys
+sequence to it. Escape hatch when GSMTC doesn't enumerate the surface
+("press space in Chrome to pause this YouTube tab"). Always returns
+`degraded:true` — SendKeys cannot verify receipt at the target window.
+```json
+{ "tool": "app_input", "input": { "app": "chrome", "keys": "{SPACE}" } }
+{ "tool": "app_input", "input": { "app": "notepad", "keys": "Hello{ENTER}" } }
+{ "tool": "app_input", "input": { "app": "Spotify", "keys": "^{RIGHT}" } }
 ```
 
 ### volume_set
@@ -126,9 +161,24 @@ turn into common requests.
 1. `os_process_list` with `name: "<substring>"` → returns matching processes
 2. If `count === 0` → tell the user honestly, suggest `app_launch`
 
-**Media control workflow:**
-1. `now_playing` → see what's currently playing
-2. `media_key` → control it (play_pause / next / previous / stop)
+## Media control — strict order
+
+1. If the user names an app ("Spotify", "YouTube", "VLC") — ALWAYS try
+   `media_transport({action, target})` first. Verified, OS-confirmed.
+2. If `media_transport` returns `NoSession` OR the user didn't name an app
+   — fall back to `media_key({action})`. Blind global keystroke, returns
+   `degraded:true` because Windows can't tell us if anything received it.
+3. If GSMTC doesn't enumerate the surface at all (e.g. a YouTube tab the
+   browser hasn't registered with SMTC) — last resort: `app_input({app,
+   keys})` to focus the window and send a keystroke directly.
+
+Never call `media_key` and `media_transport` in the same turn — redundant.
+First call gives you the answer; second is noise the user has to read.
+
+Honesty contract:
+- `media_transport` success is OS-confirmed → trail row is silent (success).
+- `media_key` and `app_input` always report `degraded:true` → yellow trail
+  row, because neither can verify receipt at the target app.
 
 **Volume change with feedback:**
 1. `volume_set` → returns the resulting volume percent in `result`

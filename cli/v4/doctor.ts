@@ -29,8 +29,54 @@ import type { Display } from './display';
 import { boxBottom, boxLine, boxTopTitled, visibleLength } from './box';
 import { detectBackend, missingBackendMessage, listKnownBackends } from '../../core/voice/audioBackend';
 
+/**
+ * v4.1.3-essentials doctor-polish: stable group identifiers used by the
+ * renderer to group checks under section headers. Order here is the
+ * display order — Providers first (most likely to fail / matter most),
+ * then Inference, then the supporting infrastructure groups.
+ *
+ * Optional sections (Subsystem health / Skill outcomes / Provider
+ * liveness) get their own groups appended after the main set.
+ */
+export type DoctorGroup =
+  | 'Providers'
+  | 'Inference'
+  | 'System tools'
+  | 'Storage'
+  | 'Voice'
+  | 'Updates'
+  | 'Subsystem health'
+  | 'Skill outcomes'
+  | 'Session counters'
+  | 'Provider liveness';
+
+/**
+ * Display order for groups. Renderer iterates this list rather than
+ * the order checks appear in the results array — keeps the visual
+ * hierarchy stable even if `runDoctor` reorders its check sequence.
+ */
+export const DOCTOR_GROUP_ORDER: readonly DoctorGroup[] = [
+  'Providers',
+  'Inference',
+  'System tools',
+  'Storage',
+  'Voice',
+  'Updates',
+  'Subsystem health',
+  'Skill outcomes',
+  // v4.1.3-essentials doctor-polish: session counters land just
+  // above provider liveness — they're agent-loop telemetry, distinct
+  // from skill outcomes (per-skill stats) and subsystem health
+  // (per-subsystem error tracking).
+  'Session counters',
+  'Provider liveness',
+];
+
 export interface CheckResult {
   name: string;
+  /** v4.1.3-essentials doctor-polish: group key the renderer uses to
+   *  bucket this row under a section header. */
+  group: DoctorGroup;
   passed: boolean;
   message: string;
   suggestion?: string;
@@ -92,8 +138,64 @@ export interface DoctorOptions {
 }
 
 /**
- * Phase v4.1.2-slice3: render the Subsystem health section. Decision
- * tree (per slice3 Phase 3 Q4):
+ * v4.1.3-essentials doctor-polish: convert the subsystem-health
+ * registry snapshot into CheckResult rows so they render inside the
+ * grouped health box alongside the other checks. Returns an empty
+ * array when the registry is undefined / empty so the renderer skips
+ * the group cleanly (DOCTOR_GROUP_ORDER drops empty groups).
+ *
+ * One row per subsystem, plus a fixed "(not instrumented yet)" row
+ * for HonestyEnforcement — same convention as the legacy section
+ * renderer below.
+ */
+export function subsystemHealthResults(
+  registry: import('../../core/v4/subsystemHealth').SubsystemHealthRegistry | undefined,
+): CheckResult[] {
+  if (!registry) return [];
+  const snaps = registry.snapshot();
+  if (snaps.length === 0) return [];
+  const out: CheckResult[] = [];
+  for (const s of snaps) {
+    const passed = s.totalErrors === 0;
+    const stats = `${s.totalCalls} call${s.totalCalls === 1 ? '' : 's'}, ${s.totalErrors} error${s.totalErrors === 1 ? '' : 's'}`;
+    let message = stats;
+    let suggestion: string | undefined;
+    if (s.lastError) {
+      const ago = humanAge(Date.now() - s.lastError.at.getTime());
+      const streak = s.lastError.consecutive > 1
+        ? ` (${s.lastError.consecutive} consecutive)`
+        : '';
+      message = `${stats}${streak}`;
+      suggestion = `last ${ago} ago: "${s.lastError.message}"`;
+    }
+    out.push({
+      name: s.subsystem,
+      group: 'Subsystem health',
+      passed,
+      message,
+      ...(suggestion ? { suggestion } : {}),
+    });
+  }
+  // Slice3 audit decision: HonestyEnforcement was deliberately not
+  // instrumented (pure-pattern path has no failure surface). Surface
+  // that explicitly so users know the gap is known, not forgotten.
+  out.push({
+    name: 'honesty',
+    group: 'Subsystem health',
+    passed: true,
+    message: '(not instrumented yet)',
+  });
+  return out;
+}
+
+/**
+ * Phase v4.1.2-slice3: render the Subsystem health section.
+ *
+ * v4.1.3-essentials doctor-polish: kept for back-compat with any
+ * direct callers but the in-REPL `/doctor` path now uses
+ * `subsystemHealthResults()` and renders inline via the grouped box.
+ *
+ * Decision tree (per slice3 Phase 3 Q4):
  *   - registry undefined → render nothing (no live state to report)
  *   - all subsystems healthy → one-line green summary
  *   - any degradation → expand block with last-error per failed sub
@@ -151,9 +253,157 @@ function humanAge(ms: number): string {
 }
 
 /**
- * Phase v4.1.2-slice4: render the Skill outcomes section. Per Q3
- * decision: silent on empty state (no tracker, or no skills tracked
- * yet) — doctor output for healthy systems stays short.
+ * v4.1.3-essentials doctor-polish: convert the skill-outcome tracker
+ * snapshot into CheckResult rows so they render inside the grouped
+ * health box. Empty tracker → empty array → group dropped by renderer.
+ *
+ * One row per top-N skill (sorted by load count). Skills with at
+ * least one failure render as `passed:false` so they get the red
+ * `✗` icon and a hint line with the last-error message.
+ */
+export function skillOutcomeResults(
+  tracker: import('../../core/v4/skillOutcomeTracker').SkillOutcomeTracker | undefined,
+  topN = 5,
+): CheckResult[] {
+  if (!tracker) return [];
+  const snaps = tracker.snapshot();
+  if (snaps.length === 0) return [];
+  const out: CheckResult[] = [];
+  for (const s of snaps.slice(0, topN)) {
+    const attributed = s.toolSuccesses + s.toolFailures;
+    const rate = attributed === 0
+      ? '—'
+      : `${Math.round((s.toolSuccesses / attributed) * 100)}% success`;
+    const last = s.lastUsed
+      ? `, last ${humanAge(Date.now() - new Date(s.lastUsed).getTime())} ago`
+      : '';
+    const message = `loaded ${s.loaded}, ${s.toolSuccesses} ok, ${s.toolFailures} err (${rate})${last}`;
+    const passed = s.toolFailures === 0;
+    out.push({
+      name: s.skillName,
+      group: 'Skill outcomes',
+      passed,
+      message,
+      ...(s.lastError && !passed
+        ? { suggestion: `last failure: "${s.lastError.message}"` }
+        : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * v4.1.3-essentials doctor-polish: convert the live agent's three
+ * session-scoped counter surfaces (skill enforcement, URL provenance,
+ * empty response) into `CheckResult` rows so they render inside the
+ * grouped health box as a "Session counters" section.
+ *
+ * Previously these three counters emitted as orphan `display.write`
+ * lines AFTER the box closed — visually disconnected from the rest
+ * of /doctor's output. Now they're inline as their own group.
+ *
+ * Outcome rule (per Q-B default): passing when ALL counters in a
+ * row are zero (clean session); warning when ANY counter is non-zero
+ * (worth a look). Note: a healthy session with `recovered>0`
+ * registers as warning under this rule — acceptable noise in
+ * exchange for a simple predictable classifier.
+ *
+ * `agent` is the live AidenAgent (or a stub with the three
+ * `getXMetrics()` methods). When undefined (CLI doctor from a fresh
+ * process), the helper returns `[]` and the group is dropped by the
+ * renderer — identical to subsystem-health / skill-outcomes handling.
+ */
+export interface SessionCountersSource {
+  getSkillEnforcementMetrics(): {
+    armed:     number;
+    preArmed:  number;
+    recovered: number;
+    failed:    number;
+  };
+  getUrlProvenanceMetrics(): {
+    blocked:   number;
+    recovered: number;
+    failed:    number;
+  };
+  getEmptyResponseMetrics(): {
+    detected:  number;
+    retried:   number;
+    recovered: number;
+  };
+}
+
+export function sessionCounterResults(
+  agent: SessionCountersSource | undefined,
+): CheckResult[] {
+  if (!agent) return [];
+
+  const s = agent.getSkillEnforcementMetrics();
+  const u = agent.getUrlProvenanceMetrics();
+  const e = agent.getEmptyResponseMetrics();
+
+  // Same all-zero classifier per row — keeps the rule symmetric
+  // across the three counter sources even though their internal
+  // semantics differ.
+  const allZero = (vals: readonly number[]): boolean =>
+    vals.every((v) => v === 0);
+
+  const rows: CheckResult[] = [];
+
+  // ── skill enforcement ─────────────────────────────────────────────
+  {
+    const passed = allZero([s.armed, s.preArmed, s.recovered, s.failed]);
+    rows.push({
+      name: 'skill enforcement',
+      group: 'Session counters',
+      passed: true,
+      message:
+        `armed=${s.armed}, pre-armed=${s.preArmed}, ` +
+        `recovered=${s.recovered}, failed=${s.failed}`,
+      // Suggestion attached only when non-zero so outcomeBucket()
+      // routes the row to warning (yellow) rather than passing (green).
+      // Text is concise — full counters already in `message`.
+      ...(passed ? {} : { suggestion: 'guard fired this session — review if any failed > 0' }),
+    });
+  }
+
+  // ── URL provenance ────────────────────────────────────────────────
+  {
+    const passed = allZero([u.blocked, u.recovered, u.failed]);
+    rows.push({
+      name: 'url provenance',
+      group: 'Session counters',
+      passed: true,
+      message:
+        `blocked=${u.blocked}, recovered=${u.recovered}, failed=${u.failed}`,
+      ...(passed ? {} : { suggestion: 'open_url provenance gate fired this session' }),
+    });
+  }
+
+  // ── empty response ────────────────────────────────────────────────
+  {
+    const passed = allZero([e.detected, e.retried, e.recovered]);
+    rows.push({
+      name: 'empty response',
+      group: 'Session counters',
+      passed: true,
+      message:
+        `detected=${e.detected}, retried=${e.retried}, recovered=${e.recovered}`,
+      ...(passed ? {} : { suggestion: 'provider emitted empty turn(s) this session' }),
+    });
+  }
+
+  return rows;
+}
+
+/**
+ * Phase v4.1.2-slice4: render the Skill outcomes section.
+ *
+ * v4.1.3-essentials doctor-polish: kept for back-compat. The in-REPL
+ * `/doctor` path now uses `skillOutcomeResults()` and renders inline
+ * via the grouped box.
+ *
+ * Per Q3 decision: silent on empty state (no tracker, or no skills
+ * tracked yet) — doctor output for healthy systems stays short.
  *
  * Output (when not empty): top N skills sorted by load count, with
  * total observations and success percentage. Last-error message
@@ -354,6 +604,7 @@ export async function checkConfigFile(paths: AidenPaths): Promise<CheckResult> {
     await fs.access(paths.configYaml);
     return {
       name: 'config file',
+      group: 'Storage',
       passed: true,
       message: `found at ${paths.configYaml}`,
       durationMs: Date.now() - t0,
@@ -361,6 +612,7 @@ export async function checkConfigFile(paths: AidenPaths): Promise<CheckResult> {
   } catch {
     return {
       name: 'config file',
+      group: 'Storage',
       passed: false,
       message: `missing at ${paths.configYaml}`,
       suggestion: 'run `aiden setup` to create one',
@@ -385,6 +637,7 @@ export function checkProviderAuth(env: NodeJS.ProcessEnv): CheckResult {
   if (present.length === 0) {
     return {
       name: 'provider auth',
+      group: 'Providers',
       passed: false,
       message: 'no provider API key found in environment',
       suggestion: 'run `aiden setup` and pick a provider, or set ANTHROPIC_API_KEY',
@@ -393,6 +646,7 @@ export function checkProviderAuth(env: NodeJS.ProcessEnv): CheckResult {
   }
   return {
     name: 'provider auth',
+    group: 'Providers',
     passed: true,
     message: `${present.length} provider key(s) present (${present.join(', ')})`,
     durationMs: Date.now() - t0,
@@ -406,6 +660,7 @@ export async function checkOllamaReachable(opts: {
   const t0 = Date.now();
   const fallback: CheckResult = {
     name: 'ollama reachable',
+    group: 'Inference',
     passed: false,
     message: 'no response from http://localhost:11434',
     suggestion: 'install Ollama from https://ollama.com or skip if you only use cloud providers',
@@ -424,6 +679,7 @@ export async function checkOllamaReachable(opts: {
         }
         return {
           name: 'ollama reachable',
+          group: 'Inference',
           passed: true,
           message: 'Ollama responding on :11434',
           durationMs: Date.now() - t0,
@@ -448,6 +704,7 @@ export async function checkPythonAvailable(opts: {
   const t0 = Date.now();
   const fallback: CheckResult = {
     name: 'python available',
+    group: 'System tools',
     passed: false,
     message: 'python not found on PATH',
     suggestion: 'install python 3.10+ — required for graphify and a few skills',
@@ -461,6 +718,7 @@ export async function checkPythonAvailable(opts: {
         if (res.ok) {
           return {
             name: 'python available',
+            group: 'System tools' as DoctorGroup,
             passed: true,
             message: res.stdout || `${bin} present`,
             durationMs: Date.now() - t0,
@@ -485,6 +743,7 @@ export async function checkDockerAvailable(opts: {
       if (res.ok) {
         return {
           name: 'docker available',
+          group: 'System tools' as DoctorGroup,
           passed: true,
           message: res.stdout || 'docker present',
           durationMs: Date.now() - t0,
@@ -492,6 +751,7 @@ export async function checkDockerAvailable(opts: {
       }
       return {
         name: 'docker available',
+        group: 'System tools' as DoctorGroup,
         passed: false,
         message: 'docker not found on PATH',
         suggestion: 'optional — install Docker Desktop if you want sandboxed tool execution',
@@ -501,6 +761,7 @@ export async function checkDockerAvailable(opts: {
     opts.timeoutMs,
     {
       name: 'docker available',
+      group: 'System tools' as DoctorGroup,
       passed: false as const,
       message: 'docker probe timed out',
       durationMs: Date.now() - t0,
@@ -519,6 +780,7 @@ export async function checkNpxAvailable(opts: {
       if (res.ok) {
         return {
           name: 'npx available',
+          group: 'System tools' as DoctorGroup,
           passed: true,
           message: `npx ${res.stdout}`,
           durationMs: Date.now() - t0,
@@ -526,6 +788,7 @@ export async function checkNpxAvailable(opts: {
       }
       return {
         name: 'npx available',
+        group: 'System tools' as DoctorGroup,
         passed: false,
         message: 'npx not found on PATH',
         suggestion: 'install Node.js 20+ — required for npm-published MCP servers',
@@ -535,6 +798,7 @@ export async function checkNpxAvailable(opts: {
     opts.timeoutMs,
     {
       name: 'npx available',
+      group: 'System tools' as DoctorGroup,
       passed: false as const,
       message: 'npx probe timed out',
       durationMs: Date.now() - t0,
@@ -549,6 +813,7 @@ export async function checkSkillsDir(paths: AidenPaths): Promise<CheckResult> {
     if (!stat.isDirectory()) {
       return {
         name: 'skills dir',
+        group: 'Storage',
         passed: false,
         message: `${paths.skillsDir} is not a directory`,
         durationMs: Date.now() - t0,
@@ -557,6 +822,7 @@ export async function checkSkillsDir(paths: AidenPaths): Promise<CheckResult> {
     const entries = await fs.readdir(paths.skillsDir);
     return {
       name: 'skills dir',
+      group: 'Storage',
       passed: true,
       message: `${paths.skillsDir} (${entries.length} entries)`,
       durationMs: Date.now() - t0,
@@ -564,6 +830,7 @@ export async function checkSkillsDir(paths: AidenPaths): Promise<CheckResult> {
   } catch {
     return {
       name: 'skills dir',
+      group: 'Storage',
       passed: false,
       message: `missing ${paths.skillsDir}`,
       suggestion: 'run `aiden setup` — it creates the skills directory',
@@ -578,6 +845,7 @@ export async function checkBundledManifest(paths: AidenPaths): Promise<CheckResu
     await fs.access(paths.bundledManifest);
     return {
       name: 'bundled manifest',
+      group: 'Storage',
       passed: true,
       message: `present at ${paths.bundledManifest}`,
       durationMs: Date.now() - t0,
@@ -585,6 +853,7 @@ export async function checkBundledManifest(paths: AidenPaths): Promise<CheckResu
   } catch {
     return {
       name: 'bundled manifest',
+      group: 'Storage',
       passed: false,
       message: 'bundled skill manifest missing',
       suggestion: 'reinstall `aiden` — the package was not unpacked correctly',
@@ -599,6 +868,7 @@ export async function checkPlatformPaths(paths: AidenPaths): Promise<CheckResult
     await fs.access(paths.root);
     return {
       name: 'platform paths',
+      group: 'Storage',
       passed: true,
       message: `aiden home: ${paths.root}`,
       durationMs: Date.now() - t0,
@@ -606,6 +876,7 @@ export async function checkPlatformPaths(paths: AidenPaths): Promise<CheckResult
   } catch {
     return {
       name: 'platform paths',
+      group: 'Storage',
       passed: false,
       message: `aiden home missing: ${paths.root}`,
       suggestion: 'run `aiden setup` to initialise the home directory',
@@ -633,6 +904,7 @@ export async function checkAudioBackend(): Promise<CheckResult> {
   if (playback && record) {
     return {
       name: 'audio backend',
+      group: 'Voice',
       passed: true,
       message: `${process.platform}: playback=${playback.label} · record=${record.label}`,
       durationMs: Date.now() - t0,
@@ -644,6 +916,7 @@ export async function checkAudioBackend(): Promise<CheckResult> {
   if (!record)   missing.push(missingBackendMessage('record'));
   return {
     name: 'audio backend',
+    group: 'Voice',
     passed: true,
     message: `${process.platform}: voice features will not work — backends missing (known: ${[...new Set([...known.playback, ...known.record])].join(', ') || 'none'})`,
     suggestion: missing.join(' || '),
@@ -669,6 +942,7 @@ export async function checkLicense(opts: {
     if (!present) {
       return {
         name: 'license',
+        group: 'Updates',
         passed: true,
         message: 'free tier (no license cache)',
         durationMs: Date.now() - t0,
@@ -683,6 +957,7 @@ export async function checkLicense(opts: {
         if (status.tier !== 'pro') {
           return {
             name: 'license',
+            group: 'Updates' as DoctorGroup,
             passed: true,
             message: 'license cache present but not currently valid (free tier)',
             suggestion: 'run /license refresh to re-verify against server',
@@ -692,6 +967,7 @@ export async function checkLicense(opts: {
         const expiry = status.cache.expiresAt || 'lifetime';
         return {
           name: 'license',
+          group: 'Updates' as DoctorGroup,
           passed: true,
           message: `Pro (${status.cache.plan}, expires ${expiry})`,
           durationMs: Date.now() - t0,
@@ -700,6 +976,7 @@ export async function checkLicense(opts: {
       opts.timeoutMs,
       {
         name: 'license',
+        group: 'Updates' as DoctorGroup,
         passed: false as const,
         message: 'license check timed out reading cache',
         durationMs: Date.now() - t0,
@@ -708,6 +985,7 @@ export async function checkLicense(opts: {
   } catch (err) {
     return {
       name: 'license',
+      group: 'Updates',
       passed: false,
       message: `license check failed: ${err instanceof Error ? err.message : String(err)}`,
       suggestion: 'run /license refresh; if persistent, re-activate with /license activate <key>',
@@ -738,6 +1016,7 @@ export async function checkUpdate(opts: {
           const where = status.fromCache ? 'cached' : 'live';
           return {
             name: 'npm update',
+            group: 'Updates' as DoctorGroup,
             passed: true,
             message: `installed v${status.installed} is up to date (${where})`,
             durationMs: Date.now() - t0,
@@ -745,6 +1024,7 @@ export async function checkUpdate(opts: {
         }
         return {
           name: 'npm update',
+          group: 'Updates' as DoctorGroup,
           passed: true,
           message: `v${status.latest} available (installed: v${status.installed})`,
           suggestion: 'run `npm install -g aiden-runtime@latest`',
@@ -753,6 +1033,7 @@ export async function checkUpdate(opts: {
       } catch (err) {
         return {
           name: 'npm update',
+          group: 'Updates' as DoctorGroup,
           passed: false,
           message: `update check error: ${err instanceof Error ? err.message : String(err)}`,
           durationMs: Date.now() - t0,
@@ -762,6 +1043,7 @@ export async function checkUpdate(opts: {
     opts.timeoutMs,
     {
       name: 'npm update',
+      group: 'Updates' as DoctorGroup,
       passed: true,
       message: 'update check timed out (network slow — non-fatal)',
       durationMs: Date.now() - t0,
@@ -778,6 +1060,7 @@ export async function checkLogsWritable(paths: AidenPaths): Promise<CheckResult>
     await fs.unlink(probe);
     return {
       name: 'logs writable',
+      group: 'Storage',
       passed: true,
       message: paths.logsDir,
       durationMs: Date.now() - t0,
@@ -785,6 +1068,7 @@ export async function checkLogsWritable(paths: AidenPaths): Promise<CheckResult>
   } catch (err) {
     return {
       name: 'logs writable',
+      group: 'Storage',
       passed: false,
       message: `cannot write to ${paths.logsDir}: ${err instanceof Error ? err.message : String(err)}`,
       suggestion: `check permissions on ${os.homedir()}`,
@@ -880,22 +1164,58 @@ function checkIconKind(r: CheckResult): { icon: string; colour: 'success' | 'war
   return { icon: '✓', colour: 'success' };
 }
 
+/**
+ * Classify outcomes into the three buckets the top summary surfaces:
+ *   passing  — passed && no suggestion
+ *   warning  — passed && suggestion present (soft warning — works but
+ *              has a remediation hint, e.g. audio backend on Linux)
+ *   failing  — !passed
+ *
+ * Order matters: failing dominates warning, warning dominates passing.
+ * Same convention as the row-icon picker above.
+ */
+function outcomeBucket(r: CheckResult): 'passing' | 'warning' | 'failing' {
+  if (!r.passed) return 'failing';
+  if (r.suggestion) return 'warning';
+  return 'passing';
+}
+
 function maxNameWidth(report: DoctorReport): number {
   return report.results.reduce((m, r) => Math.max(m, r.name.length), 0);
 }
 
 /**
+ * v4.1.3-essentials doctor-polish: group results by their `group`
+ * field, preserving the configured display order (DOCTOR_GROUP_ORDER)
+ * and dropping empty groups. Within each group, results stay in their
+ * original insertion order — keeps related checks visually adjacent
+ * even when `runDoctor` reorders for parallelism in a future revision.
+ */
+function groupResults(
+  results: readonly CheckResult[],
+): Array<{ group: DoctorGroup; rows: CheckResult[] }> {
+  const byGroup = new Map<DoctorGroup, CheckResult[]>();
+  for (const r of results) {
+    const list = byGroup.get(r.group) ?? [];
+    list.push(r);
+    byGroup.set(r.group, list);
+  }
+  const out: Array<{ group: DoctorGroup; rows: CheckResult[] }> = [];
+  for (const g of DOCTOR_GROUP_ORDER) {
+    const rows = byGroup.get(g);
+    if (rows && rows.length > 0) out.push({ group: g, rows });
+  }
+  return out;
+}
+
+/**
  * Compute the inner-cell width for the health box: widest visible
- * content row across all check rows + any hint continuations + the
- * footer summary, plus a 1-char trailing gutter. Floored / capped per
- * HEALTH_BOX_MIN/MAX_WIDTH. Title length also factored so the
- * `╭── Health Check ─...─╮` row doesn't underflow.
+ * content row across all check rows, section headers, hint
+ * continuations, and the top summary, plus a 1-char trailing gutter.
+ * Floored / capped per HEALTH_BOX_MIN/MAX_WIDTH. Title length also
+ * factored so the `╭── Health Check ─...─╮` row doesn't underflow.
  */
 function computeHealthBoxWidth(report: DoctorReport, nameWidth: number): number {
-  // The minimum width the title needs (`╭── <title> ──╮` shape):
-  // 2 corners + 2 leading dashes + 1 space + title + 1 space + at
-  // least 2 trailing dashes, minus the 2 corners since the cell is
-  // measured between them.
   const titleMin = 2 + 1 + HEALTH_BOX_TITLE.length + 1 + 2;
   let widest = titleMin;
 
@@ -904,28 +1224,45 @@ function computeHealthBoxWidth(report: DoctorReport, nameWidth: number): number 
     if (v + 1 > widest) widest = v + 1; // +1 for trailing gutter
   };
 
-  for (const r of report.results) {
-    measureRow(` ✓  ${r.name.padEnd(nameWidth)}  ${r.message}`);
-    if (r.suggestion && !r.passed) {
-      measureRow(`      hint: ${r.suggestion}`);
+  // Top summary line.
+  const buckets = { passing: 0, warning: 0, failing: 0 };
+  for (const r of report.results) buckets[outcomeBucket(r)] += 1;
+  measureRow(
+    ` Overall: ${buckets.passing} passing · ${buckets.warning} warning · ${buckets.failing} failing  (${report.results.length} checks, ${report.totalMs} ms)`,
+  );
+
+  // Section header rows + group's checks + any hint continuations.
+  const groups = groupResults(report.results);
+  for (const g of groups) {
+    const passed = g.rows.filter((r) => r.passed).length;
+    measureRow(`  ${g.group} (${passed}/${g.rows.length})`);
+    for (const r of g.rows) {
+      measureRow(`    ✓  ${r.name.padEnd(nameWidth)}  ${r.message}`);
+      if (r.suggestion && !r.passed) {
+        measureRow(`        hint: ${r.suggestion}`);
+      }
     }
   }
-
-  const passedCount = report.results.filter((x) => x.passed).length;
-  measureRow(` ${passedCount} of ${report.results.length} checks passed in ${report.totalMs} ms`);
 
   return Math.max(HEALTH_BOX_MIN_WIDTH, Math.min(HEALTH_BOX_MAX_WIDTH, widest));
 }
 
 /**
- * Render the report as an orange-bordered rounded box. Pure — returns
- * the multi-line string; caller writes it. `display` is needed for
- * skin-aware colouring of the border, icons, and footer summary.
+ * Render the report as an orange-bordered rounded box with grouped
+ * sections + top summary.
  *
- * Phase 22 Group C smoke-fix #3 (Bug 1 round 2): box width now
- * auto-fits to the widest content row instead of clamping at a fixed
- * 70 chars. The previous fix correctly aligned the right border but
- * truncated content mid-word for any Windows path > 65-ish chars.
+ * v4.1.3-essentials doctor-polish: previously rendered as a flat list
+ * of 13 rows with the summary at the bottom — hard to scan, easy to
+ * miss issues. Now:
+ *   - Top: `Overall: X passing · Y warning · Z failing` with per-
+ *     bucket colors (green / yellow / red).
+ *   - Section headers per group (`Providers (1/1)`) in brand+bold.
+ *   - Rows packed tight within group, blank line between groups.
+ *   - Hints stay on a continuation line under failed rows only.
+ *
+ * Pure — returns the multi-line string; caller writes it. `display`
+ * is needed for skin-aware colouring of the border, icons, headers,
+ * and summary buckets.
  */
 export function renderHealthBox(report: DoctorReport, display: Display): string {
   const nameWidth = maxNameWidth(report);
@@ -943,24 +1280,53 @@ export function renderHealthBox(report: DoctorReport, display: Display): string 
 
   const lines: string[] = [top, side('')];
 
-  for (const r of report.results) {
-    const { icon, colour } = checkIconKind(r);
-    const colouredIcon = display.paint(icon, colour);
-    const namePart = ` ${colouredIcon}  ${r.name.padEnd(nameWidth)}  ${r.message}`;
-    lines.push(side(namePart));
-    if (r.suggestion && !r.passed) {
-      // Failed checks get the suggestion on a continuation line, indented
-      // past the icon column. Prefix in soft cyan to read as a hint.
-      const hint = `      ${display.muted('hint:')} ${r.suggestion}`;
-      lines.push(side(hint));
+  // ── Top summary — three colored buckets ───────────────────────────
+  const buckets = { passing: 0, warning: 0, failing: 0 };
+  for (const r of report.results) buckets[outcomeBucket(r)] += 1;
+  // Each bucket colored only when non-zero; zero counters stay muted
+  // so the eye lands on the actual state.
+  const paintBucket = (n: number, kind: 'success' | 'warn' | 'error', label: string): string => {
+    const text = `${n} ${label}`;
+    return n > 0 ? display.paint(text, kind) : display.muted(text);
+  };
+  const summary =
+    ` Overall: ${paintBucket(buckets.passing, 'success', 'passing')} · ` +
+    `${paintBucket(buckets.warning, 'warn', 'warning')} · ` +
+    `${paintBucket(buckets.failing, 'error', 'failing')}  ` +
+    `${display.muted(`(${report.results.length} checks, ${report.totalMs} ms)`)}`;
+  lines.push(side(summary));
+  lines.push(side(''));
+
+  // ── Grouped section rendering ─────────────────────────────────────
+  const groups = groupResults(report.results);
+  for (let gi = 0; gi < groups.length; gi += 1) {
+    const g = groups[gi];
+    const passed = g.rows.filter((r) => r.passed).length;
+    // Group-level count tinted by aggregate state: all pass → success,
+    // any fail → error, only warnings → warn.
+    const anyFail = g.rows.some((r) => !r.passed);
+    const anyWarn = g.rows.some((r) => r.passed && r.suggestion);
+    const countColour: 'success' | 'warn' | 'error' =
+      anyFail ? 'error' : anyWarn ? 'warn' : 'success';
+    const header =
+      `  ${display.brand(g.group)} ` +
+      display.paint(`(${passed}/${g.rows.length})`, countColour);
+    lines.push(side(header));
+    for (const r of g.rows) {
+      const { icon, colour } = checkIconKind(r);
+      const colouredIcon = display.paint(icon, colour);
+      const namePart = `    ${colouredIcon}  ${r.name.padEnd(nameWidth)}  ${r.message}`;
+      lines.push(side(namePart));
+      if (r.suggestion && !r.passed) {
+        const hint = `        ${display.muted('hint:')} ${r.suggestion}`;
+        lines.push(side(hint));
+      }
     }
+    // Blank line between groups (not after the last one).
+    if (gi < groups.length - 1) lines.push(side(''));
   }
 
   lines.push(side(''));
-  const passedCount = report.results.filter((r) => r.passed).length;
-  const summary = `${passedCount} of ${report.results.length} checks passed in ${report.totalMs} ms`;
-  const summaryColour = report.passed ? 'success' : 'warn';
-  lines.push(side(' ' + display.paint(summary, summaryColour)));
   lines.push(bot);
 
   return lines.join('\n');
@@ -973,58 +1339,82 @@ export function renderHealthBox(report: DoctorReport, display: Display): string 
  */
 export async function runDoctorCli(opts?: DoctorOptions): Promise<DoctorReport> {
   const report = await runDoctor(opts);
-  for (const r of report.results) {
-    const marker = r.passed ? '[ok]  ' : '[fail]';
-    process.stdout.write(`${marker} ${r.name}: ${r.message}\n`);
-    if (!r.passed && r.suggestion) {
-      process.stdout.write(`        hint: ${r.suggestion}\n`);
-    }
-  }
-  process.stdout.write(
-    `\n${report.passed ? 'all checks passed' : 'some checks failed'} in ${report.totalMs} ms\n`,
-  );
 
-  // Phase v4.1.1-oauth-fix Phase 5: discoverability hint for the deep
-  // mode. Only emitted in standard mode — if the user already passed
-  // `--providers`, the section right below this is the answer to the hint.
-  if (!opts?.liveness) {
-    process.stdout.write(
-      '  hint: Run `aiden doctor --providers` for live provider checks\n',
-    );
-  }
+  // v4.1.3-essentials doctor-polish: Path-A unification — the CLI
+  // path now uses the SAME `renderHealthBox` renderer as `/doctor`
+  // (in-REPL). Previously this emitted a plain `[ok]` / `[fail]`
+  // list with no box, no grouping, and the optional sections
+  // (subsystem health, skill outcomes, liveness) dangled below the
+  // summary. Now everything renders inside one cohesive box.
+  //
+  // NO_COLOR / forceMono handling: the Display instance honors both,
+  // so `aiden doctor | tee report.txt` produces clean plain text
+  // when piped (no ANSI in the captured file).
+  //
+  // Lazy-import Display + SkinEngine here because runDoctorCli is
+  // also called from non-REPL contexts (tests) where instantiating
+  // a Display might not be appropriate. CLI invocations get a fresh
+  // skin engine; tests can mock or inspect the report directly.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { Display: DisplayCtor } = require('./display') as {
+    Display: typeof import('./display').Display;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { SkinEngine: SkinEngineCtor } = require('./skinEngine') as {
+    SkinEngine: typeof import('./skinEngine').SkinEngine;
+  };
+  const display = new DisplayCtor({ skin: new SkinEngineCtor() });
 
-  // Phase v4.1.1-oauth-fix Phase 4: opt-in provider liveness.
-  // Runs after the standard report so a failed config check is visible
-  // before the network probes start. Section header + summary line are
-  // rendered by doctorLiveness.renderProviderLivenessSection so the
-  // formatting stays alongside its consumer.
+  // Pull in-process surfaces if the caller supplied them. CLI
+  // invocations from a fresh process don't have a live agent so the
+  // helpers return empty arrays → groups dropped by renderer.
+  report.results.push(...subsystemHealthResults(opts?.subsystemHealthRegistry));
+  report.results.push(...skillOutcomeResults(opts?.skillOutcomeTracker));
+
+  // Provider-liveness path: runs an opt-in network probe per
+  // configured provider when `--providers` is set. Results coerce
+  // to CheckResult shape and fold into the same grouped box.
   let livenessFailed = false;
   if (opts?.liveness) {
-    process.stdout.write('\n  Running provider liveness checks...\n');
-    const { runProviderLiveness, renderProviderLivenessSection } =
-      await import('./doctorLiveness');
+    const { runProviderLiveness } = await import('./doctorLiveness');
     const paths = opts.paths ?? resolveAidenPaths();
-    const { results, summary } = await runProviderLiveness({
+    const { results: liveResults, summary } = await runProviderLiveness({
       paths,
       env:        opts.env,
       fetchImpl:  opts.fetchImpl,
       timeoutMs:  opts.livenessTimeoutMs,
     });
-    process.stdout.write(renderProviderLivenessSection(results, summary));
+    // Coerce per-provider liveness results into CheckResult rows.
+    // `liveResults` shape varies by provider but always has a
+    // `passed`/`ok` flag and a message. Treat unknown shapes as
+    // pass-through so future probe-result additions don't break.
+    for (const lr of liveResults as unknown as Array<{
+      name?: string; provider?: string; passed?: boolean; ok?: boolean;
+      message?: string; status?: string; latencyMs?: number; error?: string;
+    }>) {
+      const passed = lr.passed === true || lr.ok === true;
+      const latency = typeof lr.latencyMs === 'number' ? ` (${lr.latencyMs}ms)` : '';
+      const msg = (lr.message ?? lr.status ?? (passed ? 'live' : (lr.error ?? 'failed'))) + latency;
+      report.results.push({
+        name: String(lr.name ?? lr.provider ?? 'provider'),
+        group: 'Provider liveness',
+        passed,
+        message: msg,
+        ...(passed ? {} : { suggestion: lr.error ?? 'check API key / network' }),
+      });
+    }
     livenessFailed = summary.red > 0;
   }
 
-  // Phase v4.1.2-slice3: subsystem-health surface. Renders only when
-  // a registry was passed (in-REPL doctor); standalone CLI doctor has
-  // no live agent so the section is omitted.
-  const subsystemBlock = renderSubsystemHealthSection(opts?.subsystemHealthRegistry);
-  if (subsystemBlock) process.stdout.write(subsystemBlock);
+  process.stdout.write(renderHealthBox(report, display) + '\n');
 
-  // Phase v4.1.2-slice4: skill-outcome surface. Same gating — only
-  // renders when a tracker was passed and has at least one observed
-  // skill. Standalone CLI invocations skip it.
-  const outcomesBlock = renderSkillOutcomesSection(opts?.skillOutcomeTracker);
-  if (outcomesBlock) process.stdout.write(outcomesBlock);
+  // Phase v4.1.1-oauth-fix Phase 5: discoverability hint for the deep
+  // mode. Outside the box so it reads as meta-guidance, not a check.
+  if (!opts?.liveness) {
+    process.stdout.write(
+      '\n  hint: Run `aiden doctor --providers` for live provider checks\n',
+    );
+  }
 
   // Liveness reds count toward the overall exit code so CI / scripts
   // can `aiden doctor --providers && deploy`.

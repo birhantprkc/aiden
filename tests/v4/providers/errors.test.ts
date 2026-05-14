@@ -4,6 +4,8 @@ import {
   ProviderRateLimitError,
   ProviderTimeoutError,
   formatRawForMessage,
+  classifyProviderError,
+  suggestForErrorClass,
 } from '../../../providers/v4/errors';
 
 /**
@@ -282,5 +284,122 @@ describe('ProviderError composes Codex {detail} into the surfaced message', () =
     // see the full envelope (including the leading FastAPI key).
     expect((err.raw as { detail: string }).detail)
       .toContain("'gpt-5.1-codex-max'");
+  });
+});
+
+// ── v4.1.3-prebump: classifyProviderError ──────────────────────────────
+//
+// Coarse error-class detection feeds the REPL's tailored action-hint
+// suggestion. Status-code is the structured signal; message-substring
+// scan covers adapters that pass through the upstream JSON message
+// verbatim.
+
+describe('classifyProviderError', () => {
+  it('returns rate_limit for ProviderRateLimitError instances', () => {
+    expect(classifyProviderError(new ProviderRateLimitError('groq'))).toBe('rate_limit');
+  });
+
+  it('returns transport for ProviderTimeoutError instances', () => {
+    expect(classifyProviderError(new ProviderTimeoutError('groq', 5000))).toBe('transport');
+  });
+
+  it('classifies statusCode 413 as context_overflow', () => {
+    const err = new ProviderError('payload', 'groq', 413);
+    expect(classifyProviderError(err)).toBe('context_overflow');
+  });
+
+  it('classifies statusCode 429 as rate_limit (even without subclass)', () => {
+    const err = new ProviderError('throttled', 'groq', 429);
+    expect(classifyProviderError(err)).toBe('rate_limit');
+  });
+
+  it('classifies statusCode 401/403 as auth', () => {
+    expect(classifyProviderError(new ProviderError('x', 'p', 401))).toBe('auth');
+    expect(classifyProviderError(new ProviderError('x', 'p', 403))).toBe('auth');
+  });
+
+  it('falls back to message scan for context_overflow ("too large" / "413" / "context_length_exceeded")', () => {
+    expect(classifyProviderError(new Error('Request payload too large'))).toBe('context_overflow');
+    expect(classifyProviderError(new Error('HTTP 413 Payload Too Large'))).toBe('context_overflow');
+    expect(classifyProviderError(new Error('context_length_exceeded: 50000 > 32768')))
+      .toBe('context_overflow');
+    expect(classifyProviderError(new Error('exceeds maximum context length')))
+      .toBe('context_overflow');
+  });
+
+  it('falls back to message scan for rate_limit ("429" / "rate limit" / "TPM" / "quota")', () => {
+    expect(classifyProviderError(new Error('429 Too Many Requests'))).toBe('rate_limit');
+    expect(classifyProviderError(new Error('rate_limit reached for model'))).toBe('rate_limit');
+    expect(classifyProviderError(new Error('Free-tier TPM exceeded'))).toBe('rate_limit');
+    expect(classifyProviderError(new Error('quota exhausted'))).toBe('rate_limit');
+  });
+
+  it('falls back to message scan for auth ("401" / "invalid_api_key" / "unauthorized")', () => {
+    expect(classifyProviderError(new Error('401 Unauthorized'))).toBe('auth');
+    expect(classifyProviderError(new Error('invalid_api_key: keys revoked'))).toBe('auth');
+    expect(classifyProviderError(new Error('Forbidden — token expired'))).toBe('auth');
+  });
+
+  it('falls back to message scan for transport (ECONNREFUSED / ENOTFOUND / network)', () => {
+    expect(classifyProviderError(new Error('connect ECONNREFUSED 127.0.0.1:443'))).toBe('transport');
+    expect(classifyProviderError(new Error('getaddrinfo ENOTFOUND api.groq.com'))).toBe('transport');
+    expect(classifyProviderError(new Error('socket hang up'))).toBe('transport');
+  });
+
+  it('returns other for unrelated errors', () => {
+    expect(classifyProviderError(new Error('zoinks something weird'))).toBe('other');
+    expect(classifyProviderError('not even an Error')).toBe('other');
+    expect(classifyProviderError(null)).toBe('other');
+    expect(classifyProviderError(undefined)).toBe('other');
+  });
+
+  it('prefers statusCode over message scan when both signals disagree', () => {
+    // statusCode says 413; message contains "rate limit". Structured
+    // signal wins.
+    const err = new ProviderError('rate limit hit', 'groq', 413);
+    expect(classifyProviderError(err)).toBe('context_overflow');
+  });
+});
+
+// ── v4.1.3-prebump: suggestForErrorClass ───────────────────────────────
+
+describe('suggestForErrorClass', () => {
+  it('context_overflow suggestion names the provider and points at /model', () => {
+    const s = suggestForErrorClass('context_overflow', 'groq');
+    expect(s).toBeTruthy();
+    expect(s!).toContain('groq');
+    expect(s!).toContain('413');
+    expect(s!).toContain('/model');
+    // Names larger-context alternatives.
+    expect(s!).toContain('chatgpt-plus');
+  });
+
+  it('rate_limit suggestion names the provider and gives a wait-or-switch option', () => {
+    const s = suggestForErrorClass('rate_limit', 'groq');
+    expect(s).toContain('groq');
+    expect(s).toMatch(/rate.?limit/i);
+    expect(s).toContain('/model');
+  });
+
+  it('auth suggestion points at /auth status + /auth login', () => {
+    const s = suggestForErrorClass('auth', 'anthropic');
+    expect(s).toContain('anthropic');
+    expect(s).toContain('/auth status');
+    expect(s).toContain('/auth login');
+  });
+
+  it('transport suggestion mentions ollama as offline fallback', () => {
+    const s = suggestForErrorClass('transport', 'groq');
+    expect(s).toContain('ollama');
+  });
+
+  it('other returns null so the caller keeps its generic fallback', () => {
+    expect(suggestForErrorClass('other', 'groq')).toBeNull();
+  });
+
+  it('handles missing provider name gracefully', () => {
+    const s = suggestForErrorClass('rate_limit', undefined);
+    expect(s).toBeTruthy();
+    expect(s!).toContain('this provider');
   });
 });

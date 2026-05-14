@@ -1620,6 +1620,12 @@ export async function buildAgentRuntime(
     mcpClient,
     providerId,
     modelId,
+    // v4.1.3-prebump: forward the precedence-case label so the boot
+    // card can render a "where this choice came from" annotation.
+    // The case-3 (persisted-config) branch was confusing users who
+    // expected auto-pick to kick in — surfacing the source closes the
+    // information asymmetry.
+    bootSource,
     resumeSessionId,
     fallbackAdapter,
     personalityManager,
@@ -1666,6 +1672,21 @@ export interface AgentRuntime {
     : null;
   providerId: string;
   modelId: string;
+  /**
+   * v4.1.3-prebump — which precedence case in providerBootSelector
+   * produced the (providerId, modelId) pair. Surfaced in the boot card
+   * so users can tell at a glance whether their session is using a
+   * persisted choice, an auto-pick, a CLI override, or the hardcoded
+   * legacy fallback. Mirrors BootSelection.source from
+   * providerBootSelector with `hardcoded-fallback` added for Case 6.
+   */
+  bootSource:
+    | 'cli-flag'
+    | 'persisted-config'
+    | 'auto-priority'
+    | 'cli-flag-partial'
+    | 'config-partial'
+    | 'hardcoded-fallback';
   resumeSessionId: string | undefined;
   /** Phase 16b.1: present when a multi-slot fallback chain is active. */
   fallbackAdapter: FallbackAdapter | null;
@@ -1707,6 +1728,10 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     config: runtime.config,
     initialProviderId: runtime.providerId,
     initialModelId: runtime.modelId,
+    // v4.1.3-prebump: pass through the precedence-case label so the
+    // boot card can render a dim source annotation under the version
+    // pill ("persisted from prior session" / "auto-picked" / …).
+    initialBootSource: runtime.bootSource,
     resumeSessionId: runtime.resumeSessionId,
     yoloMode: !!cliOpts.yolo,
     fallbackAdapter: runtime.fallbackAdapter,

@@ -51,6 +51,13 @@ import type { PersonalityManager } from '../../core/v4/personality';
 import type { PluginLoader } from '../../core/v4/plugins/pluginLoader';
 import { ModelMetadata } from '../../core/v4/modelMetadata';
 import type { Message } from '../../providers/v4/types';
+// v4.1.3-prebump: classify provider errors so the catch path can show
+// a tailored action hint (e.g. groq 413 → "switch to chatgpt-plus")
+// instead of the generic "/model or aiden doctor" line.
+import {
+  classifyProviderError,
+  suggestForErrorClass,
+} from '../../providers/v4/errors';
 import type { HonestyTraceEntry } from '../../moat/honestyEnforcement';
 import {
   distillSession,
@@ -185,6 +192,19 @@ export interface ChatSessionOptions {
   /** Provider/model the session boots with. */
   initialProviderId: string;
   initialModelId: string;
+  /**
+   * v4.1.3-prebump — which providerBootSelector precedence case
+   * produced (initialProviderId, initialModelId). Surfaced in the
+   * boot card so users can tell whether they're on a persisted
+   * choice, an auto-pick, or the legacy hardcoded fallback.
+   */
+  initialBootSource?:
+    | 'cli-flag'
+    | 'persisted-config'
+    | 'auto-priority'
+    | 'cli-flag-partial'
+    | 'config-partial'
+    | 'hardcoded-fallback';
 
   /** Phase 16b.1: optional FallbackAdapter for /providers diagnostics. */
   fallbackAdapter?: import('../../core/v4/providerFallback').FallbackAdapter | null;
@@ -254,12 +274,59 @@ const STATUS_BAR_WIDTH = 10;
  * Above this we abandon the LLM half (still write a deterministic-
  * only distillation so the session isn't lost) and exit honestly.
  */
-const SUMMARY_TIMEOUT_MS_DEFAULT = 4_000;
+/**
+ * v4.1.3-essentials distillation-fix: bumped 4000 → 12000ms in
+ * lockstep with `sessionDistiller.DEFAULT_TIMEOUT_MS`. Same
+ * rationale — chatgpt-plus Codex cold-start latency for 800-token
+ * summaries regularly exceeds 4s, killing the distillation +
+ * promotion-prompt path. Env override `AIDEN_SUMMARY_TIMEOUT_MS`
+ * still respected.
+ */
+const SUMMARY_TIMEOUT_MS_DEFAULT = 12_000;
 function resolveSummaryTimeoutMs(): number {
   const raw = process.env.AIDEN_SUMMARY_TIMEOUT_MS;
   if (!raw) return SUMMARY_TIMEOUT_MS_DEFAULT;
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : SUMMARY_TIMEOUT_MS_DEFAULT;
+}
+
+/**
+ * v4.1.3-prebump: map a providerBootSelector precedence-case label to
+ * a human-readable hint rendered under the boot card's status pills.
+ *
+ * Returns `null` for the explicit-selection cases (`cli-flag`, with-or-
+ * without -partial) where the source isn't surprising. Annotates the
+ * persisted-config / auto-priority / hardcoded-fallback paths so users
+ * understand "why this provider, why now".
+ *
+ * Pure helper — exported for unit testing.
+ */
+export function bootSourceLabel(
+  source:
+    | 'cli-flag'
+    | 'persisted-config'
+    | 'auto-priority'
+    | 'cli-flag-partial'
+    | 'config-partial'
+    | 'hardcoded-fallback'
+    | undefined,
+): string | null {
+  switch (source) {
+    case 'persisted-config':
+      return '(persisted from prior session — /model to change)';
+    case 'config-partial':
+      return '(partial config + auto-resolved companion)';
+    case 'auto-priority':
+      return '(auto-picked — first authed provider)';
+    case 'hardcoded-fallback':
+      return '(no authed providers — using legacy default)';
+    case 'cli-flag':
+    case 'cli-flag-partial':
+      // Explicit CLI override — user knows why; no annotation.
+      return null;
+    default:
+      return null;
+  }
 }
 
 export class ChatSession implements ChatSessionLike {
@@ -715,6 +782,15 @@ export class ChatSession implements ChatSessionLike {
         toolTrace:        this.sessionToolTrace,
         auxiliaryClient:  this.opts.auxiliaryClient,
         timeoutMs,
+        // v4.1.3-essentials distillation-fix: route the new
+        // diagnostic signal to a dim line so the user can see WHICH
+        // of the three failure classes fired (timeout / call-fail /
+        // unparseable JSON). Before this hook, all three converged
+        // on a silent `partial:true` and the downstream "no bullets"
+        // warning didn't distinguish them.
+        onDiagnostic: (msg) => {
+          this.opts.display.dim(`[distill] ${msg}`);
+        },
       });
     } catch (err) {
       this.opts.display.warn(
@@ -1121,10 +1197,45 @@ export class ChatSession implements ChatSessionLike {
       stopSpinnerOnce();
       if (streamingActive) this.opts.display.streamComplete();
       const msg = (err as Error)?.message ?? String(err);
-      this.opts.display.printError(
-        msg,
-        'Run `/model` to switch providers or `aiden doctor` to diagnose.',
-      );
+      // v4.1.3-prebump: classify the error so the suggestion below
+      // points at the actual fix instead of the generic "/model or
+      // doctor" line. 413 / 429 / auth get tailored hints; everything
+      // else keeps the legacy fallback. Use the live providerId so
+      // the user sees WHICH provider blew up (matters when fallback
+      // adapters rotate slots mid-turn).
+      const cls = classifyProviderError(err);
+      const tailored = suggestForErrorClass(cls, this.currentProviderId);
+      // v4.1.3-essentials: on `auth` class errors we have enough state
+      // (which provider, what to run) to render a capability card —
+      // structured "what auth's missing, what you can still do, how to
+      // fix" is more useful than the bare message + one-line hint.
+      // Other classes keep the printError single-line surface; their
+      // hints are already specific.
+      if (cls === 'auth') {
+        const p = this.currentProviderId;
+        this.opts.display.printError(msg);
+        this.opts.display.capabilityCard({
+          title: `${p} authentication required`,
+          canStill: [
+            'Continue chatting if a non-auth provider is configured (run `/model`)',
+            'Run `/auth status` to see which providers are signed in',
+            'Run `aiden doctor --providers` for a fuller liveness probe',
+          ],
+          cannotReliably: [
+            `Call ${p} until credentials are refreshed`,
+            'Trust any cached responses that depended on this provider',
+          ],
+          fix:
+            `Run \`/auth login ${p}\` if it's an OAuth provider, or set the ` +
+            `relevant API key env var. Then retry — no need to restart Aiden.`,
+        });
+      } else {
+        this.opts.display.printError(
+          msg,
+          tailored
+            ?? 'Run `/model` to switch providers or `aiden doctor` to diagnose.',
+        );
+      }
       this.setStatusState({ kind: 'ready' });
       this.lastTurnElapsedMs = Date.now() - turnStartedAt;
     }
@@ -1220,6 +1331,16 @@ export class ChatSession implements ChatSessionLike {
         version:      AIDEN_VERSION,
       }) + '\n',
     );
+
+    // v4.1.3-prebump: dim source annotation under the pills row so the
+    // user can see WHY this provider/model was chosen — closes the
+    // information gap that made Case 3 (persisted-config) look like a
+    // bug ("why is it still on groq when I auth'd chatgpt-plus?"). One
+    // line, dim, only when the source is informative.
+    const sourceLabel = bootSourceLabel(this.opts.initialBootSource);
+    if (sourceLabel) {
+      display.write(`  ${display.muted(sourceLabel)}\n`);
+    }
 
     // Tier-3.1b: rule + environment/capabilities block + rule + scroll
     // + bottom prompt hint. Skipped at <70 cols to keep the narrow

@@ -18,7 +18,13 @@
  */
 
 import type { SlashCommand } from '../commandRegistry';
-import { renderHealthBox, runDoctor } from '../doctor';
+import {
+  renderHealthBox,
+  runDoctor,
+  subsystemHealthResults,
+  skillOutcomeResults,
+  sessionCounterResults,
+} from '../doctor';
 
 export const doctor: SlashCommand = {
   name: 'doctor',
@@ -32,40 +38,34 @@ export const doctor: SlashCommand = {
     }
     ctx.display.info('Running diagnostic checks...');
     const report = await runDoctor({ paths: ctx.paths });
-    // Phase 22 Task 5A: orange-bordered rounded box; rows + summary
-    // assembled by renderHealthBox so the slash command stays a thin
-    // adapter and the same renderer can be reused by `aiden doctor`
-    // CLI in a future polish pass.
-    ctx.display.write(renderHealthBox(report, ctx.display) + '\n');
-    // Phase 23.1: surface session-scoped skill-enforcement counters.
-    // Lives only on the live agent (process-scoped, no persistence) so
-    // `aiden doctor` CLI subcommand correctly omits this — the
-    // counters would always be zero there.
+    // v4.1.3-essentials doctor-polish: pull in-process subsystem
+    // health + skill-outcome data into the same report so they
+    // render as additional grouped sections inside the health box,
+    // not as disconnected blocks below it. `subsystemHealthResults`
+    // / `skillOutcomeResults` return empty arrays when their
+    // sources are unavailable so the grouped-renderer simply drops
+    // those sections.
     if (ctx.agent) {
-      const m = ctx.agent.getSkillEnforcementMetrics();
-      ctx.display.write(
-        // Phase 23.4b: surface the Stage-0 intent pre-arm counter so
-        // smoke runs can confirm the regex fired on bug-Y queries.
-        `[skill-enforcement] armed=${m.armed} pre-armed=${m.preArmed} recovered=${m.recovered} failed=${m.failed} (session)\n`,
-      );
-      // Phase 23.4a: same shape, different concern — URL provenance
-      // gate counters. blocked = open_url calls rejected for unknown
-      // YouTube ids; recovered = corrective retry produced a real
-      // youtube_search; failed = retry cap exceeded and the turn
-      // ended with an honest-failure message.
-      const u = ctx.agent.getUrlProvenanceMetrics();
-      ctx.display.write(
-        `[url-provenance]    blocked=${u.blocked} recovered=${u.recovered} failed=${u.failed} (session)\n`,
-      );
-      // Phase 23.4a-fix2: empty-response counters. detected =
-      // Codex backend completed a turn with no content and no tool
-      // calls; retried = corrective system message injected (cap
-      // 1/turn); recovered = retry yielded a non-empty reply.
-      const e = ctx.agent.getEmptyResponseMetrics();
-      ctx.display.write(
-        `[empty-response]    detected=${e.detected} retried=${e.retried} recovered=${e.recovered} (session)\n`,
-      );
+      const a = ctx.agent as unknown as {
+        subsystemHealthRegistry?: import('../../../core/v4/subsystemHealth').SubsystemHealthRegistry;
+        skillOutcomeTracker?:     import('../../../core/v4/skillOutcomeTracker').SkillOutcomeTracker;
+      };
+      report.results.push(...subsystemHealthResults(a.subsystemHealthRegistry));
+      report.results.push(...skillOutcomeResults(a.skillOutcomeTracker));
+      // v4.1.3-essentials doctor-polish: session-scoped counters
+      // (skill enforcement / URL provenance / empty response) now
+      // fold into the same report so they render as a "Session
+      // counters" group INSIDE the box instead of as orphan
+      // `display.write` lines below it. Previous code emitted them
+      // as 3 separate `[bracket-prefix] key=N ...` lines after
+      // renderHealthBox closed — visually disconnected.
+      report.results.push(...sessionCounterResults(ctx.agent));
     }
+    // v4.1.3-essentials doctor-polish: renderHealthBox now groups
+    // results by section header with a top summary. Same renderer
+    // is used by `aiden doctor` CLI path so both surfaces stay in
+    // visual sync (Path-A unification).
+    ctx.display.write(renderHealthBox(report, ctx.display) + '\n');
     return {};
   },
 };

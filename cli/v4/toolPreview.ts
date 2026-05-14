@@ -92,6 +92,21 @@ export const TOOL_PRIMARY_ARG: Record<string, string> = {
   system_info:       '',
   now_playing:       '',
   get_natural_events:'',
+
+  // ── v4.1.4-media — three-layer media-control bundle ──────────────────
+  // `media_sessions` has no args by schema; the empty-arg preview is
+  // suppressed by buildToolPreview returning ''.
+  // `media_transport` → preview by target ("spotify"), the actionable
+  // identifier the user typed. `action` is intentionally NOT chosen —
+  // GSMTC actions (play/pause/toggle) are short, the target is the
+  // discriminator.
+  // `media_key` is layer-3 fallback; show `action` since there's no
+  // target to surface (it's a blind keystroke).
+  // `app_input` shows `app` so the user sees which window got the keys.
+  media_sessions:    '',
+  media_transport:   'target',
+  media_key:         'action',
+  app_input:         'app',
 };
 
 /**

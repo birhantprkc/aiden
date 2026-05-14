@@ -97,6 +97,30 @@ export interface ToolCallRequest {
  * this: recall_session (cached data), app_launch (CLI fallback),
  * media_key (vault locked → default key).
  */
+/**
+ * Structured payload a tool can return to surface a "capability card"
+ * to the user instead of (or alongside) a generic error string. v4.1.3-
+ * essentials addition. The REPL renders this as a box-bordered block
+ * with Can-still / Cannot-reliably / Fix sections — distinct from the
+ * one-line tool trail row because it's a different category of
+ * information (state assessment, not action trace).
+ *
+ * Schema is intentionally minimal — short labeled bullet lists + a
+ * single-sentence fix hint. Anything richer should live in a skill.
+ */
+export interface CapabilityCardData {
+  /** Headline — typically "<feature> requires <X>". */
+  title:           string;
+  /** Bullet list (~3-5 entries) of actions still available without
+   *  the missing capability. */
+  canStill:        string[];
+  /** Bullet list (~3-5 entries) of actions blocked or unreliable. */
+  cannotReliably:  string[];
+  /** Single-sentence guidance — e.g. "Run /auth login chatgpt-plus"
+   *  or "Open this skill on Windows for full functionality." */
+  fix:             string;
+}
+
 export interface ToolCallResult {
   id: string;
   name: string;
@@ -106,6 +130,21 @@ export interface ToolCallResult {
   degraded?: boolean;
   /** Human-readable reason shown in the trail row suffix (≤40 chars). */
   degradedReason?: string;
+  /**
+   * v4.1.3-essentials: structured tags for what this tool requires to
+   * succeed. Free-form labels — `['Windows']`, `['ChatGPT Plus OAuth']`,
+   * `['GITHUB_TOKEN env var']`. The REPL doesn't act on these directly
+   * (yet); they're set alongside `capabilityCard` for diagnostics and
+   * potential future "what's missing across all my tools" tooling.
+   */
+  requires?:       string[];
+  /**
+   * v4.1.3-essentials: when set, the REPL renders this card instead of
+   * the bare error string. Tools opt in by returning this payload from
+   * their `windowsOnlyError`-style failure paths or from provider-auth
+   * failure paths. Pure data — render is the REPL's concern.
+   */
+  capabilityCard?: CapabilityCardData;
 }
 
 /**

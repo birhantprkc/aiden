@@ -130,10 +130,38 @@ export interface PromptApi {
 }
 
 /**
- * Drive the approval prompt. Renders the candidate list, reads ONE
- * line, parses, returns approved Candidate[]. On unparseable input
- * re-prompts ONCE; second failure defaults to skip with a dim line
- * explaining why nothing was promoted.
+ * v4.1.3-essentials promotion-ux: extra knob the test harness uses to
+ * force the text-input path even when stdout looks like a TTY.
+ *
+ *   - `forceTextInput: true`  — skip the interactive checkbox; use the
+ *                                text-parser path. Used by existing
+ *                                regression tests for the parser.
+ *   - `forceInteractive: true` — opposite: force the interactive path
+ *                                regardless of `process.stdout.isTTY`.
+ *                                Used by new interactive-path tests.
+ *   - neither set              — production behavior: auto-detect via
+ *                                `process.stdout.isTTY`.
+ */
+export interface PromotionPromptOptions {
+  forceTextInput?:   boolean;
+  forceInteractive?: boolean;
+}
+
+/**
+ * Drive the approval prompt. Two paths:
+ *
+ *   1. Interactive checkbox (TTY): @inquirer/prompts.checkbox, space
+ *      to toggle, enter to confirm, esc/ctrl+c to skip. Default
+ *      selection is NONE — the user explicitly opts in. v4.1.3-essentials
+ *      promotion-ux replaces what used to be a text-input chore.
+ *
+ *   2. Text-input fallback (non-TTY / piped / CI): renders the
+ *      numbered list and reads a single line. Parser handles "1,3"
+ *      / "1-3" / "all" / "skip" / "". Re-prompts ONCE on garbage,
+ *      then defaults to skip. The original Phase v4.1.2-memory-D
+ *      behavior, preserved verbatim.
+ *
+ * Auto-routes via `process.stdout.isTTY`; tests override via opts.
  *
  * No mid-session state leakage — purely a session-end interaction.
  */
@@ -141,9 +169,116 @@ export async function promptForApproval(
   api:        PromptApi,
   display:    PromptDisplay,
   candidates: ReadonlyArray<Candidate>,
+  opts:       PromotionPromptOptions = {},
 ): Promise<Candidate[]> {
   if (candidates.length === 0) return [];
 
+  const useInteractive =
+    opts.forceInteractive === true
+      ? true
+      : opts.forceTextInput === true
+        ? false
+        : !!process.stdout.isTTY;
+
+  if (useInteractive) {
+    return promptForApprovalInteractive(display, candidates);
+  }
+  return promptForApprovalText(api, display, candidates);
+}
+
+/**
+ * v4.1.3-essentials promotion-ux: interactive multi-select checkbox.
+ * Uses @inquirer/prompts.checkbox (already a runtime dep — same
+ * library as the model picker, setup wizard, approval prompts).
+ *
+ * Choices render with the source-type tag inline so the user sees
+ * "[decision] X" / "[open item] Y" / "[user said] Z" — matches the
+ * tag set the text-input renderer uses.
+ *
+ * Exit paths:
+ *   - User confirms with at least one box checked → return selected
+ *   - User confirms with zero boxes checked       → dim note, return []
+ *   - User hits Esc / Ctrl+C (inquirer throws)    → dim note, return []
+ *
+ * All three "nothing selected" paths produce the same outcome — empty
+ * array — matching the user's Q5 default ("empty/skip/esc all
+ * equivalent").
+ *
+ * Lazy-require inquirer so test harnesses without a TTY don't crash
+ * importing the module. Same pattern setupWizard / callbacks /
+ * modelPicker already use.
+ */
+async function promptForApprovalInteractive(
+  display:    PromptDisplay,
+  candidates: ReadonlyArray<Candidate>,
+): Promise<Candidate[]> {
+  // Dynamic ES import (not CommonJS require) so vitest's vi.mock can
+  // intercept the call in tests. The runtime behavior is identical
+  // for our purpose — single one-shot lazy load on first call.
+  const inq = await import('@inquirer/prompts') as unknown as {
+    checkbox: (opts: {
+      message:  string;
+      choices:  Array<{ name: string; value: number; checked?: boolean }>;
+      loop?:    boolean;
+      pageSize?: number;
+    }) => Promise<number[]>;
+  };
+
+  const heading =
+    `${candidates.length} thing${candidates.length === 1 ? '' : 's'} ` +
+    `worth remembering this session.`;
+  display.write('\n' + heading + '\n');
+
+  try {
+    const selected = await inq.checkbox({
+      message: 'Promote which to durable memory? (space toggles · enter confirms)',
+      choices: candidates.map((c, i) => ({
+        name:    `${typeTag(c)} ${c.text}`,
+        value:   i,
+        checked: false,
+      })),
+      loop:    false,
+      pageSize: Math.min(10, candidates.length),
+    });
+    if (selected.length === 0) {
+      display.dim('Nothing promoted to durable facts.');
+      return [];
+    }
+    return selected.map((i) => candidates[i]);
+  } catch {
+    // Inquirer throws on Ctrl+C / Esc — treat as skip.
+    display.dim('Skipped: nothing promoted to durable facts.');
+    return [];
+  }
+}
+
+/**
+ * Source-type tag matching the text-input renderer's format. Kept as
+ * a helper so the interactive choice labels stay in sync with the
+ * text path if a new `Candidate.source` value lands.
+ */
+function typeTag(c: Candidate): string {
+  if (c.source === 'explicit')  return '[user said]';
+  if (c.source === 'decision')  return '[decision]';
+  return '[open item]';
+}
+
+/**
+ * Phase v4.1.2-memory-D text-input loop. Renders the candidate list,
+ * reads ONE line, parses, returns approved Candidate[]. On unparseable
+ * input re-prompts ONCE; second failure defaults to skip with a dim
+ * line explaining why nothing was promoted.
+ *
+ * Kept as the non-TTY fallback (pipes, CI, test harness) so the
+ * promotion-flow contract continues to work without an interactive
+ * shell. v4.1.3-essentials promotion-ux renamed this from
+ * `promptForApproval` so the public entry point can dispatch.
+ */
+async function promptForApprovalText(
+  api:        PromptApi,
+  display:    PromptDisplay,
+  candidates: ReadonlyArray<Candidate>,
+): Promise<Candidate[]> {
   display.write('\n' + formatCandidateList(candidates) + '\n');
 
   for (let attempt = 0; attempt < 2; attempt += 1) {

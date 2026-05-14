@@ -68,6 +68,13 @@ import { appLaunchTool } from './system/appLaunch';
 import { appCloseTool } from './system/appClose';
 import { clipboardReadTool } from './system/clipboardRead';
 import { clipboardWriteTool } from './system/clipboardWrite';
+// v4.1.4-media — three-layer media-control bundle.
+// Layer 2 (OS media session): mediaSessions (read) + mediaTransport (write).
+// Layer 3 fallback (mediaKey, blind keystroke) remains unchanged.
+// Layer 1 (semantic API) is per-app and out of this slice.
+import { mediaSessionsTool } from './system/mediaSessions';
+import { mediaTransportTool } from './system/mediaTransport';
+import { appInputTool } from './system/appInput';
 // Phase v4.1.2-update — natural-language self-update entry point.
 // Routes through the same shared executeInstall executor as `/update install`.
 import { aidenSelfUpdateTool } from './system/aidenSelfUpdate';
@@ -139,6 +146,9 @@ export function registerReadOnlyTools(registry: ToolRegistry): void {
   registry.register(screenshotTool);
   registry.register(osProcessListTool);
   registry.register(clipboardReadTool);
+  // v4.1.4-media — GSMTC session enumeration (read). Pair with
+  // mediaTransport (write) in the write-tools registration below.
+  registry.register(mediaSessionsTool);
 
   registry.register(makeLookupToolSchema(registry));
 
@@ -230,6 +240,11 @@ export function registerWriteTools(registry: ToolRegistry): void {
   registry.register(appLaunchTool);
   registry.register(appCloseTool);
   registry.register(clipboardWriteTool);
+  // v4.1.4-media — verified GSMTC transport (replaces mediaKey for
+  // the "name an app, play/pause it" case) + focused-window SendKeys
+  // (escape hatch when GSMTC doesn't enumerate the surface).
+  registry.register(mediaTransportTool);
+  registry.register(appInputTool);
 }
 
 /** Register every v4 tool. Most callers want this. */
@@ -281,6 +296,10 @@ export { appLaunchTool } from './system/appLaunch';
 export { appCloseTool } from './system/appClose';
 export { clipboardReadTool } from './system/clipboardRead';
 export { clipboardWriteTool } from './system/clipboardWrite';
+// v4.1.4-media exports — three-layer media-control bundle.
+export { mediaSessionsTool } from './system/mediaSessions';
+export { mediaTransportTool } from './system/mediaTransport';
+export { appInputTool } from './system/appInput';
 export { shellExecTool } from './terminal/shellExec';
 export { executeCodeTool } from './executeCode';
 export { processSpawnTool } from './process/processSpawn';

@@ -1,9 +1,15 @@
 // core/tools/nowPlaying.ts — Live media session query via Windows WinRT
 // Uses GlobalSystemMediaTransportControlsSessionManager (works for Spotify,
 // YouTube in browser, Windows Media Player, and any SMTC-registered app).
+//
+// v4.1.4-media: the WinRT `Await` PS5.1 reflection bridge moved into the
+// shared helper `tools/v4/system/_psHelpers.ts::winRtAwaitPreamble()` so
+// the three GSMTC callers (this file + mediaSessions + mediaTransport)
+// share one canonical implementation.
 
 import { exec } from 'child_process'
 import { promisify } from 'util'
+import { winRtAwaitPreamble } from '../../tools/v4/system/_psHelpers'
 
 const execAsync = promisify(exec)
 
@@ -17,22 +23,8 @@ export interface NowPlayingResult {
   message?:       string
 }
 
-// PowerShell uses System.WindowsRuntimeSystemExtensions.AsTask to bridge
-// WinRT IAsyncOperation<T> into a .NET Task — required because PS5.1 cannot
-// await WinRT async operations natively via .GetAwaiter().
 const PS_SCRIPT = `
-Add-Type -AssemblyName System.Runtime.WindowsRuntime
-function Await($WinRtTask, $ResultType) {
-    $m = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
-        $_.Name -eq 'AsTask' -and
-        $_.GetParameters().Count -eq 1 -and
-        $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation\`1'
-    })[0]
-    $m = $m.MakeGenericMethod($ResultType)
-    $t = $m.Invoke($null, @($WinRtTask))
-    $t.Wait(-1) | Out-Null
-    $t.Result
-}
+${winRtAwaitPreamble()}
 $mgType = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,Windows.Media.Control,ContentType=WindowsRuntime]
 $mgr = Await ($mgType::RequestAsync()) $mgType
 $s = $mgr.GetCurrentSession()

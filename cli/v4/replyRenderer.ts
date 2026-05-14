@@ -39,6 +39,51 @@ function paint(kind: 'brand' | 'heading' | 'muted' | 'agent' | 'tool' | 'success
 }
 
 /**
+ * v4.1.3-essentials: bold (`**foo**`) markdown emphasis renders as
+ * ANSI bold + underline. Previously painted 'brand' (orange) which
+ * collided with the heading hierarchy. Briefly tried bold + bright-
+ * white; landed on bold + underline because underline carries
+ * emphasis without consuming a color slot — the palette stays
+ * available for state semantics (yellow=degraded, red=error, etc.).
+ *
+ * ANSI sequence: `\x1b[1m\x1b[4m{text}\x1b[24m\x1b[22m` — bold ON +
+ * underline ON, then underline OFF + bold OFF. Reset order matters
+ * (underline first, bold second) so the closing codes don't reorder
+ * styles surprisingly on terminals that batch SGR updates.
+ *
+ * Bypasses the skin system intentionally — bold-as-underline is an
+ * opinionated default for this slice. Same caveat as the prior bold-
+ * as-color iteration: nested markdown loses the outer style after
+ * close (pre-existing limitation of the painter-stack architecture).
+ *
+ * Honors `NO_COLOR=1` per the standard (skips the wrap entirely).
+ * Strictly speaking `NO_COLOR` is about color and underline isn't
+ * a color, but the wrap still emits ANSI escapes; honoring the env
+ * var keeps output paste-safe in scripted contexts.
+ */
+function paintBoldUnderline(text: string): string {
+  if (process.env.NO_COLOR && process.env.NO_COLOR !== '') return text;
+  return `\x1b[1m\x1b[4m${text}\x1b[24m\x1b[22m`;
+}
+
+/**
+ * v4.1.3-essentials reply-polish: bold-on + skin paint + bold-off.
+ * Used by the 4-tier heading hierarchy so each level can pick its own
+ * color while sharing the bold weight. Emit order matches the rest of
+ * the painter stack: outer wrap is bold, inner wrap is fg color.
+ *
+ * Honors `NO_COLOR=1` via the skin engine's own gate; the bold ANSI
+ * still emits because bold is a weight, not a color (matches the
+ * paintBoldUnderline convention for `**bold**`).
+ */
+function paintBold(
+  kind: 'brand' | 'heading' | 'muted' | 'agent' | 'tool' | 'success' | 'warn' | 'error' | 'accent',
+): Painter {
+  const colorize = paint(kind);
+  return (text: string) => `\x1b[1m${colorize(text)}\x1b[22m`;
+}
+
+/**
  * Render a fenced code block: top divider with language label, body
  * with optional syntax highlighting, bottom divider.
  *
@@ -53,10 +98,38 @@ function paint(kind: 'brand' | 'heading' | 'muted' | 'agent' | 'tool' | 'success
  * the renderer with; the older positional path is kept for
  * compatibility.
  */
+/**
+ * v4.1.3-essentials reply-polish: 24-bit dark background applied per
+ * line so code stands out from prose.
+ *
+ * Color choice: `\x1b[48;2;50;50;60m` (#32323c, slightly bluish dark
+ * grey). The original `30,30,30` (#1e1e1e) was invisible against VS
+ * Code's integrated terminal default (also #1e1e1e) and barely
+ * distinct from Windows Terminal's One Half Dark. #32323c is visibly
+ * different from every common dark-terminal default (Campbell, One
+ * Half Dark, Solarized Dark, Monokai, VS Code) while staying subtle
+ * enough to read as "code chrome" rather than a jarring highlight.
+ *
+ * Used by BOTH the block path (fenced code blocks) and the inline
+ * path (`` `code` `` spans) so the two affordances visually agree —
+ * inline code reads as "this is code" via the same chrome as block
+ * code, just shorter.
+ *
+ * NOTE: \x1b[49m is "default background", terminating the per-line
+ * background scope cleanly. Each body line is wrapped individually
+ * rather than wrapping the whole block, so the background doesn't
+ * bleed across the closing horizontal rule (which already paints fg
+ * muted with its own reset).
+ */
+const CODE_BG_ON  = '\x1b[48;2;50;50;60m';
+const CODE_BG_OFF = '\x1b[49m';
+
 function renderCodeBlock(code: string, lang: string | undefined): string {
   const sk = getSkinEngine();
   const width = Math.min(process.stdout.columns ?? 80, 100) - 4;
   const langLabel = (lang ?? '').trim();
+  // v4.1.3-essentials reply-polish: language tag on the top rule
+  // already shipped; keep it. Bottom rule unlabeled (closing fence).
   const top = langLabel
     ? `── ${langLabel} ${'─'.repeat(Math.max(0, width - langLabel.length - 4))}`
     : '─'.repeat(width);
@@ -64,7 +137,22 @@ function renderCodeBlock(code: string, lang: string | undefined): string {
   const body = isSupportedLang(langLabel)
     ? highlightCode(code, langLabel)
     : code;
-  const indented = body.split('\n').map((ln) => `  ${ln}`).join('\n');
+  // v4.1.3-essentials reply-polish: each body line gets:
+  //   - 2-space outer indent (existing reply container indent)
+  //   - left rail `│ ` painted muted (mirrors blockquote's `┃ ` rail
+  //     with a different glyph so they're visually distinct)
+  //   - 24-bit dark background wrapping the rail + content (subtle
+  //     "this is code" affordance without going full TUI box-frame)
+  //
+  // Strip the optional ANSI-only NO_COLOR gate by emitting bg codes
+  // unconditionally — the skin engine already short-circuits inner
+  // paint calls when NO_COLOR is set, and bare bg codes degrade
+  // gracefully on terminals that don't render them.
+  const rail = sk.applyColors('│', 'muted');
+  const indented = body
+    .split('\n')
+    .map((ln) => `  ${rail} ${CODE_BG_ON} ${ln} ${CODE_BG_OFF}`)
+    .join('\n');
   return [
     sk.applyColors(top, 'muted'),
     indented,
@@ -86,25 +174,59 @@ function renderBlockquote(quote: string): string {
 }
 
 /**
- * Marked-terminal heading callback gets the rendered heading text +
- * level. We paint h1 in brand-bold, h2 in brand, h3+ in heading.
+ * v4.1.3-essentials reply-polish: 4-tier heading hierarchy using the
+ * existing palette colors so visual weight differs per level even
+ * though we don't introduce a new ColorKind.
+ *
+ *   H1 — brand   + bold + UPPERCASE  (major section heading)
+ *   H2 — brand   + bold                (subsection — same hue as H1
+ *                                       but sentence-case + no caps)
+ *   H3 — agent   + bold                (off-white, lighter weight
+ *                                       than brand)
+ *   H4+ — muted  + bold                (quietest — same grey as the
+ *                                       reply container's chrome)
+ *
+ * v4.1.3-essentials reply-polish: spacing tightened from `\n\n` to
+ * `\n` per level. marked-terminal contributes its own block
+ * separator (one more newline) → total `\n\n` between heading and
+ * next block = single blank line, matching paragraph rhythm.
+ * Previously this emitted `\n\n\n\n` (three blank lines) which made
+ * structured replies feel cramped at top and over-aired between
+ * sections.
  */
-function renderHeading(text: string, level: number, _raw: string): string {
-  if (level <= 1) return paint('brand')(text.toUpperCase()) + '\n\n';
-  if (level === 2) return paint('brand')(text) + '\n\n';
-  return paint('heading')(text) + '\n\n';
+// 4-tier hierarchy. Called by the prototype-level `heading` override
+// in getReplyRenderer() which extracts depth from the token first.
+// Plain `(text, depth)` signature; the marked v15 / v14 / positional
+// translation happens in the override.
+//
+// Each tier ends with `\n\n` to fence the heading from the next block
+// with a blank line. Earlier we tried `\n` (single trailing newline)
+// assuming marked-terminal's `section()` wrapper added its own
+// padding — but the prototype-level override bypasses section(), so
+// we own the spacing end-to-end. Result with `\n\n`: heading visible
+// on its own line, blank line separates it from the next paragraph /
+// heading / list. Matches the paragraph rhythm (`text\n\n`).
+function renderHeading(text: string, depth: number): string {
+  if (depth <= 1) return paintBold('brand')(text.toUpperCase()) + '\n\n';
+  if (depth === 2) return paintBold('brand')(text) + '\n\n';
+  if (depth === 3) return paintBold('agent')(text) + '\n\n';
+  return paintBold('muted')(text) + '\n\n';
 }
 
 /**
- * List items get a `▸ ` glyph in muted; numbered lists keep their
- * numeric prefix (marked-terminal already prepends `N.` for ordered
- * lists, so we just paint the body).
+ * v4.1.3-essentials reply-polish: the `opts.listitem` callback used to
+ * own bullet rendering but marked-terminal's outer `list` method
+ * ALSO emits a `* ` prefix, producing visible double bullets
+ * (`  *   ▸ item`). The fix is a prototype-level override on BOTH
+ * `list` and `listitem` (mirrors the existing pattern for `code` and
+ * `link`). See the override block in getReplyRenderer().
+ *
+ * This callback now just returns the inner text unchanged so the
+ * prototype-level `list` override can do the bullet + indent work
+ * with full nesting-depth context.
  */
 function renderListItem(text: string): string {
-  // marked-terminal feeds us the rendered child text. Strip its
-  // default tab prefix so our two-space indent stays consistent.
-  const body = text.replace(/^\s+/, '');
-  return `  ${paint('muted')('▸')} ${body}\n`;
+  return text;
 }
 
 /**
@@ -126,14 +248,33 @@ export function getReplyRenderer(): { render: (text: string) => string } {
   // method directly below.
   const opts = {
     blockquote:   renderBlockquote,
-    heading:      renderHeading,
-    firstHeading: (text: string, _level: number, _raw: string) => paint('brand')(text.toUpperCase()) + '\n\n',
+    // v4.1.3-essentials reply-polish: `opts.heading` and `opts.firstHeading`
+    // both removed. marked-terminal calls `opts.heading(text)` with ONLY
+    // text (audit-confirmed via toString), dropping the depth info we
+    // need for the 4-tier hierarchy. The prototype-level `renderer.heading`
+    // override below owns the depth extraction + tier selection end-to-end.
+    // marked-terminal's stripped-args call path never reaches our callback.
     hr:           () => paint('muted')('─'.repeat(Math.min(process.stdout.columns ?? 80, 100) - 4)) + '\n',
     listitem:     renderListItem,
     paragraph:    (text: string) => `${text}\n\n`,
-    strong:       paint('brand'),
+    // v4.1.3-essentials: bold renders as ANSI bold + underline
+    // (was 'brand' / orange, then bright-white; landed on underline
+    // so the color palette stays available for state semantics).
+    strong:       paintBoldUnderline,
     em:           paint('muted'),
-    codespan:     (text: string) => paint('accent')(`\`${text}\``),
+    // v4.1.3-essentials reply-polish: inline `` `code` `` — strip
+    // the literal backticks (used to leak into the visible output)
+    // and wrap with the same dark background as fenced code blocks.
+    // Visual consistency: inline code reads as "this is code" via the
+    // same chrome as block code, just shorter. One leading + trailing
+    // space inside the bg span gives the chrome a bit of padding so
+    // letters don't sit flush against the bg edge.
+    //
+    // Trade-off (accepted): if an inline-code span breaks across a
+    // line wrap, the bg painting may show a visual seam at the wrap
+    // point. Acceptable for v4.1.3 — revertable to Path A (no bg) if
+    // visual smoke surfaces a real problem.
+    codespan:     (text: string) => `${CODE_BG_ON} ${paint('accent')(text)} ${CODE_BG_OFF}`,
     del:          paint('muted'),
     // marked-terminal calls opts.link with the ASSEMBLED visual
     // (already OSC8-wrapped when the host terminal supports it),
@@ -188,6 +329,164 @@ export function getReplyRenderer(): { render: (text: string) => string } {
     if (!label) label = url;
     const painted = paint('accent')(label);
     return `\x1b]8;;${url}\x1b\\${painted}\x1b]8;;\x1b\\`;
+  };
+
+  // v4.1.3-essentials reply-polish: prototype-level `heading` override.
+  //
+  // Why: marked-terminal's internal `heading` method extracts the
+  // token's depth, then calls `opts.heading(text)` with ONLY the
+  // text — dropping the level info on the floor. Our 4-tier hierarchy
+  // (H1 brand+caps, H2 brand, H3 agent, H4+ muted) needs level
+  // context, so we must own the whole method.
+  //
+  // The override accepts marked v15's token-object shape and falls
+  // through to v14 positional for unit tests that pass plain strings.
+  renderer.heading = function (textOrToken: unknown, levelArg?: number, _raw?: string): string {
+    let text:  string;
+    let depth: number;
+    if (typeof textOrToken === 'object' && textOrToken !== null) {
+      const tok = textOrToken as { depth?: number; text?: string; tokens?: unknown[] };
+      depth = typeof tok.depth === 'number' ? tok.depth : 1;
+      // Prefer parseInline for rich heading content (e.g. `## H2 with **bold**`).
+      // Falls through to tok.text for the common plain-text case.
+      const parser = (this as { parser?: { parseInline?: (t: unknown[]) => string } }).parser;
+      if (tok.tokens && parser?.parseInline) {
+        text = parser.parseInline(tok.tokens);
+      } else {
+        text = String(tok.text ?? '');
+      }
+    } else {
+      text  = String(textOrToken ?? '');
+      depth = typeof levelArg === 'number' ? levelArg : 1;
+    }
+    return renderHeading(text, depth);
+  };
+
+  // v4.1.3-essentials reply-polish: prototype-level list overrides.
+  //
+  // Why two functions and a depth counter:
+  //   - marked-terminal's default `list` injects a `* ` (or `N. `)
+  //     prefix BEFORE calling our `opts.listitem` callback, producing
+  //     visible double bullets — see audit. Owning `list` at the
+  //     prototype level lets us suppress that and emit our own.
+  //   - Nesting depth determines the bullet glyph: top-level gets `•`
+  //     and any deeper level gets `▸`. marked doesn't pass depth to
+  //     the renderer, so we track it on the renderer instance via a
+  //     counter that increments on `list`-enter and decrements on
+  //     exit. This works because marked walks the token tree
+  //     synchronously: a nested list's `list` call always completes
+  //     between its parent's `list`-enter and `list`-exit.
+  //   - Items already had their child markdown rendered via the
+  //     prototype's `listitem` (which we leave as a passthrough above
+  //     in the opts block — it just returns the inner text). The
+  //     body string we receive in `list` is the concatenated children;
+  //     each child can itself be a nested list rendering, whose own
+  //     `list` call already handled its bullets + indent.
+  //
+  // Numbered lists: `start` and `ordered` come from the token; we
+  // emit `N.` prefix in muted to keep the visual rhythm consistent
+  // with bulleted lists but preserve numeric semantics.
+  //
+  // Indent: 2 spaces per nesting level. Top-level items therefore
+  // sit at column 2 (matching the rest of the reply container's
+  // chrome); nested at column 4, 6, etc.
+  const proto = renderer as { _listDepth?: number };
+  proto._listDepth = 0;
+  renderer.listitem = function (text: unknown, _task?: boolean, _checked?: boolean): string {
+    // marked v15 may pass a token object; the assembled-text fallback
+    // covers older signatures. Either way we want the inner text
+    // unchanged here — bullet + indent is owned by `list` below.
+    if (typeof text === 'object' && text !== null) {
+      const tok = text as { text?: string; tokens?: unknown[] };
+      if (typeof tok.text === 'string') return tok.text;
+      const parser = (this as { parser?: { parseInline?: (t: unknown[]) => string } }).parser;
+      return parser?.parseInline?.(tok.tokens ?? []) ?? '';
+    }
+    return String(text ?? '');
+  };
+  renderer.list = function (body: unknown, ordered?: boolean, start?: number): string {
+    // marked v15 token shape: { ordered, start, items: [token, ...] }
+    // Older positional shape: (body, ordered, start)
+    let isOrdered = false;
+    let startNum  = 1;
+    let items:    string[];
+    // CRITICAL: increment depth BEFORE walking items. Item walking via
+    // `parser.parse(it.tokens)` recurses into our own override for any
+    // nested list tokens — those nested calls need to see the parent's
+    // incremented depth so they pick the deeper bullet glyph (▸) and
+    // indent. If we increment AFTER `parser.parse`, the nested call
+    // sees depth=0, renders at top-level styling, and the visible
+    // nesting collapses. Confirmed via runtime trace.
+    proto._listDepth = (proto._listDepth ?? 0) + 1;
+    const depth = proto._listDepth;
+
+    if (typeof body === 'object' && body !== null) {
+      const tok = body as {
+        ordered?: boolean;
+        start?:   number;
+        items?:   Array<{ tokens?: unknown[]; text?: string }>;
+      };
+      isOrdered = tok.ordered === true;
+      startNum  = typeof tok.start === 'number' ? tok.start : 1;
+      // marked v15: renderer instance has a `parser` field pointing
+      // back to the Parser; `Parser.parse(tokens)` walks the token
+      // tree dispatching back to renderer methods (including this
+      // very `list` override for nested lists, which is what makes
+      // the depth counter increment properly).
+      const parser = (this as { parser?: { parse?: (t: unknown[]) => string; parseInline?: (t: unknown[]) => string } }).parser;
+      items = (tok.items ?? []).map((it) => {
+        if (it.tokens && parser?.parse) {
+          return parser.parse(it.tokens);
+        }
+        return it.text ?? '';
+      });
+    } else {
+      isOrdered = ordered === true;
+      startNum  = typeof start === 'number' ? start : 1;
+      // Positional `body` is the already-concatenated rendered items.
+      // Split on newlines that introduce a fresh item; marked emits
+      // each item as its own logical line. Best-effort — marked v15
+      // path above is the production case.
+      const raw = String(body ?? '');
+      items = raw.split('\n').filter((ln) => ln.trim().length > 0);
+    }
+    const indent = '  '.repeat(depth);
+    // Top-level bullet `•` (filled); nested `▸` (arrow-like) for
+    // visual depth differentiation. Numbered lists override with
+    // `N.` regardless of depth.
+    const bulletGlyph = depth === 1 ? '•' : '▸';
+
+    const lines: string[] = [];
+    for (let i = 0; i < items.length; i += 1) {
+      const item = items[i];
+      // Each item may itself contain newlines (nested list output,
+      // multi-line paragraph). Indent every line of the rendered
+      // item AFTER the first — the first line takes the bullet, the
+      // continuation lines align under the bullet's content column.
+      const marker = isOrdered
+        ? paint('muted')(`${startNum + i}.`)
+        : paint('muted')(bulletGlyph);
+      const itemLines = item.split('\n');
+      const head = itemLines[0] ?? '';
+      const tail = itemLines.slice(1);
+      lines.push(`${indent}${marker} ${head}`);
+      // Continuation lines: if they already have content, align them
+      // under the bullet's text column (indent + marker-width + 1
+      // space). marked-terminal's nested lists arrive pre-indented so
+      // we pass them through.
+      for (const tailLine of tail) {
+        if (tailLine.length === 0) continue;
+        lines.push(tailLine);
+      }
+    }
+
+    proto._listDepth -= 1;
+
+    // Top-level list closes with a trailing newline to separate from
+    // the next block; nested lists return without extra padding so
+    // they nest cleanly inside their parent item.
+    const out = lines.join('\n');
+    return proto._listDepth === 0 ? out + '\n' : out + '\n';
   };
 
   cachedRenderer = {
