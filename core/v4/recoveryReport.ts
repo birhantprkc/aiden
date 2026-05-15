@@ -83,6 +83,43 @@ export interface RecoveryReport {
   }>;
   /** One-sentence next-step guidance, derived from dominant failure category. */
   guidance: string;
+  /**
+   * v4.3 Phase 5 — browser-specific context populated when the
+   * BrowserState observer has tab data (i.e. AIDEN_BROWSER_DEPTH=1
+   * AND at least one browser tool fired this turn). Absent otherwise.
+   *
+   * Surfaced into the recovery card as a muted "Browser:" line right
+   * below the whatHappened summary so the user sees what the browser
+   * is in when recovery fires.
+   */
+  browserContext?: {
+    /** URL of the currently-active tab. */
+    activeTabUrl?:   string;
+    /** Title of the active tab. */
+    activeTabTitle?: string;
+    /** Coarse kind of the active tab's most-recent blocker (if any). */
+    activeBlocker?:  'captcha' | 'login' | '2fa' | 'verification' | 'consent';
+    /** Count of OTHER tabs (excludes active). */
+    otherTabCount:   number;
+    /** Stale-ref retry attempts that fired during the turn. */
+    staleRefRetries: number;
+  };
+}
+
+/**
+ * v4.3 Phase 5 — minimal structural interface for the BrowserState
+ * observer's tab-state surface. Used by `buildRecoveryReport` to
+ * populate `browserContext` without taking a hard import dependency
+ * on the browserState module (keeps import direction clean: lower-
+ * layer recoveryReport doesn't depend on browser-domain modules).
+ */
+export interface BrowserStateLike {
+  getActiveTab(): {
+    url?: string;
+    title?: string;
+    last_blocker?: { kind: 'captcha' | 'login' | '2fa' | 'verification' | 'consent' };
+  } | null;
+  getTabs(): Array<{ is_active: boolean }>;
 }
 
 // ── Goal extraction ────────────────────────────────────────────────────────
@@ -146,6 +183,10 @@ const GUIDANCE_BY_CATEGORY: Record<FailureCategory, string> = {
     'The model used a path or name that does not exist. Re-read the surrounding state before retrying.',
   not_found:
     'The target resource was not found. Verify the path or name and try again with a corrected value.',
+  stale_ref:
+    'The page changed between snapshot and action. The observer already attempted resnapshot+retry once — re-read the visible state and try a different selector or approach.',
+  manual_blocker:
+    'The site requires a human action (login, 2FA, captcha, or verification). Surface this to the user and wait — do not retry automatically.',
   other:
     'The tool failed for an unclassified reason. Inspect the trace for details before retrying.',
 };
@@ -162,6 +203,14 @@ export interface BuildRecoveryReportInput {
   goal:        string;
   exitReason:  RecoveryExitReason;
   durationMs:  number;
+  /**
+   * v4.3 Phase 5 — optional BrowserState for browser-context
+   * enrichment. When provided AND it reports any tabs, the report
+   * gets a `browserContext` field populated with active tab info +
+   * blocker + other-tab count. Absent when not passed, or when the
+   * observer has no tabs (AIDEN_BROWSER_DEPTH=0).
+   */
+  browserState?: BrowserStateLike;
 }
 
 /**
@@ -221,6 +270,17 @@ export function buildRecoveryReport(
   // ── Guidance — dominant failure category ────────────────────────────────
   const guidance = synthesizeGuidance(breakdown);
 
+  // ── v4.3 Phase 5 — browserContext enrichment ────────────────────────────
+  // Populated when an optional BrowserStateLike is provided AND it
+  // reports at least one tab. Counts stale-ref retries from the
+  // recoveryStages signal indirectly — Phase 2's auto-retry fires
+  // via the HOC, not TurnState's recovery state machine, so we look
+  // for retried classifications in the snapshot instead.
+  const browserContext = buildBrowserContext(
+    input.browserState,
+    snapshot,
+  );
+
   return {
     goal,
     exitReason,
@@ -231,7 +291,45 @@ export function buildRecoveryReport(
     successfulTools: [...snapshot.successfulTools],
     recoveryStages,
     guidance,
+    ...(browserContext ? { browserContext } : {}),
   };
+}
+
+/**
+ * v4.3 Phase 5 — build the `browserContext` sidecar from an optional
+ * BrowserStateLike + diagnostic snapshot. Returns null when no tabs
+ * exist (AIDEN_BROWSER_DEPTH=0 or no browser action this turn) so
+ * the caller can decide whether to include the field.
+ *
+ * Stale-ref retry count derives from classifications with category
+ * `stale_ref` — Phase 5's classifier produces those when Phase 2's
+ * HOC-level retry attempted but failed. Successful retries don't
+ * appear in classifications (their final result has `success:true`).
+ */
+function buildBrowserContext(
+  browserState: BrowserStateLike | undefined,
+  snapshot:    TurnStateDiagnosticSnapshot,
+): NonNullable<RecoveryReport['browserContext']> | null {
+  if (!browserState) return null;
+  const tabs = browserState.getTabs();
+  if (tabs.length === 0) return null;
+  const active = browserState.getActiveTab();
+  const otherTabCount = active
+    ? tabs.filter((t) => !t.is_active).length
+    : tabs.length;
+  // Count stale_ref classifications recorded by Phase 5's browser
+  // classifier in the turn's classifications log.
+  const staleRefRetries = snapshot.classifications.filter(
+    (c) => c.classification.category === 'stale_ref',
+  ).length;
+  const ctx: NonNullable<RecoveryReport['browserContext']> = {
+    otherTabCount,
+    staleRefRetries,
+  };
+  if (active?.url)          ctx.activeTabUrl   = active.url;
+  if (active?.title)        ctx.activeTabTitle = active.title;
+  if (active?.last_blocker) ctx.activeBlocker  = active.last_blocker.kind;
+  return ctx;
 }
 
 /**
@@ -250,7 +348,10 @@ function synthesizeGuidance(
 
   const PRIORITY: ReadonlyArray<FailureCategory> = [
     'timeout', 'rate_limit', 'network', 'invalid_input',
-    'not_found', 'hallucination', 'dependency_missing',
+    'not_found',
+    'stale_ref',          // v4.3 Phase 5 — auto-recoverable via wait+retry
+    'hallucination', 'dependency_missing',
+    'manual_blocker',     // v4.3 Phase 5 — requires human action; semi-blocking
     'permission', 'auth', 'other',
   ];
   const rank = (c: FailureCategory): number => {
@@ -289,6 +390,13 @@ export function enrichCardWithReport(
 ): CapabilityCardData {
   const whatHappened = buildWhatHappenedLine(report);
   const failuresByCategory = buildFailuresPills(report.failureBreakdown);
+  // v4.3 Phase 5 — browser-context inline row. Only present when the
+  // report carries browserContext (which requires an active BrowserState
+  // with tabs). Renderer treats this as a single-line muted addition
+  // below whatHappened.
+  const browserContext = report.browserContext
+    ? buildBrowserContextLine(report.browserContext)
+    : undefined;
   return {
     title:           base.title,
     canStill:        base.canStill,
@@ -296,7 +404,34 @@ export function enrichCardWithReport(
     fix:             report.guidance,
     whatHappened,
     failuresByCategory,
+    ...(browserContext ? { browserContext } : {}),
   };
+}
+
+/**
+ * v4.3 Phase 5 — format the browserContext fields into a compact
+ * single-line summary for the recovery card. Returns empty string
+ * when no signal worth surfacing.
+ */
+function buildBrowserContextLine(
+  ctx: NonNullable<RecoveryReport['browserContext']>,
+): string {
+  const parts: string[] = [];
+  if (ctx.activeTabUrl) {
+    try {
+      parts.push(`active=${new URL(ctx.activeTabUrl).hostname || ctx.activeTabUrl}`);
+    } catch {
+      parts.push(`active=${ctx.activeTabUrl}`);
+    }
+  }
+  if (ctx.activeBlocker) parts.push(`${ctx.activeBlocker} blocker`);
+  if (ctx.otherTabCount > 0) {
+    parts.push(`${ctx.otherTabCount} other tab${ctx.otherTabCount === 1 ? '' : 's'}`);
+  }
+  if (ctx.staleRefRetries > 0) {
+    parts.push(`${ctx.staleRefRetries} stale-ref retr${ctx.staleRefRetries === 1 ? 'y' : 'ies'}`);
+  }
+  return parts.length > 0 ? `Browser: ${parts.join(' · ')}` : '';
 }
 
 function buildWhatHappenedLine(report: RecoveryReport): string {
@@ -319,7 +454,10 @@ function buildFailuresPills(
   // Same ordering rule as guidance synthesis: count desc, priority asc.
   const PRIORITY: ReadonlyArray<FailureCategory> = [
     'timeout', 'rate_limit', 'network', 'invalid_input',
-    'not_found', 'hallucination', 'dependency_missing',
+    'not_found',
+    'stale_ref',          // v4.3 Phase 5 — auto-recoverable via wait+retry
+    'hallucination', 'dependency_missing',
+    'manual_blocker',     // v4.3 Phase 5 — requires human action; semi-blocking
     'permission', 'auth', 'other',
   ];
   const rank = (c: FailureCategory): number => {

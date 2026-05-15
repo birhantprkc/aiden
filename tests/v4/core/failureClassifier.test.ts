@@ -2,7 +2,10 @@
  * v4.2 Phase 2 — Failure classifier unit tests.
  *
  * Coverage:
- *   1. Each of the 10 FailureCategory values produced by the default
+ *   1. Each of the 10 generic FailureCategory values produced by the default
+ *      classifier (the 2 v4.3 Phase 5 browser-specific values
+ *      `stale_ref` + `manual_blocker` are only emitted by the per-tool
+ *      browser classifiers — covered in tests/v4/core/browserClassifier.test.ts)
  *      classifier from canonical error strings.
  *   2. Priority ordering — timeout > rate_limit > auth > network >
  *      permission > invalid_input > dependency_missing > not_found.
@@ -36,7 +39,7 @@ function mkOk(): VerificationResult {
   return { ok: true, confidence: 1.0, code: 'ok' };
 }
 
-describe('defaultClassifier — 10 categories', () => {
+describe('defaultClassifier — 10 generic categories', () => {
   it('timeout: "Operation timed out"', () => {
     const c = defaultClassifier(mkFailed('Operation timed out after 30s'), 'shell_exec', {}, mkResult());
     expect(c.category).toBe('timeout');

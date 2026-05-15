@@ -96,6 +96,14 @@ export function renderCapabilityCard(
     rows.push(`${label} ${truncToContent(pills)}`);
   }
 
+  // v4.3 Phase 5 — optional one-line browser context summary
+  // (active tab, blocker kind, other-tab count, stale-ref retries).
+  // Already pre-formatted by recoveryReport's `buildBrowserContextLine`.
+  // Rendered as a muted-tone line below the Failures: row when present.
+  if (data.browserContext) {
+    rows.push(colorize(truncToContent(data.browserContext), 'muted'));
+  }
+
   if (data.canStill.length > 0) {
     rows.push('');
     rows.push(heading('Can still:'));

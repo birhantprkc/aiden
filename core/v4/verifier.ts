@@ -428,6 +428,62 @@ export const webFetchVerifier: VerifierFn = (_n, _a, result) => {
   return defaultVerifier(_n, _a, result);
 };
 
+// ── v4.3 Phase 5 — Browser interactive verifier ────────────────────────────
+
+/**
+ * Minimal structural shape of `result.result.browserState` — mirrors
+ * `ActionResult` in `core/v4/browserState.ts`. Same lockstep contract
+ * as `BrowserStateSidecar` in failureClassifier.ts; same reason for
+ * declaring structurally (avoids import cycle).
+ */
+interface BrowserStateSidecarForVerifier {
+  progress_score: number;
+  evidence:       string[];
+  maybe_noop:     boolean;
+  needs_verifier: boolean;
+}
+
+/**
+ * v4.3 Phase 5 — verifier for the 3 interactive browser tools
+ * (`browser_click`, `browser_type`, `browser_fill`) and
+ * `browser_navigate`. Extends defaultVerifier with one extra check:
+ * when the tool returns `success: true` BUT Phase 1's observer flagged
+ * `needs_verifier === true` (page state didn't meaningfully change),
+ * demote `ok` to false so the classifier runs and routes to
+ * `stale_ref` (page unresponsive) for the right recovery action.
+ *
+ * Without this demotion, the `needs_verifier` field would be a
+ * dormant hint with no behavioral effect. The whole point of Phase 1
+ * capturing it was to gate this verifier check.
+ *
+ * Conservative ordering — only runs the demotion AFTER the default
+ * verifier passed. Failed calls still classify via the existing
+ * path; success-but-noop is the specific case Phase 5 handles.
+ */
+export const browserInteractiveVerifier: VerifierFn = (toolName, args, result) => {
+  const base = defaultVerifier(toolName, args, result);
+  if (!base.ok) return base;
+
+  // Read the v4.3 sidecar. Absent when AIDEN_BROWSER_DEPTH=0 — in
+  // that case the verifier falls back to the default-passing result.
+  const inner = result.result;
+  if (!inner || typeof inner !== 'object') return base;
+  const bs = (inner as { browserState?: BrowserStateSidecarForVerifier }).browserState;
+  if (!bs) return base;
+  if (!bs.needs_verifier) return base;
+
+  // Demote — the tool returned success but the page didn't change
+  // meaningfully. Classifier will route to stale_ref.
+  return {
+    ok:         false,
+    confidence: 0.75,
+    code:       bs.maybe_noop ? 'no_progress' : 'low_signal',
+    reason:     bs.maybe_noop
+      ? 'tool returned success but page state did not change'
+      : `low progress (${bs.progress_score.toFixed(2)}) — UI may not have responded`,
+  };
+};
+
 // ── Factory ────────────────────────────────────────────────────────────────
 
 /**
@@ -447,5 +503,14 @@ export function buildDefaultRegistry(): VerifierRegistry {
   // Aliases — same verifier handles related shapes.
   reg.register('fetch_page', webFetchVerifier);
   reg.register('web_page',   webFetchVerifier);
+  // v4.3 Phase 5 — browser interactive verifier reads the Phase 1
+  // sidecar (`needs_verifier` / `maybe_noop`) and demotes
+  // success-but-no-progress cases so the classifier routes them to
+  // `stale_ref` recovery. Falls back to defaultVerifier when sidecar
+  // absent (AIDEN_BROWSER_DEPTH=0).
+  reg.register('browser_click',    browserInteractiveVerifier);
+  reg.register('browser_type',     browserInteractiveVerifier);
+  reg.register('browser_fill',     browserInteractiveVerifier);
+  reg.register('browser_navigate', browserInteractiveVerifier);
   return reg;
 }

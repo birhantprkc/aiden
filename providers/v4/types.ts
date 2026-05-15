@@ -133,6 +133,15 @@ export interface CapabilityCardData {
    * category priority. Absent for v4.1.3-style capability cards.
    */
   failuresByCategory?: Array<{ category: string; count: number }>;
+  /**
+   * v4.3 Phase 5 — optional one-line browser context summary surfaced
+   * below the canStill section. Populated by `enrichCardWithReport`
+   * from a RecoveryReport's `browserContext` field (active tab URL,
+   * blocker kind, other-tab count, stale-ref retry count). Renderer
+   * prints as a muted "Browser:" line; absent when AIDEN_BROWSER_DEPTH
+   * is off OR when no browser activity occurred this turn.
+   */
+  browserContext?: string;
 }
 
 export interface ToolCallResult {

@@ -5,7 +5,7 @@
  *   1. Goal extraction (4 input shapes: string / ContentBlock[] / missing / over-length)
  *   2. buildRecoveryReport — counts, breakdown, failedTools (latest-wins),
  *      recoveryStages passthrough, guidance dominance + tiebreak
- *   3. Guidance text covers all 10 FailureCategory values
+ *   3. Guidance text covers all 12 FailureCategory values (v4.3 Phase 5)
  *   4. enrichCardWithReport — non-mutation, field overlay, whatHappened
  *      formatting, failuresByCategory ordering
  *   5. Edge cases: empty snapshot, no failures, multi-tool, tie counts
@@ -107,12 +107,14 @@ describe('extractGoal', () => {
   });
 });
 
-// ── guidanceFor (all 10 categories) ────────────────────────────────────────
+// ── guidanceFor (all 12 categories — extended v4.3 Phase 5) ───────────────
 
-describe('guidanceFor — all 10 categories', () => {
+describe('guidanceFor — all 12 categories', () => {
   const cats: FailureCategory[] = [
     'timeout', 'auth', 'hallucination', 'network', 'permission',
-    'rate_limit', 'invalid_input', 'dependency_missing', 'not_found', 'other',
+    'rate_limit', 'invalid_input', 'dependency_missing', 'not_found',
+    'stale_ref', 'manual_blocker',                          // v4.3 Phase 5
+    'other',
   ];
   for (const cat of cats) {
     it(`returns non-empty guidance for ${cat}`, () => {

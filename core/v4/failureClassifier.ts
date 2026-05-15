@@ -57,7 +57,19 @@ import type { VerificationResult } from './verifier';
 
 // ── Public types ────────────────────────────────────────────────────────────
 
-/** Ten failure categories — must match the v4.2 spec exactly. */
+/**
+ * Twelve failure categories.
+ *
+ * The first ten are v4.2 Phase 2 — generic tool-call failure modes.
+ * The last two are v4.3 Phase 5 — browser-specific failure modes
+ * that can only be detected when AIDEN_BROWSER_DEPTH=1 surfaces
+ * `result.browserState.staleRefRetry` / `.blocker` sidecars.
+ *
+ * Generic categories continue to route via `defaultClassifier` for
+ * non-browser tools. Browser categories route via
+ * `browserInteractiveClassifier` / `browserNavigateClassifier`
+ * (registered for the 4 browser tools where they apply).
+ */
 export type FailureCategory =
   | 'timeout'
   | 'auth'
@@ -68,6 +80,8 @@ export type FailureCategory =
   | 'invalid_input'
   | 'dependency_missing'
   | 'not_found'
+  | 'stale_ref'         // v4.3 Phase 5 — DOM changed between snapshot+action; Phase 2 already retried unsuccessfully
+  | 'manual_blocker'    // v4.3 Phase 5 — login/2FA/captcha/verification/consent (Phase 3); needs human action
   | 'other';
 
 /** Output of `classify(...)`. */
@@ -514,6 +528,131 @@ export const fileReadClassifier: ClassifierFn = (verification, toolName, args, r
   return defaultClassifier(verification, toolName, args, result);
 };
 
+// ── v4.3 Phase 5 — Browser-tool classifiers ────────────────────────────────
+
+/**
+ * Minimal structural shape of `result.result.browserState` — mirrors
+ * `ActionResult` in `core/v4/browserState.ts`. Declared structurally
+ * here to keep this module import-cycle-free (classifier shouldn't
+ * depend on browserState, which depends on Phase 5's enum extension).
+ *
+ * Shape MUST stay in lockstep with `ActionResult` — when fields are
+ * added there, update this mirror too.
+ */
+interface BrowserStateSidecar {
+  pre_state:      unknown;
+  post_state:     unknown;
+  progress_score: number;
+  evidence:       string[];
+  maybe_noop:     boolean;
+  needs_verifier: boolean;
+  staleRefRetry?: {
+    attempted:   true;
+    succeeded:   boolean;
+    reason:      string;
+    state_delta: string[];
+  };
+  blocker?: {
+    kind:       'captcha' | 'login' | '2fa' | 'verification' | 'consent';
+    subtype?:   string;
+    url:        string;
+    confidence: number;
+    evidence:   string[];
+    message:    string;
+  };
+}
+
+/** Extract the v4.3 sidecar from a tool result, defensively. */
+function readBrowserStateSidecar(result: ToolCallResult): BrowserStateSidecar | null {
+  if (!result.result || typeof result.result !== 'object') return null;
+  const r = result.result as { browserState?: BrowserStateSidecar };
+  return r.browserState ?? null;
+}
+
+/**
+ * Classifier for the 3 interactive browser tools (browser_click,
+ * browser_type, browser_fill). Priority:
+ *
+ *   1. blocker present       → manual_blocker (conf 0.95)
+ *   2. staleRefRetry failed  → stale_ref      (conf 0.9)
+ *   3. needs_verifier + low progress → stale_ref (conf 0.75)
+ *   4. fall through to defaultClassifier for generic patterns
+ *
+ * `manual_blocker` beats `stale_ref` because no retry can fix a
+ * login wall — the user has to act. Phase 6+ will surface this via
+ * the recovery card already wired by Phase 3.
+ */
+export const browserInteractiveClassifier: ClassifierFn = (verification, toolName, args, result) => {
+  const bs = readBrowserStateSidecar(result);
+
+  // Priority 1 — manual blocker.
+  if (bs?.blocker) {
+    return {
+      category:    'manual_blocker',
+      confidence:  0.95,
+      reason:      `${bs.blocker.kind}${bs.blocker.subtype ? ` (${bs.blocker.subtype})` : ''} at ${bs.blocker.url}`,
+      recoverable: false,
+      recoveryHint: { action: 'request_user_action', detail: bs.blocker.message },
+      matchedPattern: `browserState.blocker.${bs.blocker.kind}`,
+    };
+  }
+
+  // Priority 2 — Phase 2 already retried and the retry failed.
+  if (bs?.staleRefRetry?.attempted && !bs.staleRefRetry.succeeded) {
+    return {
+      category:    'stale_ref',
+      confidence:  0.9,
+      reason:      `stale ref after auto-retry: ${bs.staleRefRetry.reason}`,
+      recoverable: true,
+      recoveryHint: {
+        action: 'retry',
+        detail: 'wait for page to settle, then re-select the element',
+      },
+      matchedPattern: 'browserState.staleRefRetry.failed',
+    };
+  }
+
+  // Priority 3 — Phase 1 verifier flagged "no UI change despite success".
+  // Surface as stale_ref because the recovery shape is the same: the
+  // page didn't respond, model should re-read state before trying again.
+  if (bs && (bs.maybe_noop || (bs.needs_verifier && bs.progress_score < 0.3))) {
+    return {
+      category:    'stale_ref',
+      confidence:  0.75,
+      reason:      `tool returned success but page did not change (progress_score=${bs.progress_score.toFixed(2)})`,
+      recoverable: true,
+      recoveryHint: {
+        action: 'retry',
+        detail: 'verify the page state then try a different approach',
+      },
+      matchedPattern: 'browserState.no_progress',
+    };
+  }
+
+  // Fall through to default for generic patterns.
+  return defaultClassifier(verification, toolName, args, result);
+};
+
+/**
+ * Classifier for `browser_navigate`. Only checks for `blocker` —
+ * Phase 2's stale-ref retry doesn't fire on navigate (excluded from
+ * STALE_REF_RETRYABLE), so the stale_ref path is irrelevant here.
+ */
+export const browserNavigateClassifier: ClassifierFn = (verification, toolName, args, result) => {
+  const bs = readBrowserStateSidecar(result);
+  if (bs?.blocker) {
+    return {
+      category:    'manual_blocker',
+      confidence:  0.95,
+      reason:      `${bs.blocker.kind}${bs.blocker.subtype ? ` (${bs.blocker.subtype})` : ''} at ${bs.blocker.url}`,
+      recoverable: false,
+      recoveryHint: { action: 'request_user_action', detail: bs.blocker.message },
+      matchedPattern: `browserState.blocker.${bs.blocker.kind}`,
+    };
+  }
+  return defaultClassifier(verification, toolName, args, result);
+};
+
 // ── Factory ────────────────────────────────────────────────────────────────
 
 export function buildDefaultClassifier(): FailureClassifier {
@@ -524,5 +663,13 @@ export function buildDefaultClassifier(): FailureClassifier {
   reg.register('fetch_page', webFetchClassifier);
   reg.register('web_page',   webFetchClassifier);
   reg.register('file_read',  fileReadClassifier);
+  // v4.3 Phase 5 — browser-tool overrides that read the
+  // BrowserState sidecars (staleRefRetry from Phase 2, blocker from
+  // Phase 3). Fall through to defaultClassifier when sidecars are
+  // absent (AIDEN_BROWSER_DEPTH=0 → no sidecar → generic patterns).
+  reg.register('browser_click',    browserInteractiveClassifier);
+  reg.register('browser_type',     browserInteractiveClassifier);
+  reg.register('browser_fill',     browserInteractiveClassifier);
+  reg.register('browser_navigate', browserNavigateClassifier);
   return reg;
 }
