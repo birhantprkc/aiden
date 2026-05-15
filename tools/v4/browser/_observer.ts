@@ -37,6 +37,8 @@
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import type { ActionResult } from '../../../core/v4/browserState';
 import { createBrowserState } from '../../../core/v4/browserState';
+import { detectBlocker, type BlockerSurface } from './browserBlocker';
+import { pwSnapshot } from '../../../core/playwrightBridge';
 
 /**
  * Shared observer — one instance per server process. The HOC closes
@@ -143,9 +145,26 @@ function isSuccessResult(result: unknown): boolean {
  * Optional `state` arg lets tests inject a custom BrowserState
  * instance with a stubbed bridge loader.
  */
+/**
+ * v4.3 Phase 3 — page-text fetcher used by the HOC's manual-blocker
+ * detection. Defaults to `pwSnapshot` (the existing Playwright bridge
+ * helper). Tests inject a stub to drive detection without launching
+ * a browser; the disabled path never calls this.
+ */
+export type PageTextFetcher = () => Promise<{ ok: boolean; text?: string; error?: string }>;
+
+const defaultPageTextFetcher: PageTextFetcher = () => pwSnapshot();
+
 export function withBrowserState(
   handler: ToolHandler,
   state:   typeof browserState = browserState,
+  /**
+   * Optional page-text fetcher. Production code uses pwSnapshot;
+   * tests inject a stub returning canned text for the blocker
+   * detection tier. The fetcher is called ONCE per action when
+   * AIDEN_BROWSER_DEPTH=1 — disabled path skips entirely.
+   */
+  pageTextFetcher: PageTextFetcher = defaultPageTextFetcher,
 ): ToolHandler {
   return {
     ...handler,
@@ -156,13 +175,40 @@ export function withBrowserState(
       const pre = await state.captureState();
       let result = await handler.execute(args, ctx);
 
+      // v4.3 Phase 3 — manual-blocker detection. Runs on every
+      // browser-tool result when enabled. Uses the configured
+      // page-text fetcher (pwSnapshot in production). Detection
+      // never breaks the inner tool — pwSnapshot is wrapped in
+      // try/catch via the fetcher itself; failures produce no
+      // blocker and no observer sidecar field.
+      //
+      // The detected blocker is BOTH embedded on the result sidecar
+      // (Phase 5 + chat layer consumers) AND used to suppress
+      // Phase 2's stale-ref retry below. Pause-and-surface contract
+      // (Q-CDP5) — never auto-action a blocker.
+      let blocker: BlockerSurface | undefined;
+      try {
+        const snap = await pageTextFetcher();
+        if (snap.ok && snap.text) {
+          const url = (result as { url?: string } | null)?.url ?? '';
+          const detected = detectBlocker({ text: snap.text, url });
+          if (detected) blocker = detected;
+        }
+      } catch { /* detection never breaks the inner tool */ }
+
       // v4.3 Phase 2 — stale-ref retry. Reactive: fires only after a
       // resolution-class failure on an interactive tool. One retry
       // hard cap. Safe because the resolution-class errors fire
       // BEFORE any DOM event is dispatched, so retry can't double-act.
+      //
+      // v4.3 Phase 3 suppression: skip the retry when a manual
+      // blocker is present (`!blocker` gate). A blocker means the
+      // page is asking for human action — retrying the same tool
+      // call against a sign-in wall or 2FA prompt won't help and
+      // looks like agent thrashing.
       let staleRefRetry: NonNullable<ActionResult['staleRefRetry']> | undefined;
       if (
-        pre &&
+        pre && !blocker &&
         STALE_REF_RETRYABLE.has(handler.schema.name)
       ) {
         const staleReason = detectStaleRefError(result);
@@ -198,9 +244,11 @@ export function withBrowserState(
         result !== null && result !== undefined &&
         typeof result === 'object' && !Array.isArray(result)
       ) {
-        const sidecar: ActionResult = staleRefRetry
-          ? { ...observerMeta, staleRefRetry }
-          : observerMeta;
+        const sidecar: ActionResult = {
+          ...observerMeta,
+          ...(staleRefRetry && { staleRefRetry }),
+          ...(blocker && { blocker }),
+        };
         return { ...(result as object), browserState: sidecar };
       }
       return result;

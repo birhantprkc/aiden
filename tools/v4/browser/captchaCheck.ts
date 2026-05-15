@@ -57,10 +57,14 @@ export const CAPTCHA_MARKERS: ReadonlyArray<string> = [
   'reference number',
   'this website is using a security service',
 
-  // hCaptcha / reCAPTCHA explicit
+  // hCaptcha / reCAPTCHA / Turnstile explicit
   'hcaptcha.com',
   'recaptcha',
   'g-recaptcha',
+  // v4.3 Phase 3 — Cloudflare Turnstile (newer than Cloudflare's
+  // older "Just a moment" interstitial; uses its own widget).
+  'cf-turnstile',
+  'turnstile',
 
   // PerimeterX
   'press and hold',

@@ -185,6 +185,28 @@ export interface ActionResult {
     /** Evidence between pre and resnapshot — same shape as `evidence`. */
     state_delta:  string[];
   };
+  /**
+   * v4.3 Phase 3 — present when the observer detected a manual
+   * blocker on the page (CAPTCHA / login / 2FA / verification /
+   * consent). Phase 2's stale-ref retry is structurally suppressed
+   * when this field is set — the agent should surface the blocker
+   * to the user, not retry automatically. Phase 5's failure
+   * classifier maps `blocker` presence to `manual_blocker` category.
+   *
+   * Import-cycle note: the shape mirrors `BlockerSurface` in
+   * `tools/v4/browser/browserBlocker.ts`. Declared structurally
+   * here so the core/v4 module stays independent of tools/v4.
+   * Shape MUST stay in lockstep — any field added there needs the
+   * mirror update here.
+   */
+  blocker?: {
+    kind:       'captcha' | 'login' | '2fa' | 'verification' | 'consent';
+    subtype?:   string;
+    url:        string;
+    confidence: number;
+    evidence:   string[];
+    message:    string;
+  };
 }
 
 // ── Helpers (exported for tests + ElementLease lifecycle in Phase 2) ───────

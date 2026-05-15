@@ -18,6 +18,11 @@ import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { BrowserState } from '../../../core/v4/browserState';
 import { withBrowserState } from '../../../tools/v4/browser/_observer';
 
+// v4.3 Phase 3 — stub page-text fetcher. Returns benign empty
+// text so the HOC's blocker detection produces no surface. Keeps
+// Phase 1 integration tests independent of Playwright + Chromium.
+const safeFetcher = () => Promise.resolve({ ok: true as const, text: '' });
+
 function mkStubBridge(seqOverride?: { url?: string; dom_text_hash?: string }[]) {
   let i = 0;
   const seq = seqOverride ?? [
@@ -61,7 +66,7 @@ describe('withBrowserState HOC', () => {
   it('AIDEN_BROWSER_DEPTH unset: inner result returned verbatim (no sidecar)', async () => {
     const state = new BrowserState({ enabled: false });
     state.setBridgeLoader(mkStubBridge());
-    const wrapped = withBrowserState(mkClickHandler(), state);
+    const wrapped = withBrowserState(mkClickHandler(), state, safeFetcher);
     const result = await wrapped.execute({}, mockCtx);
     expect(result).toEqual({ success: true, target: 'fake-button' });
     expect((result as { browserState?: unknown }).browserState).toBeUndefined();
@@ -70,7 +75,7 @@ describe('withBrowserState HOC', () => {
   it('AIDEN_BROWSER_DEPTH=1: result gains browserState sidecar', async () => {
     const state = new BrowserState({ enabled: true });
     state.setBridgeLoader(mkStubBridge());
-    const wrapped = withBrowserState(mkClickHandler(), state);
+    const wrapped = withBrowserState(mkClickHandler(), state, safeFetcher);
     const result = await wrapped.execute({}, mockCtx) as { success: boolean; browserState?: unknown };
     expect(result.success).toBe(true);
     expect(result.browserState).toBeDefined();
@@ -97,7 +102,7 @@ describe('withBrowserState HOC', () => {
         return { success: false, error: 'boom', target: 'x' };
       },
     };
-    const wrapped = withBrowserState(failingHandler, state);
+    const wrapped = withBrowserState(failingHandler, state, safeFetcher);
     const result = await wrapped.execute({}, mockCtx) as {
       success: boolean; error?: string; target?: string; browserState?: unknown;
     };
@@ -111,7 +116,7 @@ describe('withBrowserState HOC', () => {
   it('observer never breaks the inner execute — bridge throws', async () => {
     const state = new BrowserState({ enabled: true });
     state.setBridgeLoader(() => Promise.reject(new Error('bridge gone')));
-    const wrapped = withBrowserState(mkClickHandler(), state);
+    const wrapped = withBrowserState(mkClickHandler(), state, safeFetcher);
     // Should NOT throw; should return inner result without sidecar.
     const result = await wrapped.execute({}, mockCtx) as { success: boolean; browserState?: unknown };
     expect(result.success).toBe(true);
@@ -123,7 +128,7 @@ describe('withBrowserState HOC', () => {
     state.setBridgeLoader(() => Promise.resolve({
       pwSnapshotHash: async () => ({ ok: false, error: 'browser closed' }),
     }));
-    const wrapped = withBrowserState(mkClickHandler(), state);
+    const wrapped = withBrowserState(mkClickHandler(), state, safeFetcher);
     const result = await wrapped.execute({}, mockCtx) as { success: boolean; browserState?: unknown };
     expect(result.success).toBe(true);
     expect(result.browserState).toBeUndefined();
@@ -138,7 +143,7 @@ describe('withBrowserState HOC', () => {
         return 'plain string result' as never;
       },
     };
-    const wrapped = withBrowserState(stringHandler, state);
+    const wrapped = withBrowserState(stringHandler, state, safeFetcher);
     const result = await wrapped.execute({}, mockCtx);
     expect(result).toBe('plain string result');
   });
@@ -150,7 +155,7 @@ describe('withBrowserState HOC', () => {
       ...mkClickHandler(),
       async execute() { return null as never; },
     };
-    const wrapped = withBrowserState(nullHandler, state);
+    const wrapped = withBrowserState(nullHandler, state, safeFetcher);
     const result = await wrapped.execute({}, mockCtx);
     expect(result).toBeNull();
   });
@@ -164,7 +169,7 @@ describe('withBrowserState HOC', () => {
         dom_text_hash: 'same', frame_tree_hash: 'same',
       }),
     }));
-    const wrapped = withBrowserState(mkClickHandler(), state);
+    const wrapped = withBrowserState(mkClickHandler(), state, safeFetcher);
     const result = await wrapped.execute({}, mockCtx) as { browserState?: { maybe_noop: boolean; needs_verifier: boolean } };
     expect(result.browserState!.maybe_noop).toBe(true);
     expect(result.browserState!.needs_verifier).toBe(true);

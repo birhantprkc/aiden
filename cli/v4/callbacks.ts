@@ -28,7 +28,11 @@ import type { SkillProposal } from '../../moat/skillTeacher';
 import type { PlannerGuardDecision } from '../../moat/plannerGuard';
 import type { CompressionResult } from '../../core/v4/contextCompressor';
 import type { AuxiliaryClient } from '../../core/v4/auxiliaryClient';
-import type { ToolCallRequest, ToolCallResult } from '../../providers/v4/types';
+import type { ToolCallRequest, ToolCallResult, CapabilityCardData } from '../../providers/v4/types';
+// v4.3 Phase 3 — manual-blocker surface. The BlockerSurface type
+// lives in tools/v4/browser/browserBlocker.ts; we import the type
+// here for the renderer + the structural mapping helper below.
+import type { BlockerKind, BlockerSurface } from '../../tools/v4/browser/browserBlocker';
 /* Phase 23.6 rollback — Ink controller bridge stashed to
  * docs/sprint/_internal/v4.1-ink-stash/.  Re-introduce when v4.1 picks
  * up the Ink rebuild. */
@@ -88,6 +92,75 @@ const DECISION_CHOICES: { name: string; value: ApprovalDecision }[] = [
 ];
 
 const KNOWN_TIERS: ReadonlySet<RiskTier> = new Set(['safe', 'caution', 'dangerous']);
+
+// ── v4.3 Phase 3 — manual-blocker card mapping ────────────────────────────
+
+/** Best-effort hostname extraction; falls back to the raw URL. */
+function blockerHostname(url: string): string {
+  try {
+    return new URL(url).hostname || url;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Map a BlockerSurface to the existing CapabilityCardData chrome.
+ * Pure helper — same shape per `BlockerKind`, parameterised by the
+ * blocker's URL + optional subtype for the body text. The renderer
+ * (`display.capabilityCard`) handles all rendering chrome; this
+ * function only fills the slots semantically.
+ *
+ * Public for unit tests; chatSession + callbacks consume via the
+ * `renderBlockerCardIfPresent` method below.
+ */
+export function mapBlockerToCard(blocker: BlockerSurface): CapabilityCardData {
+  const host = blockerHostname(blocker.url);
+  const labels: Record<BlockerKind, {
+    title:    string;
+    canStill: string[];
+    cannot:   string[];
+    fix:      string;
+  }> = {
+    captcha: {
+      title:    `CAPTCHA challenge at ${host}`,
+      canStill: ['Solve the challenge in the browser tab', 'Cancel this task'],
+      cannot:   ['Continue automatically without your action'],
+      fix:      `I'll wait — solve the ${blocker.subtype ?? 'CAPTCHA'} challenge and tell me when ready.`,
+    },
+    login: {
+      title:    `Sign-in required at ${host}`,
+      canStill: ['Sign in via the browser tab', 'Cancel this task'],
+      cannot:   ['Continue without authentication'],
+      fix:      `I'll wait — sign in and let me know when done.`,
+    },
+    '2fa': {
+      title:    `Two-factor code required at ${host}`,
+      canStill: ['Enter the 2FA code in the browser tab', 'Cancel this task'],
+      cannot:   ['Continue without the verification code'],
+      fix:      `I'll wait — enter your code and tell me when complete.`,
+    },
+    verification: {
+      title:    `Identity verification at ${host}`,
+      canStill: ['Complete the verification in the browser', 'Cancel this task'],
+      cannot:   ['Continue without verification'],
+      fix:      `I'll wait — finish the verification and tell me when done.`,
+    },
+    consent: {
+      title:    `Consent banner at ${host}`,
+      canStill: ['Dismiss the banner in the browser', 'Continue if banner is dismissable'],
+      cannot:   ['Reliably interact with content while the banner blocks it'],
+      fix:      `Dismiss the cookie or privacy banner and I'll retry.`,
+    },
+  };
+  const t = labels[blocker.kind];
+  return {
+    title:          `🛑 ${t.title}`,
+    canStill:       t.canStill,
+    cannotReliably: t.cannot,
+    fix:            t.fix,
+  };
+}
 
 function parseRiskTier(content: string): RiskTier {
   const head = content.trim().toLowerCase().split(/\s+/)[0] ?? '';
@@ -319,6 +392,14 @@ export class CliCallbacks {
       } catch { /* defensive */ }
       return;
     }
+    // v4.3 Phase 3 — render a structured "agent needs human help"
+    // card when the browser observer detected a manual blocker
+    // (CAPTCHA / login / 2FA / verification / consent). Renders for
+    // ALL trail-row outcomes below — the blocker is independent of
+    // the tool's own success/fail signal. Inline placement gives
+    // the user immediate awareness; the model's next reply will
+    // explain in prose. Defensive: missing fields silently skip.
+    try { this.renderBlockerCardIfPresent(result); } catch { /* defensive */ }
     // v4.1.4 reply-quality polish — Part 1.6. Helper used by ALL
     // outcome branches below so the activity indicator gets re-armed
     // for the gap that follows this tool (next tool, or final reply).
@@ -364,6 +445,32 @@ export class CliCallbacks {
     handle.ok(ms);
     fireAfter();
   };
+
+  /**
+   * v4.3 Phase 3 — render a manual-blocker card when the browser
+   * observer detected a CAPTCHA / login / 2FA / verification /
+   * consent surface on the page. Reuses the existing capabilityCard
+   * chrome via a `mapBlockerToCard` semantic mapping — no new layout
+   * code, no new dedicated card component.
+   *
+   * Defensive: silently skips when the field shape doesn't match
+   * (no browserState, no blocker, unrecognised kind). Never throws
+   * — caller wraps in try/catch defensively.
+   *
+   * The blocker info is structural data emitted by the observer
+   * HOC (`tools/v4/browser/_observer.ts`); the renderer reads it
+   * from `result.result.browserState.blocker` after every browser
+   * tool call. Inline placement gives users immediate awareness
+   * before the model's next reply lands.
+   */
+  private renderBlockerCardIfPresent(result?: ToolCallResult): void {
+    const inner = (result?.result ?? null) as
+      | { browserState?: { blocker?: BlockerSurface } }
+      | null;
+    const blocker = inner?.browserState?.blocker;
+    if (!blocker) return;
+    this.display.capabilityCard(mapBlockerToCard(blocker));
+  }
 
   /** ApprovalEngine.callbacks.promptUser */
   promptApproval = async (req: ApprovalRequest): Promise<ApprovalDecision> => {

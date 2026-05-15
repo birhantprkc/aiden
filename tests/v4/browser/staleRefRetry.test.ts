@@ -29,6 +29,11 @@ import {
 
 const mockCtx: never = {} as never;
 
+// v4.3 Phase 3 — stub page-text fetcher returning benign empty
+// text so blocker detection produces no surface. Keeps stale-ref
+// tests independent of Playwright + Chromium.
+const safeFetcher = () => Promise.resolve({ ok: true as const, text: '' });
+
 // ── Stub bridge: produces a sequence of snapshots ──────────────────────────
 
 function mkStubBridge(seq?: { url?: string; dom_text_hash?: string }[]) {
@@ -174,7 +179,7 @@ describe('withBrowserState — stale-ref retry', () => {
       { success: false, error: 'Element not found: "#submit"' },
       { success: true },
     ]);
-    const wrapped = withBrowserState(handler, state);
+    const wrapped = withBrowserState(handler, state, safeFetcher);
     const result = await wrapped.execute({}, mockCtx) as {
       success: boolean; error?: string; browserState?: unknown;
     };
@@ -191,7 +196,7 @@ describe('withBrowserState — stale-ref retry', () => {
       { success: false, error: 'Element not found: "#submit"' },
       { success: true },
     ]);
-    const wrapped = withBrowserState(handler, state);
+    const wrapped = withBrowserState(handler, state, safeFetcher);
     const result = await wrapped.execute({}, mockCtx) as {
       success: boolean; browserState?: {
         staleRefRetry?: { attempted: boolean; succeeded: boolean; reason: string; state_delta: string[] };
@@ -211,7 +216,7 @@ describe('withBrowserState — stale-ref retry', () => {
       { success: false, error: 'Element not found: "#submit"' },
       { success: false, error: 'Element not found: "#submit"' },
     ]);
-    const wrapped = withBrowserState(handler, state);
+    const wrapped = withBrowserState(handler, state, safeFetcher);
     const result = await wrapped.execute({}, mockCtx) as {
       success: boolean; error?: string; browserState?: {
         staleRefRetry?: { succeeded: boolean };
@@ -229,7 +234,7 @@ describe('withBrowserState — stale-ref retry', () => {
       { success: false, error: 'Element not found' },
       { success: true },   // would succeed if retried
     ]);
-    const wrapped = withBrowserState(handler, state);
+    const wrapped = withBrowserState(handler, state, safeFetcher);
     const result = await wrapped.execute({}, mockCtx) as {
       success: boolean; browserState?: { staleRefRetry?: unknown };
     };
@@ -245,7 +250,7 @@ describe('withBrowserState — stale-ref retry', () => {
       { success: false, error: 'Timeout 5000ms exceeded' },
       { success: true },
     ]);
-    const wrapped = withBrowserState(handler, state);
+    const wrapped = withBrowserState(handler, state, safeFetcher);
     const result = await wrapped.execute({}, mockCtx) as {
       success: boolean; browserState?: { staleRefRetry?: unknown };
     };
@@ -260,7 +265,7 @@ describe('withBrowserState — stale-ref retry', () => {
       { success: false, error: 'Permission denied' },
       { success: true },
     ]);
-    const wrapped = withBrowserState(handler, state);
+    const wrapped = withBrowserState(handler, state, safeFetcher);
     const result = await wrapped.execute({}, mockCtx) as {
       success: boolean; browserState?: { staleRefRetry?: unknown };
     };
@@ -274,7 +279,7 @@ describe('withBrowserState — stale-ref retry', () => {
     const handler = mkInteractiveHandler('browser_click', [
       { success: true },
     ]);
-    const wrapped = withBrowserState(handler, state);
+    const wrapped = withBrowserState(handler, state, safeFetcher);
     const result = await wrapped.execute({}, mockCtx) as {
       success: boolean; browserState?: { staleRefRetry?: unknown };
     };
@@ -293,7 +298,7 @@ describe('withBrowserState — stale-ref retry', () => {
       { success: false, error: 'Element not found' },
       { success: true },
     ]);
-    const wrapped = withBrowserState(handler, state);
+    const wrapped = withBrowserState(handler, state, safeFetcher);
     const result = await wrapped.execute({}, mockCtx) as {
       browserState?: { staleRefRetry?: { state_delta: string[] } };
     };
@@ -313,7 +318,7 @@ describe('withBrowserState — stale-ref retry', () => {
       { success: false, error: 'Element not found' },
       { success: true },   // retry succeeds anyway — transient race caught
     ]);
-    const wrapped = withBrowserState(handler, state);
+    const wrapped = withBrowserState(handler, state, safeFetcher);
     const result = await wrapped.execute({}, mockCtx) as {
       browserState?: { staleRefRetry?: { state_delta: string[]; succeeded: boolean } };
     };
@@ -334,7 +339,7 @@ describe('withBrowserState — stale-ref retry', () => {
         return { success: false, error: 'Element not found' };
       },
     };
-    const wrapped = withBrowserState(handler, state);
+    const wrapped = withBrowserState(handler, state, safeFetcher);
     await wrapped.execute({}, mockCtx);
     // Exactly 2 calls: original + 1 retry. NEVER 3.
     expect(callCount).toBe(2);
@@ -356,7 +361,7 @@ describe('withBrowserState — stale-ref retry', () => {
         { success: false, error: errMsg },
         { success: true },
       ]);
-      const wrapped = withBrowserState(handler, state);
+      const wrapped = withBrowserState(handler, state, safeFetcher);
       const result = await wrapped.execute({}, mockCtx) as {
         success: boolean; browserState?: { staleRefRetry?: { succeeded: boolean } };
       };
@@ -373,7 +378,7 @@ describe('withBrowserState — stale-ref retry', () => {
       category: 'browser', mutates: true, toolset: 'browser',
       async execute() { throw new Error('inner exec exploded'); },
     };
-    const wrapped = withBrowserState(handler, state);
+    const wrapped = withBrowserState(handler, state, safeFetcher);
     await expect(wrapped.execute({}, mockCtx)).rejects.toThrow('inner exec exploded');
   });
 });
