@@ -986,6 +986,26 @@ export class AidenAgent {
       totalUsage.inputTokens  += output.usage?.inputTokens  ?? 0;
       totalUsage.outputTokens += output.usage?.outputTokens ?? 0;
 
+      // v4.2 Phase 4 — capture the state going INTO this iteration's
+      // tool dispatch. MUST run BEFORE `messages.push(assistantMsg)`
+      // so the checkpoint represents "the conversation before the
+      // model decided to call this iteration's tools". If rollback
+      // fires later, truncating `messages.length` to
+      // `checkpoint.messages.length` drops the assistant tool_call
+      // message together with its tool result messages — preserving
+      // tool_call/tool_result pairing in the rolled-back state.
+      //
+      // Capturing AFTER the assistant push (the prior placement) was
+      // a real bug: rollback would leave the assistant tool_call in
+      // history without its tool results, producing strict-provider
+      // 400 errors of the form "No tool output found for function
+      // call <id>". Tests in tests/v4/core/checkpoint-integration
+      // assert the post-rollback messages array contains zero orphan
+      // assistant tool_calls — this position is part of the contract.
+      //
+      // No-op when AIDEN_TCE=0 or checkpointDepth=0.
+      turnState.captureCheckpoint(messages, turnCount);
+
       // ── Append assistant message ──────────────────────────────────────
       const assistantMsg: Message = output.toolCalls.length > 0
         ? { role: 'assistant', content: output.content ?? '', toolCalls: output.toolCalls }
@@ -1062,14 +1082,6 @@ export class AidenAgent {
         turnCount -= 1;
         continue;
       }
-
-      // v4.2 Phase 4 — capture the state going INTO this iteration's
-      // tool dispatch. After the assistant message is in `messages`
-      // but before any tool result lands. Rollback-eligible only
-      // when no mutating tools run between this capture and the
-      // next iteration's capture (Q-CP3 hard block). No-op when
-      // AIDEN_TCE=0 or when checkpointDepth=0.
-      turnState.captureCheckpoint(messages, turnCount);
 
       // ── Dispatch tools sequentially ──────────────────────────────────
       const turnToolMessages: Message[] = [];

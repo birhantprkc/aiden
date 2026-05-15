@@ -204,4 +204,188 @@ describe('v4.2 Phase 4 — checkpoint / restore integration', () => {
     // Agent finished cleanly.
     expect(['stop', 'budget_exhausted']).toContain(result.finishReason);
   });
+
+  // ── v4.2 Phase 4 fix — tool_call/tool_result pairing under rollback ──────
+  //
+  // Strict providers (chatgpt-plus / codex / OpenAI tool-strict mode)
+  // reject requests where the messages array contains an assistant
+  // message with `tool_calls` but no matching `{role: 'tool',
+  // toolCallId: <id>}` message. The original Phase 4 implementation
+  // captured the checkpoint AFTER `messages.push(assistantMsg)`,
+  // so rollback would leave the assistant tool_call without its tool
+  // results — triggering 400 errors of the form "No tool output found
+  // for function call <id>". The fix captures BEFORE the assistant
+  // push so rollback drops both together.
+  //
+  // These tests assert the pairing invariant and would catch a
+  // regression of the original bug.
+
+  it('rollback leaves NO orphan assistant tool_calls in messages array', async () => {
+    process.env.AIDEN_TCE = '1';
+    const provider = new LoopingMockProvider({
+      mode: 'same-name-diff-args', loopTool: 'shell_exec', loopCount: 9,
+      honorCooldown: true,
+    });
+    const agent = new AidenAgent({
+      provider, tools: STUB_TOOLS, toolExecutor: STUB_EXECUTOR, maxTurns: 30,
+      resolveMutates: mkResolveMutates([]),
+    });
+    const result = await agent.runConversation(
+      [{ role: 'user', content: 'try' }] as Message[],
+    );
+
+    // Verify rollback actually fired (precondition for the invariant).
+    const rollbackMsgs = result.messages.filter(
+      (m) => m.role === 'system' && typeof m.content === 'string' &&
+             m.content.includes('Rolled back'),
+    );
+    expect(rollbackMsgs.length).toBeGreaterThanOrEqual(1);
+
+    // Invariant: every assistant message in the final array has
+    // either zero tool_calls OR every tool_call has a matching tool
+    // message later in the array.
+    const orphans = findOrphanToolCalls(result.messages);
+    expect(orphans).toEqual([]);
+  });
+
+  it('strict-pairing synthetic provider rejects orphans → fix prevents regression', async () => {
+    // A provider that THROWS when it sees an unpaired tool_call. If
+    // Phase 4 ever regresses to capturing AFTER assistantMsg push,
+    // this test will fail with the synthetic 400 — same shape as the
+    // chatgpt-plus / codex bug.
+    process.env.AIDEN_TCE = '1';
+    const provider = new ToolPairingStrictProvider({
+      loopTool: 'shell_exec', loopCount: 9,
+    });
+    const agent = new AidenAgent({
+      provider: provider as never,
+      tools: STUB_TOOLS, toolExecutor: STUB_EXECUTOR, maxTurns: 30,
+      resolveMutates: mkResolveMutates([]),
+    });
+    // Should NOT throw — the post-rollback messages must satisfy
+    // tool-pairing.
+    const result = await agent.runConversation(
+      [{ role: 'user', content: 'try' }] as Message[],
+    );
+    // Final state is well-formed.
+    const orphans = findOrphanToolCalls(result.messages);
+    expect(orphans).toEqual([]);
+    // Agent finished without provider rejection.
+    expect(result.finishReason).not.toBe('error');
+  });
+
+  it('8 cumulative same-name calls trigger rollback AND preserve pairing', async () => {
+    // Direct exercise of the bug scenario the user reported: enough
+    // tool calls to cross the cooldown threshold (8), all rollback-
+    // safe, rollback fires, messages array must remain well-formed.
+    process.env.AIDEN_TCE = '1';
+    const provider = new LoopingMockProvider({
+      mode: 'same-name-diff-args', loopTool: 'shell_exec', loopCount: 12,
+      honorCooldown: true,
+    });
+    const agent = new AidenAgent({
+      provider, tools: STUB_TOOLS, toolExecutor: STUB_EXECUTOR, maxTurns: 30,
+      resolveMutates: mkResolveMutates([]),
+    });
+    const result = await agent.runConversation(
+      [{ role: 'user', content: 'sustained probe' }] as Message[],
+    );
+
+    // Rollback fired (cooldown_with_rollback was emitted).
+    const rollbackMsgs = result.messages.filter(
+      (m) => m.role === 'system' && typeof m.content === 'string' &&
+             m.content.includes('Rolled back'),
+    );
+    expect(rollbackMsgs.length).toBeGreaterThanOrEqual(1);
+
+    // Every assistant tool_call has a matching tool result message.
+    const orphans = findOrphanToolCalls(result.messages);
+    expect(orphans).toEqual([]);
+  });
 });
+
+// ── Helpers for tool-pairing tests ─────────────────────────────────────────
+
+/**
+ * Find any tool_call ids on assistant messages that don't have a
+ * matching `{role: 'tool', toolCallId: <id>}` message later in the
+ * array. Returns the unpaired ids; empty array means well-formed.
+ */
+function findOrphanToolCalls(messages: ReadonlyArray<Message>): string[] {
+  const orphans: string[] = [];
+  for (let i = 0; i < messages.length; i += 1) {
+    const m = messages[i];
+    if (m.role !== 'assistant' || !m.toolCalls || m.toolCalls.length === 0) continue;
+    for (const tc of m.toolCalls) {
+      // Search forward for a matching tool message.
+      let matched = false;
+      for (let j = i + 1; j < messages.length; j += 1) {
+        const candidate = messages[j];
+        if (candidate.role === 'tool' && candidate.toolCallId === tc.id) {
+          matched = true;
+          break;
+        }
+        // Stop the search at the next assistant message — a tool
+        // result for tc.id can't be after a later assistant turn.
+        if (candidate.role === 'assistant') break;
+      }
+      if (!matched) orphans.push(tc.id);
+    }
+  }
+  return orphans;
+}
+
+/**
+ * Synthetic provider that mimics the chatgpt-plus / codex strict
+ * tool-pairing validation. Throws "No tool output found for function
+ * call <id>" if any tool_call in the incoming `messages` lacks a
+ * matching tool result message AHEAD of the next assistant turn.
+ *
+ * Drives the same looping pattern as LoopingMockProvider so the
+ * agent's cooldown_with_rollback path fires.
+ */
+class ToolPairingStrictProvider {
+  readonly apiMode = 'chat_completions' as const;
+  callCount: number = 0;
+  lastToolNames: string[] = [];
+  constructor(public readonly opts: { loopTool: string; loopCount: number }) {}
+
+  async call(input: { messages: Message[]; tools?: { name: string }[] }) {
+    // STRICT pairing check — mirrors the real chatgpt-plus 400.
+    const orphans = findOrphanToolCalls(input.messages);
+    if (orphans.length > 0) {
+      throw new Error(`No tool output found for function call ${orphans[0]}.`);
+    }
+
+    this.callCount += 1;
+    this.lastToolNames = (input.tools ?? []).map((t) => t.name);
+    // Honor cooldown: terminate when the loop tool disappears.
+    if (!this.lastToolNames.includes(this.opts.loopTool)) {
+      return {
+        content: 'done (loop tool unavailable)',
+        toolCalls: [], finishReason: 'stop' as const,
+        usage: { inputTokens: 0, outputTokens: 0 },
+      };
+    }
+    if (this.callCount > this.opts.loopCount) {
+      return {
+        content: 'done',
+        toolCalls: [], finishReason: 'stop' as const,
+        usage: { inputTokens: 0, outputTokens: 0 },
+      };
+    }
+    return {
+      content: '',
+      toolCalls: [{
+        id:        `pair-${this.callCount}`,
+        name:      this.opts.loopTool,
+        arguments: { iter: this.callCount },
+      }],
+      finishReason: 'tool_use' as const,
+      usage: { inputTokens: 0, outputTokens: 0 },
+    };
+  }
+  async *callStream(input: { messages: Message[]; tools?: { name: string }[] }) {
+    yield { type: 'done' as const, output: await this.call(input) };
+  }
+}
