@@ -233,11 +233,41 @@ CREATE INDEX IF NOT EXISTS idx_email_seen_message_id
   ON email_seen(message_id) WHERE message_id IS NOT NULL;
 `;
 
+// v4.5 Phase 5b — scheduled_workflows table (cron migration from JSON
+// to SQLite). One-shot data migration from `cron_jobs.json` runs from
+// the daemon bootstrap after this schema applies, not from inside the
+// DDL transaction itself — keeps schema-only migrations idempotent.
+const V5_SQL = `
+CREATE TABLE IF NOT EXISTS scheduled_workflows (
+  id                  TEXT    PRIMARY KEY,
+  name                TEXT    NOT NULL,
+  schedule_expression TEXT    NOT NULL,
+  timezone            TEXT    NOT NULL DEFAULT 'UTC',
+  enabled             INTEGER NOT NULL DEFAULT 1,
+  payload_json        TEXT    NOT NULL,
+  prompt_template     TEXT,
+  deliver_only        INTEGER NOT NULL DEFAULT 0,
+  misfire_policy      TEXT    NOT NULL DEFAULT 'skip_stale',
+  fire_rate_limit     INTEGER,
+  catch_up_limit      INTEGER,
+  grace_ms            INTEGER,
+  last_fired_at       INTEGER,
+  next_fire_at        INTEGER,
+  created_at          INTEGER NOT NULL,
+  updated_at          INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_scheduled_workflows_next_fire
+  ON scheduled_workflows(next_fire_at) WHERE enabled = 1;
+CREATE INDEX IF NOT EXISTS idx_scheduled_workflows_enabled
+  ON scheduled_workflows(enabled);
+`;
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',           sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',   sql: V2_SQL },
   { version: 3, name: 'phase 3 — webhook deliveries log',      sql: V3_SQL },
   { version: 4, name: 'phase 4a — email seen forensic table',  sql: V4_SQL },
+  { version: 5, name: 'phase 5b — scheduled workflows',        sql: V5_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

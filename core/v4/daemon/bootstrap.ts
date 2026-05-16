@@ -77,6 +77,9 @@ import {
   makeRunner,
 } from './dispatcher';
 import type { Dispatcher, DaemonAgentRunner, DaemonAgentResult } from './dispatcher';
+// v4.5 Phase 5b — cron migration to SQLite + daemon-mode emitter.
+import { runCronMigration } from './cron/migration';
+import { createCronEmitter } from './cron/cronEmitter';
 import { pwClose } from '../../playwrightBridge';
 import { VERSION } from '../../version';
 
@@ -108,6 +111,17 @@ export interface DaemonBootstrapHandle {
   emailTriggers:     ReadonlyArray<EmailTriggerHandle>;
   /** v4.5 Phase 5a — trigger bus dispatcher (null when daemon disabled). */
   dispatcher:        Dispatcher | null;
+  /**
+   * v4.5 Phase 5b — cron migration result (one-shot on first v5 boot).
+   * Subsequent boots return {ran:false, reason:'already_migrated'}.
+   */
+  cronMigration:     {
+    ran:        boolean;
+    migrated:   number;
+    skipped:    number;
+    backupPath: string | null;
+    reason?:    string;
+  } | null;
 }
 
 const NOOP_HANDLE: DaemonBootstrapHandle = Object.freeze({
@@ -128,6 +142,7 @@ const NOOP_HANDLE: DaemonBootstrapHandle = Object.freeze({
   webhookRoutes:         null,
   emailTriggers:         Object.freeze([] as EmailTriggerHandle[]),
   dispatcher:            null,
+  cronMigration:         null,
 });
 
 // Process-wide singleton — the second call returns the same handle.
@@ -447,6 +462,49 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
       log('error', `[email] trigger registry scan failed: ${e instanceof Error ? e.message : String(e)}`);
     }
 
+    // ── v4.5 Phase 5b — cron JSON → SQLite migration ─────────────────────
+    // Idempotent: only copies rows when scheduled_workflows is empty
+    // AND ~/.aiden/cron_jobs.json exists. Subsequent boots return
+    // {ran:false, reason:'already_migrated'}. Original JSON file is
+    // left in place so AIDEN_DAEMON=0 callers keep working.
+    let cronMigrationResult: {
+      ran: boolean; migrated: number; skipped: number;
+      backupPath: string | null; reason?: string;
+    } | null = null;
+    try {
+      const res = runCronMigration({ db, log });
+      cronMigrationResult = {
+        ran:        res.ran,
+        migrated:   res.migrated,
+        skipped:    res.skipped,
+        backupPath: res.backupPath,
+        reason:     res.reason,
+      };
+    } catch (e) {
+      log('error', `[cron-migration] unhandled failure: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // ── v4.5 Phase 5b — install daemon-mode cron emitter ─────────────────
+    // When AIDEN_DAEMON=1, cron fires go through the trigger bus
+    // (consumed by the Phase 5a dispatcher) instead of shelling out.
+    // We swap the cronManager's RunActionFn here so any cron heartbeat
+    // started by the CLI uses the daemon-mode path.
+    //
+    // Best-effort import — we don't pull cronManager into the daemon
+    // hot path unless the user actually runs cron. The import is
+    // lazy so non-cron CLIs don't pay the cost.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const cm = require('../cron/cronManager') as typeof import('../cron/cronManager');
+      const emitter = createCronEmitter({
+        triggerBus, db, log,
+      });
+      cm.setRunActionForTests(emitter);
+      log('info', `[cron-emitter] daemon-mode runAction installed`);
+    } catch (e) {
+      log('warn', `[cron-emitter] install skipped: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
     // ── v4.5 Phase 5a — start the trigger dispatcher ─────────────────────
     // The dispatcher is the bus consumer. It claims pending
     // trigger_events and routes them through the agent loop (or
@@ -517,6 +575,7 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
       webhookRoutes,
       emailTriggers,
       dispatcher,
+      cronMigration: cronMigrationResult,
     };
     return _singleton;
   } catch (e) {
