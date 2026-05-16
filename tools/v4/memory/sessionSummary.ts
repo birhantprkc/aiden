@@ -106,6 +106,17 @@ export const sessionSummaryTool: ToolHandler = {
   mutates: true,
   toolset: 'memory',
   riskTier: 'caution',   // v4.4 Phase 1
+  buildPreview(args, ctx) {
+    const sessionId = String(args.session_id ?? args.sessionId ?? ctx.sessionId ?? 'current');
+    return {
+      tool: 'session_summary',
+      args,
+      riskTier: 'caution',
+      sideEffects: [{ type: 'session_distill', session_id: sessionId }],
+      detectedRisks: [],
+      summary: `Would distill session ${sessionId} into Recent-sessions section of MEMORY.md`,
+    };
+  },
   async execute(args, ctx) {
     if (!ctx.memoryGuard) {
       return { success: false, error: 'memory guard not configured' };

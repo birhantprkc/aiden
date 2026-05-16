@@ -64,6 +64,34 @@ export const shellExecTool: ToolHandler = {
   mutates: true,
   toolset: 'terminal',
   riskTier: 'dangerous',   // v4.4 Phase 1 — arbitrary shell command
+  // v4.4 Phase 4 — dry-run preview.
+  buildPreview(args, ctx) {
+    const command = String(args.command ?? args.cmd ?? '').trim();
+    const cwd = typeof args.cwd === 'string' ? args.cwd : ctx.cwd;
+    const config = getSandboxConfig();
+    const userOverride = ctx.terminalBackend;
+    const effective: 'local' | 'docker' =
+      userOverride ?? (config.enabled ? config.defaultBackend : 'local');
+    // Lightweight risk hints — same patterns ApprovalEngine uses
+    // in smart mode. Kept inline to avoid pulling moat/ into the
+    // tool layer.
+    const risks: string[] = [];
+    if (/\brm\s+-rf?\b/.test(command))                  risks.push('rm -rf');
+    if (/sudo\b/.test(command))                         risks.push('sudo');
+    if (/\bcurl\s.+\|\s*(sh|bash)/.test(command))       risks.push('curl|sh');
+    if (/\bwget\s.+\|\s*(sh|bash)/.test(command))       risks.push('wget|sh');
+    if (/\bdd\s+if=/.test(command))                     risks.push('dd');
+    if (/:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/.test(command)) risks.push('fork bomb');
+    if (/format\s+[a-zA-Z]:/i.test(command))            risks.push('format');
+    return {
+      tool: 'shell_exec',
+      args,
+      riskTier: 'dangerous',
+      sideEffects: [{ type: 'shell_command', command, cwd, backend: effective }],
+      detectedRisks: risks,
+      summary: `Would run \`${command.length > 80 ? command.slice(0, 80) + '…' : command}\` via ${effective} backend in ${cwd}`,
+    };
+  },
   async execute(args, ctx) {
     const command = String(args.command ?? args.cmd ?? '').trim();
     if (!command) return { success: false, error: 'No command provided' };

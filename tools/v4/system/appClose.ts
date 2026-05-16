@@ -59,6 +59,18 @@ export const appCloseTool: ToolHandler = {
   mutates: true,
   toolset: 'system',
   riskTier: 'caution',   // v4.4 Phase 1
+  buildPreview(args) {
+    const app = typeof args.app === 'string' ? args.app : '';
+    const force = args.force === true;
+    return {
+      tool: 'app_close',
+      args,
+      riskTier: 'caution',
+      sideEffects: [{ type: 'app_control', action: force ? 'force-close' : 'close', target: app }],
+      detectedRisks: force ? ['force_close'] : [],
+      summary: `Would ${force ? 'force-' : ''}close app: ${app}`,
+    };
+  },
   async execute(args, _ctx) {
     if (!isWindows()) return windowsOnlyError('app_close');
     const app = typeof args.app === 'string' ? normalise(args.app) : '';

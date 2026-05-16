@@ -71,6 +71,21 @@ export const aidenSelfUpdateTool: ToolHandler = {
   mutates: true,
   toolset: 'system',
   riskTier: 'dangerous',   // v4.4 Phase 1
+  // v4.4 Phase 4 — dry-run refuses; self-update bootstrapping is not
+  // safe to model with a no-op preview.
+  buildPreview(args) {
+    return {
+      tool: 'aiden_self_update',
+      args,
+      riskTier: 'dangerous',
+      sideEffects: [{
+        type: 'refuse',
+        reason: 'aiden_self_update is not safe to preview in dry-run mode. Set AIDEN_DRYRUN=0 to perform a real self-update (with the usual approval-engine confirmation).',
+      }],
+      detectedRisks: ['self_update'],
+      summary: 'Refused: aiden_self_update cannot be previewed in dry-run mode',
+    };
+  },
   async execute(args, ctx) {
     if (!ctx.paths) {
       return {

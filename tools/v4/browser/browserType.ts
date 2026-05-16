@@ -37,6 +37,18 @@ const _browserTypeTool: ToolHandler = {
   mutates: true,
   toolset: 'browser',
   riskTier: 'caution',   // v4.4 Phase 1
+  buildPreview(args) {
+    const selector = String(args.selector ?? 'input');
+    const text = String(args.text ?? '');
+    return {
+      tool: 'browser_type',
+      args,
+      riskTier: 'caution',
+      sideEffects: [{ type: 'browser_action', action: 'type', target: selector }],
+      detectedRisks: [],
+      summary: `Would type ${text.length} chars into ${selector}`,
+    };
+  },
   async execute(args) {
     const selector = String(args.selector ?? 'input').trim();
     const text = String(args.text ?? '');

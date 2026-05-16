@@ -39,6 +39,18 @@ const _browserFillTool: ToolHandler = {
   mutates: true,
   toolset: 'browser',
   riskTier: 'caution',   // v4.4 Phase 1
+  buildPreview(args) {
+    const fields = (args.fields ?? {}) as Record<string, unknown>;
+    const keys = fields && typeof fields === 'object' ? Object.keys(fields) : [];
+    return {
+      tool: 'browser_fill',
+      args,
+      riskTier: 'caution',
+      sideEffects: [{ type: 'browser_action', action: 'fill', target: keys.join(', ') }],
+      detectedRisks: [],
+      summary: `Would fill ${keys.length} form field${keys.length === 1 ? '' : 's'}: ${keys.join(', ')}`,
+    };
+  },
   async execute(args) {
     const fields = (args.fields ?? {}) as Record<string, unknown>;
     if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {

@@ -21,6 +21,7 @@ import path from 'node:path';
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { isProtectedPath } from '../utils/paths';
 import { isPathAllowed, violationEnvelope } from '../../../core/v4/sandboxFs';
+import { truncatePreview } from '../../../core/v4/dryRun';
 
 export const fileWriteTool: ToolHandler = {
   schema: {
@@ -40,6 +41,31 @@ export const fileWriteTool: ToolHandler = {
   mutates: true,
   toolset: 'files',
   riskTier: 'caution',   // v4.4 Phase 1
+  // v4.4 Phase 4 — dry-run preview.
+  async buildPreview(args, ctx) {
+    const raw = String(args.path ?? args.file ?? '').trim();
+    const content = typeof args.content === 'string' ? args.content : '';
+    const policy = isPathAllowed(raw, 'write', ctx.cwd);
+    const resolved = policy.resolvedPath;
+    let prevBytes: number | undefined;
+    try { prevBytes = (await fs.stat(resolved)).size; } catch { /* didn't exist */ }
+    const newBytes = Buffer.byteLength(content, 'utf-8');
+    const sideEffects = policy.allowed
+      ? [prevBytes !== undefined
+          ? { type: 'overwrite_file' as const, path: resolved, prev_bytes: prevBytes, new_bytes: newBytes, preview: truncatePreview(content) }
+          : { type: 'create_file' as const, path: resolved, bytes: newBytes, preview: truncatePreview(content) }]
+      : [{ type: 'refuse' as const, reason: policy.violation!.message }];
+    return {
+      tool: 'file_write',
+      args,
+      riskTier: 'caution',
+      sideEffects,
+      detectedRisks: [],
+      summary: policy.allowed
+        ? `Would write ${newBytes} bytes to ${resolved}`
+        : `Refused: ${policy.violation!.code}`,
+    };
+  },
   async execute(args, ctx) {
     const raw = String(args.path ?? args.file ?? '').trim();
     if (!raw) return { success: false, error: 'No path provided' };

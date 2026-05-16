@@ -18,6 +18,7 @@
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { exec } from 'node:child_process';
 import { windowsOnlyError, isWindows } from './_psHelpers';
+import { truncatePreview } from '../../../core/v4/dryRun';
 
 /**
  * Spawn `powershell.exe Set-Clipboard` with the text piped on stdin.
@@ -66,6 +67,18 @@ export const clipboardWriteTool: ToolHandler = {
   mutates: true,
   toolset: 'system',
   riskTier: 'caution',   // v4.4 Phase 1
+  buildPreview(args) {
+    const text = typeof args.text === 'string' ? args.text : '';
+    const bytes = Buffer.byteLength(text, 'utf-8');
+    return {
+      tool: 'clipboard_write',
+      args,
+      riskTier: 'caution',
+      sideEffects: [{ type: 'clipboard_write', bytes, preview: truncatePreview(text) }],
+      detectedRisks: [],
+      summary: `Would write ${bytes} bytes to clipboard`,
+    };
+  },
   async execute(args, _ctx) {
     if (!isWindows()) return windowsOnlyError('clipboard_write');
     const text = typeof args.text === 'string' ? args.text : '';

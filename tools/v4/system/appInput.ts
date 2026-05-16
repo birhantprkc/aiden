@@ -94,6 +94,18 @@ export const appInputTool: ToolHandler = {
   mutates: true,
   toolset: 'system',
   riskTier: 'caution',   // v4.4 Phase 1
+  buildPreview(args) {
+    const app = typeof args.app === 'string' ? args.app : '';
+    const keys = typeof args.keys === 'string' ? args.keys : '';
+    return {
+      tool: 'app_input',
+      args,
+      riskTier: 'caution',
+      sideEffects: [{ type: 'app_control', action: `send-keys:${keys}`, target: app }],
+      detectedRisks: [],
+      summary: `Would send keys "${keys}" to app: ${app}`,
+    };
+  },
   async execute(args, _ctx) {
     if (!isWindows()) {
       return windowsOnlyError('app_input', {

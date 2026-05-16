@@ -20,7 +20,8 @@
  * Status: PHASE 8.
  */
 
-import type { ToolRegistry } from '../../core/v4/toolRegistry';
+import type { ToolHandler, ToolRegistry } from '../../core/v4/toolRegistry';
+import { withDryRun } from '../../core/v4/dryRun';
 
 import { webSearchTool } from './web/webSearch';
 import { webFetchTool } from './web/webFetch';
@@ -105,62 +106,69 @@ import {
  * the full set).
  */
 export function registerReadOnlyTools(registry: ToolRegistry): void {
-  registry.register(webSearchTool);
-  registry.register(webFetchTool);
-  registry.register(webPageTool);
-  registry.register(deepResearchTool);
+  // v4.4 Phase 4 — every handler is funneled through withDryRun so
+  // AIDEN_DRYRUN=1 short-circuits `execute` to a preview. Read-only
+  // tools pass through unchanged (the HOC returns the handler as-is
+  // when `mutates: false`); the wrapper is cheap (`if (!mutates)
+  // return handler`) and keeps the registration call sites uniform
+  // across read/write tool sets.
+  const register = (h: ToolHandler): void => registry.register(withDryRun(h));
+  register(webSearchTool);
+  register(webFetchTool);
+  register(webPageTool);
+  register(deepResearchTool);
   // Phase 16f: open_url uses shell launch (start chrome / open / xdg-open)
   // for "open X in browser" requests — bypasses Playwright detection.
-  registry.register(openUrlTool);
+  register(openUrlTool);
   // Phase 23.4a: youtube_search returns real /watch?v= URLs scraped
   // from youtube.com/results. media-search uses it before open_url so
   // the URL provenance gate has a candidate set to validate against —
   // closes the URL-hallucination failure mode where the model invented
   // 11-char IDs.
-  registry.register(youtubeSearchTool);
+  register(youtubeSearchTool);
 
-  registry.register(fileReadTool);
-  registry.register(fileListTool);
+  register(fileReadTool);
+  register(fileListTool);
 
-  registry.register(browserScreenshotTool);
-  registry.register(browserExtractTool);
-  registry.register(browserGetUrlTool);
+  register(browserScreenshotTool);
+  register(browserExtractTool);
+  register(browserGetUrlTool);
 
-  registry.register(sessionSearchTool);
-  registry.register(sessionListTool);
+  register(sessionSearchTool);
+  register(sessionListTool);
   // Phase v4.1.2-memory-C: recall_session reads SessionDistillation
   // files written by Phase A+B. Sits alongside session_search — the
   // two have distinct purposes (FTS5-over-messages vs ranked
   // distillation summaries); descriptions force the right model
   // choice.
-  registry.register(recallSessionTool);
+  register(recallSessionTool);
 
-  registry.register(skillsListTool);
-  registry.register(skillViewTool);
+  register(skillsListTool);
+  register(skillViewTool);
 
-  registry.register(systemInfoTool);
-  registry.register(nowPlayingTool);
-  registry.register(naturalEventsTool);
+  register(systemInfoTool);
+  register(nowPlayingTool);
+  register(naturalEventsTool);
 
   // Phase v4.1.2-followup-3 — computer-control read-only tools.
-  registry.register(screenshotTool);
-  registry.register(osProcessListTool);
-  registry.register(clipboardReadTool);
+  register(screenshotTool);
+  register(osProcessListTool);
+  register(clipboardReadTool);
   // v4.1.4-media — GSMTC session enumeration (read). Pair with
   // mediaTransport (write) in the write-tools registration below.
-  registry.register(mediaSessionsTool);
+  register(mediaSessionsTool);
 
-  registry.register(makeLookupToolSchema(registry));
+  register(makeLookupToolSchema(registry));
 
   // Phase v4.1-subagent — register a stub for subagent_fanout so its
   // schema is visible to the agent loop, the MCP server, and the
   // /tools slash command BEFORE the runtime resolves provider /
   // adapter / agent dependencies. The full runtime calls
-  // `registry.register(makeSubagentFanoutTool({...real opts}))` to
+  // `register(makeSubagentFanoutTool({...real opts}))` to
   // replace this stub once `buildAgentRuntime` has those handles.
   // Until then, calling the stub returns a clear "not wired" error
   // rather than crashing.
-  registry.register(makeSubagentFanoutStub());
+  register(makeSubagentFanoutStub());
 }
 
 /** Stub used until the runtime wires real provider / adapter / agent
@@ -175,7 +183,7 @@ function makeSubagentFanoutStub() {
       async call() {
         throw new Error(
           'subagent_fanout: tool not wired — runtime did not replace the stub. ' +
-          'Call registry.register(makeSubagentFanoutTool({...})) after buildAgentRuntime.',
+          'Call register(makeSubagentFanoutTool({...})) after buildAgentRuntime.',
         );
       },
     },
@@ -193,58 +201,63 @@ function makeSubagentFanoutStub() {
  * engine — the registration order doesn't matter for that.
  */
 export function registerWriteTools(registry: ToolRegistry): void {
-  registry.register(fileWriteTool);
-  registry.register(filePatchTool);
-  registry.register(fileDeleteTool);
-  registry.register(fileMoveTool);
-  registry.register(fileCopyTool);
+  // v4.4 Phase 4 — same withDryRun wrap as registerReadOnlyTools.
+  // Write tools are where the preview path is actually hot — when
+  // AIDEN_DRYRUN=1, each handler's `buildPreview` is called instead
+  // of `execute`.
+  const register = (h: ToolHandler): void => registry.register(withDryRun(h));
+  register(fileWriteTool);
+  register(filePatchTool);
+  register(fileDeleteTool);
+  register(fileMoveTool);
+  register(fileCopyTool);
 
-  registry.register(shellExecTool);
+  register(shellExecTool);
 
-  registry.register(browserNavigateTool);
-  registry.register(browserClickTool);
-  registry.register(browserTypeTool);
-  registry.register(browserFillTool);
-  registry.register(browserScrollTool);
-  registry.register(browserCloseTool);
+  register(browserNavigateTool);
+  register(browserClickTool);
+  register(browserTypeTool);
+  register(browserFillTool);
+  register(browserScrollTool);
+  register(browserCloseTool);
 
-  registry.register(executeCodeTool);
+  register(executeCodeTool);
 
-  registry.register(processSpawnTool);
-  registry.register(processListTool);
-  registry.register(processLogReadTool);
-  registry.register(processKillTool);
-  registry.register(processWaitTool);
+  register(processSpawnTool);
+  register(processListTool);
+  register(processLogReadTool);
+  register(processKillTool);
+  register(processWaitTool);
 
   // Phase 9: memory write tools (gated by MemoryGuard for read-back
   // verification, then by the approval engine like every other write).
-  registry.register(memoryAddTool);
-  registry.register(memoryReplaceTool);
-  registry.register(memoryRemoveTool);
+  register(memoryAddTool);
+  register(memoryReplaceTool);
+  register(memoryRemoveTool);
   // Phase v4.1.2 alive-core: cross-session continuity via /quit auto-summary.
-  registry.register(sessionSummaryTool);
+  register(sessionSummaryTool);
 
   // Phase 10: skill_manage — mutating, also goes through the approval
   // engine. skills_list / skill_view stay in registerReadOnlyTools.
-  registry.register(skillManageTool);
+  register(skillManageTool);
 
   // Phase v4.1.2-update: natural-language entry to the same install
   // executor that /update install uses. Two-step confirmation gate
   // (confirm:false → status; confirm:true → install).
-  registry.register(aidenSelfUpdateTool);
+  register(aidenSelfUpdateTool);
 
   // Phase v4.1.2-followup-3 — computer-control mutating tools. All
   // route through the approval engine like every other write.
-  registry.register(mediaKeyTool);
-  registry.register(volumeSetTool);
-  registry.register(appLaunchTool);
-  registry.register(appCloseTool);
-  registry.register(clipboardWriteTool);
+  register(mediaKeyTool);
+  register(volumeSetTool);
+  register(appLaunchTool);
+  register(appCloseTool);
+  register(clipboardWriteTool);
   // v4.1.4-media — verified GSMTC transport (replaces mediaKey for
   // the "name an app, play/pause it" case) + focused-window SendKeys
   // (escape hatch when GSMTC doesn't enumerate the surface).
-  registry.register(mediaTransportTool);
-  registry.register(appInputTool);
+  register(mediaTransportTool);
+  register(appInputTool);
 }
 
 /** Register every v4 tool. Most callers want this. */

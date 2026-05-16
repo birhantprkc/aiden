@@ -129,6 +129,22 @@ export const volumeSetTool: ToolHandler = {
   mutates: true,
   toolset: 'system',
   riskTier: 'caution',   // v4.4 Phase 1
+  buildPreview(args) {
+    const action = typeof args.action === 'string' ? args.action : '';
+    const percent = typeof args.percent === 'number' ? args.percent : -1;
+    return {
+      tool: 'volume_set',
+      args,
+      riskTier: 'caution',
+      sideEffects: action === 'set'
+        ? [{ type: 'volume_set', level: Math.max(0, Math.min(100, percent)) }]
+        : [{ type: 'media_control', action }],
+      detectedRisks: [],
+      summary: action === 'set'
+        ? `Would set volume to ${percent}%`
+        : `Would ${action.replace('_', ' ')}`,
+    };
+  },
   async execute(args, _ctx) {
     if (!isWindows()) return windowsOnlyError('volume_set');
     const action = args.action as 'set' | 'mute' | 'unmute' | 'toggle_mute';

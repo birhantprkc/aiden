@@ -53,6 +53,16 @@ export interface ApprovalRequest {
   riskTier?: RiskTier;
   /** Why was this flagged? (description from the matching pattern) */
   reason?: string;
+  /**
+   * v4.4 Phase 4 — dangerous-tier auto-preview. When the executor
+   * computed a `buildPreview` for this call (only for dangerous-tier
+   * tools with the method defined), the result is forwarded here so
+   * the `promptUser` callback can render "this is what would
+   * happen" alongside the y/n choices. Opaque structurally to keep
+   * the moat → core direction one-way; consumers cast to the
+   * imported `WouldExecute` type when they need to read it.
+   */
+  preview?: unknown;
 }
 
 export interface ApprovalCallbacks {

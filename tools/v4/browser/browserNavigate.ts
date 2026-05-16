@@ -38,6 +38,17 @@ const _browserNavigateTool: ToolHandler = {
   mutates: true,
   toolset: 'browser',
   riskTier: 'caution',   // v4.4 Phase 1
+  buildPreview(args) {
+    const url = String(args.url ?? '');
+    return {
+      tool: 'browser_navigate',
+      args,
+      riskTier: 'caution',
+      sideEffects: [{ type: 'browser_action', action: 'navigate', url }],
+      detectedRisks: [],
+      summary: `Would navigate browser to: ${url}`,
+    };
+  },
   async execute(args) {
     const url = String(args.url ?? '').trim();
     if (!url) return { success: false, error: 'No URL provided' };

@@ -38,6 +38,37 @@ export const fileCopyTool: ToolHandler = {
   mutates: true,
   toolset: 'files',
   riskTier: 'caution',   // v4.4 Phase 1
+  // v4.4 Phase 4 — dry-run preview.
+  async buildPreview(args, ctx) {
+    const fromRaw = String(args.from ?? args.source ?? '').trim();
+    const toRaw = String(args.to ?? args.dest ?? args.destination ?? '').trim();
+    const src = isPathAllowed(fromRaw, 'read', ctx.cwd);
+    const dst = isPathAllowed(toRaw, 'write', ctx.cwd);
+    let srcExists = false;
+    try { await fs.stat(src.resolvedPath); srcExists = true; } catch { /* missing */ }
+    if (!src.allowed) {
+      return {
+        tool: 'file_copy', args, riskTier: 'caution', detectedRisks: [],
+        sideEffects: [{ type: 'refuse', reason: src.violation!.message }],
+        summary: `Refused (source): ${src.violation!.code}`,
+      };
+    }
+    if (!dst.allowed) {
+      return {
+        tool: 'file_copy', args, riskTier: 'caution', detectedRisks: [],
+        sideEffects: [{ type: 'refuse', reason: dst.violation!.message }],
+        summary: `Refused (dest): ${dst.violation!.code}`,
+      };
+    }
+    return {
+      tool: 'file_copy',
+      args,
+      riskTier: 'caution',
+      sideEffects: [{ type: 'copy_path', from: src.resolvedPath, to: dst.resolvedPath, src_exists: srcExists }],
+      detectedRisks: [],
+      summary: `Would copy ${src.resolvedPath} → ${dst.resolvedPath}${srcExists ? '' : ' (source missing)'}`,
+    };
+  },
   async execute(args, ctx) {
     const fromRaw = String(args.from ?? args.source ?? '').trim();
     const toRaw = String(args.to ?? args.dest ?? args.destination ?? '').trim();

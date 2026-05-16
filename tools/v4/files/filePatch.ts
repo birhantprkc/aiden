@@ -44,6 +44,36 @@ export const filePatchTool: ToolHandler = {
   mutates: true,
   toolset: 'files',
   riskTier: 'caution',   // v4.4 Phase 1
+  // v4.4 Phase 4 — dry-run preview.
+  async buildPreview(args, ctx) {
+    const raw = String(args.path ?? args.file ?? '').trim();
+    const find = typeof args.find === 'string' ? args.find : '';
+    const replace = typeof args.replace === 'string' ? args.replace : '';
+    const policy = isPathAllowed(raw, 'write', ctx.cwd);
+    const resolved = policy.resolvedPath;
+    let matches = 0;
+    let bytesDelta = 0;
+    if (policy.allowed && find) {
+      try {
+        const txt = await fs.readFile(resolved, 'utf-8');
+        matches = txt.split(find).length - 1;
+        bytesDelta = matches * (Buffer.byteLength(replace, 'utf-8') - Buffer.byteLength(find, 'utf-8'));
+      } catch { /* file may not exist — surfaced as 0 matches */ }
+    }
+    const sideEffects = policy.allowed
+      ? [{ type: 'patch_file' as const, path: resolved, matches, bytes_delta: bytesDelta }]
+      : [{ type: 'refuse' as const, reason: policy.violation!.message }];
+    return {
+      tool: 'file_patch',
+      args,
+      riskTier: 'caution',
+      sideEffects,
+      detectedRisks: [],
+      summary: policy.allowed
+        ? `Would patch ${resolved} (${matches} match${matches === 1 ? '' : 'es'}, Δ ${bytesDelta} bytes)`
+        : `Refused: ${policy.violation!.code}`,
+    };
+  },
   async execute(args, ctx) {
     const raw = String(args.path ?? args.file ?? '').trim();
     if (!raw) return { success: false, error: 'No path provided' };

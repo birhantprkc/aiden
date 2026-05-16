@@ -33,6 +33,23 @@ export const processKillTool: ToolHandler = {
   mutates: true,
   toolset: 'process',
   riskTier: 'dangerous',   // v4.4 Phase 1
+  buildPreview(args, ctx) {
+    const id = String(args.id ?? '').trim();
+    const signal = (args.signal as string) || 'SIGTERM';
+    let pid = -1;
+    if (ctx.processes && id) {
+      const h = ctx.processes.get(id);
+      if (h && typeof (h as { pid?: number }).pid === 'number') pid = (h as { pid: number }).pid;
+    }
+    return {
+      tool: 'process_kill',
+      args,
+      riskTier: 'dangerous',
+      sideEffects: [{ type: 'process_kill', pid, signal }],
+      detectedRisks: signal === 'SIGKILL' ? ['SIGKILL'] : [],
+      summary: `Would send ${signal} to process ${id}${pid > 0 ? ` (pid ${pid})` : ''}`,
+    };
+  },
   async execute(args, ctx) {
     if (!ctx.processes) {
       return { success: false, error: 'process registry not configured' };

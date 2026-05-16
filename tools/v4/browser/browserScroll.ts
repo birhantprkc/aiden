@@ -46,6 +46,19 @@ const _browserScrollTool: ToolHandler = {
   mutates: true,
   toolset: 'browser',
   riskTier: 'caution',   // v4.4 Phase 1
+  buildPreview(args) {
+    const direction = String(args.direction ?? 'down');
+    const amount = typeof args.amount === 'number' ? args.amount : 500;
+    const selector = typeof args.selector === 'string' ? args.selector : '';
+    return {
+      tool: 'browser_scroll',
+      args,
+      riskTier: 'caution',
+      sideEffects: [{ type: 'browser_action', action: `scroll:${direction}`, target: selector || 'window' }],
+      detectedRisks: [],
+      summary: `Would scroll browser ${direction}${direction === 'up' || direction === 'down' ? ` ${amount}px` : ''}${selector ? ` (${selector})` : ''}`,
+    };
+  },
   async execute(args) {
     const directionRaw = String(args.direction ?? 'down').toLowerCase();
     const direction = (

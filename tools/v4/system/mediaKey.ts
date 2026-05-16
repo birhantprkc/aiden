@@ -59,6 +59,17 @@ export const mediaKeyTool: ToolHandler = {
   mutates: true,
   toolset: 'system',
   riskTier: 'caution',   // v4.4 Phase 1
+  buildPreview(args) {
+    const action = typeof args.action === 'string' ? args.action : '';
+    return {
+      tool: 'media_key',
+      args,
+      riskTier: 'caution',
+      sideEffects: [{ type: 'media_control', action }],
+      detectedRisks: [],
+      summary: `Would send media key: ${action}`,
+    };
+  },
   async execute(args, _ctx) {
     if (!isWindows()) {
       return windowsOnlyError('media_key', {

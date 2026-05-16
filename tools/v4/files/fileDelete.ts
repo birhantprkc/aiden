@@ -42,6 +42,28 @@ export const fileDeleteTool: ToolHandler = {
   mutates: true,
   toolset: 'files',
   riskTier: 'dangerous',   // v4.4 Phase 1 — irreversible filesystem mutation
+  // v4.4 Phase 4 — dry-run preview.
+  async buildPreview(args, ctx) {
+    const raw = String(args.path ?? args.file ?? '').trim();
+    const recursive = args.recursive === true;
+    const policy = isPathAllowed(raw, 'delete', ctx.cwd);
+    const resolved = policy.resolvedPath;
+    let exists = false;
+    try { await fs.stat(resolved); exists = true; } catch { /* missing */ }
+    const sideEffects = policy.allowed
+      ? [{ type: 'delete_file' as const, path: resolved, exists, recursive }]
+      : [{ type: 'refuse' as const, reason: policy.violation!.message }];
+    return {
+      tool: 'file_delete',
+      args,
+      riskTier: 'dangerous',
+      sideEffects,
+      detectedRisks: policy.allowed && recursive ? ['recursive_delete'] : [],
+      summary: policy.allowed
+        ? `Would ${recursive ? 'recursively ' : ''}delete ${resolved}${exists ? '' : ' (does not exist)'}`
+        : `Refused: ${policy.violation!.code}`,
+    };
+  },
   async execute(args, ctx) {
     const raw = String(args.path ?? args.file ?? '').trim();
     if (!raw) return { success: false, error: 'No path provided' };

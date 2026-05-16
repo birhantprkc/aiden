@@ -132,6 +132,26 @@ export interface ToolHandler {
    *   - `dangerous` — arbitrary shell, irreversible state, self-modification
    */
   riskTier?: import('./sandboxConfig').RiskTier;
+  /**
+   * v4.4 Phase 4 — produce a preview of what `execute` would do
+   * WITHOUT performing any side effects. Called when AIDEN_DRYRUN=1
+   * (via the `withDryRun` HOC in `core/v4/dryRun.ts`) OR when the
+   * ApprovalEngine surfaces a dangerous-tier preview before
+   * prompting the user.
+   *
+   * MUST be pure: no disk writes, no shell, no network. Read-only
+   * stat/exists checks are allowed and encouraged for enriching the
+   * preview (e.g. file_write detecting overwrite-vs-create).
+   *
+   * Tools without a `buildPreview` get a generic envelope from
+   * `genericPreview` — the dry-run coverage sentinel test ensures
+   * every `mutates: true` tool registered in `tools/v4/index.ts`
+   * defines a real preview before ship.
+   */
+  buildPreview?(
+    args:    Record<string, unknown>,
+    context: ToolContext,
+  ): Promise<import('./dryRun').WouldExecute> | import('./dryRun').WouldExecute;
 }
 
 export class ToolRegistry {
@@ -252,12 +272,29 @@ export class ToolRegistry {
           riskTier = c.tier;
           reason = c.reason;
         }
+        // v4.4 Phase 4 — dangerous-tier auto-preview. Surface
+        // "what would happen if you say yes" to the approval prompt.
+        // Effective tier is the handler annotation (Phase 1 floor)
+        // OR the classifier escalation above (whichever is higher).
+        let preview: unknown;
+        const effectiveTier = (riskTier === 'dangerous' || handler.riskTier === 'dangerous')
+          ? 'dangerous' : (riskTier ?? handler.riskTier);
+        if (effectiveTier === 'dangerous' && typeof handler.buildPreview === 'function') {
+          try {
+            preview = await handler.buildPreview(args, context);
+          } catch {
+            // Preview is best-effort. A bad preview never blocks
+            // the underlying approval decision.
+            preview = undefined;
+          }
+        }
         const allowed = await context.approvalEngine.checkApproval({
           toolName: call.name,
           category: handler.category,
           args,
           riskTier,
           reason,
+          preview,
         });
         if (!allowed) {
           return {

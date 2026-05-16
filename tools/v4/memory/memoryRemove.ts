@@ -30,6 +30,7 @@
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { containsInSection } from '../../../moat/memoryGuard';
+import { truncatePreview } from '../../../core/v4/dryRun';
 
 /** Section in MEMORY.md that Phase D promotion writes to. */
 const DURABLE_FACTS_HEADER = '## Durable facts';
@@ -62,6 +63,18 @@ export const memoryRemoveTool: ToolHandler = {
   mutates: true,
   toolset: 'memory',
   riskTier: 'caution',   // v4.4 Phase 1
+  buildPreview(args) {
+    const file = args.file === 'user' ? 'user' : 'memory';
+    const text = String(args.text ?? '');
+    return {
+      tool: 'memory_remove',
+      args,
+      riskTier: 'caution',
+      sideEffects: [{ type: 'memory_write', op: 'remove', pattern: truncatePreview(text, 80) }],
+      detectedRisks: [],
+      summary: `Would remove from ${file === 'user' ? 'USER.md' : 'MEMORY.md'}: "${truncatePreview(text, 80)}"`,
+    };
+  },
   async execute(args, ctx) {
     if (!ctx.memoryGuard) {
       return { success: false, error: 'memory guard not configured' };

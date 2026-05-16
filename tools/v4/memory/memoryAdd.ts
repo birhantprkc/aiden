@@ -16,6 +16,7 @@
  */
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
+import { truncatePreview } from '../../../core/v4/dryRun';
 
 export const memoryAddTool: ToolHandler = {
   schema: {
@@ -39,6 +40,18 @@ export const memoryAddTool: ToolHandler = {
   mutates: true,
   toolset: 'memory',
   riskTier: 'caution',   // v4.4 Phase 1
+  buildPreview(args) {
+    const file = args.file === 'user' ? 'user' : 'memory';
+    const content = String(args.content ?? '');
+    return {
+      tool: 'memory_add',
+      args,
+      riskTier: 'caution',
+      sideEffects: [{ type: 'memory_write', op: 'add', bullet: truncatePreview(content) }],
+      detectedRisks: [],
+      summary: `Would append to ${file === 'user' ? 'USER.md' : 'MEMORY.md'}: "${truncatePreview(content, 80)}"`,
+    };
+  },
   async execute(args, ctx) {
     if (!ctx.memoryGuard) {
       return { success: false, error: 'memory guard not configured' };

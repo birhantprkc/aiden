@@ -148,6 +148,18 @@ export const mediaTransportTool: ToolHandler = {
   mutates: true,
   toolset: 'system',
   riskTier: 'caution',   // v4.4 Phase 1
+  buildPreview(args) {
+    const action = typeof args.action === 'string' ? args.action : '';
+    const target = typeof args.target === 'string' ? args.target : '';
+    return {
+      tool: 'media_transport',
+      args,
+      riskTier: 'caution',
+      sideEffects: [{ type: 'media_control', action: target ? `${action}:${target}` : action }],
+      detectedRisks: [],
+      summary: `Would invoke media transport: ${action}${target ? ` on ${target}` : ' (current session)'}`,
+    };
+  },
   async execute(args, _ctx) {
     if (!isWindows()) {
       // v4.1.3-essentials: tailored capability card for non-Windows.

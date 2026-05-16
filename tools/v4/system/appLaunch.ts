@@ -127,6 +127,18 @@ export const appLaunchTool: ToolHandler = {
   mutates: true,
   toolset: 'system',
   riskTier: 'caution',   // v4.4 Phase 1
+  buildPreview(args) {
+    const app = typeof args.app === 'string' ? args.app : '';
+    const cliArgs = Array.isArray(args.args) ? args.args.map(String) : [];
+    return {
+      tool: 'app_launch',
+      args,
+      riskTier: 'caution',
+      sideEffects: [{ type: 'app_control', action: 'launch', target: app + (cliArgs.length ? ' ' + cliArgs.join(' ') : '') }],
+      detectedRisks: [],
+      summary: `Would launch app: ${app}${cliArgs.length ? ' with args ' + cliArgs.join(' ') : ''}`,
+    };
+  },
   async execute(args, _ctx) {
     if (!isWindows()) return windowsOnlyError('app_launch');
     const app = typeof args.app === 'string' ? args.app.trim() : '';

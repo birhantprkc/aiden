@@ -28,6 +28,16 @@ const _browserCloseTool: ToolHandler = {
   mutates: true,
   toolset: 'browser',
   riskTier: 'caution',   // v4.4 Phase 1
+  buildPreview(args) {
+    return {
+      tool: 'browser_close',
+      args,
+      riskTier: 'caution',
+      sideEffects: [{ type: 'browser_action', action: 'close' }],
+      detectedRisks: [],
+      summary: 'Would close the browser session',
+    };
+  },
   async execute() {
     try {
       await pwClose();

@@ -34,6 +34,18 @@ export const processSpawnTool: ToolHandler = {
   mutates: true,
   toolset: 'process',
   riskTier: 'dangerous',   // v4.4 Phase 1
+  buildPreview(args, ctx) {
+    const command = String(args.command ?? '').trim();
+    const cwd = typeof args.cwd === 'string' ? args.cwd : ctx.cwd;
+    return {
+      tool: 'process_spawn',
+      args,
+      riskTier: 'dangerous',
+      sideEffects: [{ type: 'process_spawn', command, args: [] }],
+      detectedRisks: [],
+      summary: `Would spawn background process: \`${command.length > 80 ? command.slice(0, 80) + '…' : command}\` in ${cwd}`,
+    };
+  },
   async execute(args, ctx) {
     if (!ctx.processes) {
       return { success: false, error: 'process registry not configured' };

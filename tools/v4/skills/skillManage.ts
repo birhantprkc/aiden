@@ -80,6 +80,18 @@ export const skillManageTool: ToolHandler = {
   mutates: true,
   toolset: 'skills',
   riskTier: 'caution',   // v4.4 Phase 1
+  buildPreview(args) {
+    const action = typeof args.action === 'string' ? args.action : '';
+    const name = typeof args.name === 'string' ? args.name : '';
+    return {
+      tool: 'skill_manage',
+      args,
+      riskTier: 'caution',
+      sideEffects: [{ type: 'skill_write', op: action, name }],
+      detectedRisks: action === 'delete' ? ['skill_delete'] : [],
+      summary: `Would ${action} skill: ${name}`,
+    };
+  },
   async execute(args, ctx) {
     if (!ctx.skillLoader || !ctx.paths) {
       return { success: false, error: 'No skill loader configured' };

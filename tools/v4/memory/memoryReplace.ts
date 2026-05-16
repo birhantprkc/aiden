@@ -15,6 +15,7 @@
  */
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
+import { truncatePreview } from '../../../core/v4/dryRun';
 
 export const memoryReplaceTool: ToolHandler = {
   schema: {
@@ -39,6 +40,19 @@ export const memoryReplaceTool: ToolHandler = {
   mutates: true,
   toolset: 'memory',
   riskTier: 'caution',   // v4.4 Phase 1
+  buildPreview(args) {
+    const file = args.file === 'user' ? 'user' : 'memory';
+    const oldText = String(args.old_text ?? args.oldText ?? '');
+    const newText = String(args.new_text ?? args.newText ?? '');
+    return {
+      tool: 'memory_replace',
+      args,
+      riskTier: 'caution',
+      sideEffects: [{ type: 'memory_write', op: 'replace', pattern: truncatePreview(oldText, 80), bullet: truncatePreview(newText, 80) }],
+      detectedRisks: [],
+      summary: `Would replace in ${file === 'user' ? 'USER.md' : 'MEMORY.md'}: "${truncatePreview(oldText, 40)}" → "${truncatePreview(newText, 40)}"`,
+    };
+  },
   async execute(args, ctx) {
     if (!ctx.memoryGuard) {
       return { success: false, error: 'memory guard not configured' };
