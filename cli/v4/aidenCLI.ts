@@ -238,6 +238,30 @@ export interface MainOptions {
 }
 
 export async function main(argv: string[], opts: MainOptions = {}): Promise<number> {
+  // v4.5 Phase 1 — daemon foundation bootstrap. Gated by AIDEN_DAEMON=1;
+  // a NOOP when unset/=0. Idempotent — calling from both api/server.ts
+  // and here is safe (singleton guard). Wires:
+  //   - SQLite daemon.db (WAL) under ~/.aiden/daemon/
+  //   - race-safe runtime lock
+  //   - instance tracker + heartbeat
+  //   - crash recovery (boot-state evaluator)
+  //   - /health/{live,ready,degraded}, /metrics, /api/daemon/{status,resources}
+  //     on a minimal HTTP server on port AIDEN_DAEMON_PORT (default 4200)
+  //   - SIGTERM/SIGINT/SIGUSR1 → 5-step ordered drain
+  // The REPL still runs as before when AIDEN_DAEMON is unset/=0.
+  try {
+    // Lazy-import so the daemon module's side-effect cost stays at
+    // zero when AIDEN_DAEMON is off (better-sqlite3 native binding,
+    // express server, etc. all stay unloaded in CLI-only mode).
+    if (process.env.AIDEN_DAEMON === '1') {
+      const { bootstrapDaemon } = await import('../../core/v4/daemon/bootstrap');
+      bootstrapDaemon();
+    }
+  } catch (e) {
+    // Fail-loud but non-fatal — daemon foundation init failure must
+    // not block the user from opening a REPL.
+    console.error('[daemon] bootstrap failed: ' + (e instanceof Error ? e.message : String(e)));
+  }
   const program = new Command();
 
   program

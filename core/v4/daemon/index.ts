@@ -117,6 +117,13 @@ export {
 } from './signals';
 
 export {
+  bootstrapDaemon,
+  getDaemonHandle,
+  _resetDaemonBootstrapForTests,
+} from './bootstrap';
+export type { DaemonBootstrapHandle, BootstrapOptions } from './bootstrap';
+
+export {
   startEventLoopLagSampler,
   stopEventLoopLagSampler,
   getEventLoopLagMs,

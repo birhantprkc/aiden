@@ -42,28 +42,9 @@ import { detectTimezone } from '../core/userProfile'
 import { executeTool, getActiveBrowserPage, setProgressEmitter } from '../core/toolRegistry'
 import { pwClose } from '../core/playwrightBridge'
 // v4.5 Phase 1 — daemon foundation (gated by AIDEN_DAEMON=1; dormant otherwise).
-import {
-  getDaemonConfig,
-  daemonDbPath,
-  daemonRuntimeLockPath,
-  daemonCleanShutdownMarkerPath,
-  openDaemonDb,
-  acquireRuntimeLock,
-  DaemonAlreadyRunningError,
-  createInstanceTracker,
-  createTriggerBus,
-  createIdempotencyStore,
-  createRunStore,
-  createRestartFailureCounter,
-  getResourceRegistry,
-  evaluateBootState,
-  touchCleanShutdownMarker,
-  startEventLoopLagSampler,
-  stopEventLoopLagSampler,
-  installDaemonSignalHandlers,
-  mountHealthEndpoints,
-} from '../core/v4/daemon'
-import { resolveAidenRoot } from '../core/v4/paths'
+// The shared `bootstrapDaemon` module handles every responsibility — db open,
+// runtime lock, crash recovery, health endpoints, signal handlers.
+import { bootstrapDaemon } from '../core/v4/daemon'
 import { getScreenSize, takeScreenshot as captureScreen } from '../core/computerControl'
 import { planWithLLM, executePlan, respondWithResults, callLLM, surfaceRelevantMemories, interruptCurrentCall, getBudgetState, setStatusEmitter } from '../core/agentLoop'
 import { getVerb } from '../core/statusVerbs'
@@ -6066,104 +6047,17 @@ export function startApiServer(portArg?: number): Express {
   }
 
   // ── v4.5 Phase 1 — daemon foundation (gated, dormant when off) ──
-  // When AIDEN_DAEMON=1 the daemon foundation activates: opens daemon.db,
-  // acquires the race-safe runtime lock, evaluates boot state (detects
-  // crashes from previous instance), starts the event-loop-lag sampler,
-  // mounts /health/* + /metrics + /api/daemon/* endpoints, and replaces
-  // the legacy SIGINT/SIGTERM handlers with the 5-step ordered drain.
-  // When AIDEN_DAEMON is unset/=0, the legacy signal handlers below run
-  // unchanged — zero regression for the current OpenAI-compatible API
-  // surface.
-  const _daemonCfg = getDaemonConfig()
-  if (_daemonCfg.enabled) {
-    try {
-      const aidenRoot = resolveAidenRoot()
-      const dbPath   = daemonDbPath(aidenRoot)
-      const lockPath = daemonRuntimeLockPath(aidenRoot)
-      const markerPath = daemonCleanShutdownMarkerPath(aidenRoot)
-      const db = openDaemonDb(dbPath)
-      const tracker = createInstanceTracker({ db, version: VERSION })
-      tracker.start()
-      // Acquire runtime lock AFTER inserting the instance row so the
-      // lock file's instance_id can be looked up in daemon_instances
-      // for diagnostics.
-      let _runtimeLock
-      try {
-        _runtimeLock = acquireRuntimeLock({
-          lockPath,
-          instanceId: tracker.instanceId,
-        })
-      } catch (e) {
-        if (e instanceof DaemonAlreadyRunningError) {
-          console.error('[Daemon] ' + e.message)
-          tracker.stop()
-          process.exit(1)
-        }
-        throw e
-      }
-      // Evaluate boot state — detects crashes from any previous
-      // instance whose heartbeat went stale + writes crash_reports.
-      const _bootDecision = evaluateBootState({
-        db,
-        markerPath,
-        instanceId: tracker.instanceId,
-      })
-      if (_bootDecision.crashDetected) {
-        console.warn('[Daemon] Crash recovery: marked previous-instance runs as interrupted (resume_pending=1).')
-      }
-      // Wire up the v4.5 modules onto a shared singleton scope.
-      const triggerBus = createTriggerBus({ db })
-      const idempotencyStore = createIdempotencyStore({ db })
-      const runStore = createRunStore({ db })
-      const restartFailureCounter = createRestartFailureCounter({ db, threshold: _daemonCfg.restartFailureThreshold })
-      const resourceRegistry = getResourceRegistry()
-      // Reseed L1 idempotency cache from L2 (SQLite) on boot so warm
-      // entries from the previous instance are honored across restart.
-      try { idempotencyStore.reseed() } catch { /* best-effort */ }
-      // Event-loop lag sampler.
-      startEventLoopLagSampler()
-      // Mount health + metrics + /api/daemon/* on the existing app.
-      mountHealthEndpoints(app, {
-        db,
-        triggerBus,
-        resourceRegistry,
-        instanceTracker: tracker,
-        version: VERSION,
-      })
-      // Drain context factory — captures the closures the daemon owns.
-      const _getDrainCtx = () => ({
-        drainTimeoutMs: _daemonCfg.drainTimeoutMs,
-        reason: 'sigterm' as const,    // overridden per signal
-        notifySessions:    async () => { await distillAllActiveSessions(8_000) },
-        activeRuns:        () => runStore.listActive().map((r) => r.id),
-        markResumePending: (runId: number, reason: string) => runStore.markResumePending(runId, reason),
-        interruptRun:      async (_runId: number, _reason: string) => { /* Phase 5 wires this */ },
-        killToolSubprocesses: async (_reason: string) => { /* Phase 5 wires this */ },
-        closeBrowser:      () => pwClose(),
-        closeCron:         () => { /* cron heartbeat stop — Phase 5 migration */ },
-        closeIdempotency:  () => idempotencyStore.close(),
-        closeResources:    () => resourceRegistry.reapAll(3_000),
-        touchCleanShutdown: () => touchCleanShutdownMarker(markerPath),
-        removePid:         () => {
-          try { _runtimeLock?.release() } catch { /* noop */ }
-          removePid()
-          stopEventLoopLagSampler()
-          tracker.stop()
-        },
-        markShutdown:      (reason: 'sigterm' | 'sigint' | 'sigusr1_restart' | 'crash' | 'replaced', exitCode: number) =>
-          tracker.markShutdown(reason, exitCode),
-      })
-      installDaemonSignalHandlers({
-        getDrainContext: _getDrainCtx,
-      })
-      console.log('[Daemon] v4.5 Phase 1 foundation active (instance=' + tracker.instanceId + ', port=' + _daemonCfg.port + ')')
-    } catch (e) {
-      console.error('[Daemon] Foundation init failed:', e instanceof Error ? e.message : String(e))
-      // Fall back to legacy signal handlers — daemon-off behavior.
-      process.once('SIGINT',  () => { removePid(); pwClose().finally(() => distillAllActiveSessions(8_000).finally(() => process.exit(0))) })
-      process.once('SIGTERM', () => { removePid(); pwClose().finally(() => distillAllActiveSessions(8_000).finally(() => process.exit(0))) })
-    }
-  } else {
+  // When AIDEN_DAEMON=1, the shared bootstrap module activates the
+  // foundation (opens daemon.db, acquires runtime lock, evaluates
+  // boot state, mounts /health/* + /metrics + /api/daemon/* onto
+  // the existing app, installs the 5-step ordered drain on SIGINT/
+  // SIGTERM/SIGUSR1).
+  //
+  // When AIDEN_DAEMON is unset/=0, bootstrap returns a NOOP_HANDLE
+  // and the legacy signal handlers below run — zero regression for
+  // the current OpenAI-compatible API surface.
+  const _daemonHandle = bootstrapDaemon({ app })
+  if (!_daemonHandle.active) {
     // ── Legacy clean shutdown: remove PID on signal (AIDEN_DAEMON=0) ──
     process.once('SIGINT',  () => { removePid(); pwClose().finally(() => distillAllActiveSessions(8_000).finally(() => process.exit(0))) })
     process.once('SIGTERM', () => { removePid(); pwClose().finally(() => distillAllActiveSessions(8_000).finally(() => process.exit(0))) })
