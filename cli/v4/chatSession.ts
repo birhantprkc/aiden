@@ -1728,9 +1728,71 @@ export class ChatSession implements ChatSessionLike {
     // Scroll footer (parchment at ≥80 cols, single-line credits below).
     display.write(display.scrollFooter() + '\n');
 
+    // v4.5 update system — boxed three-option prompt rendered AFTER
+    // the boot card / status pills (Q-U5b less-intrusive position),
+    // BEFORE the bottomPromptHint. Fires only when:
+    //   - update check came back with `updateAvailable && !skipped`
+    //   - stdin is a TTY (non-interactive boots short-circuit to 'later')
+    // 5-second timeout defaults to 'later' so a user away from
+    // keyboard isn't held up. Skip-on-'n' writes the version to the
+    // .update_check.json cache so subsequent boots stay quiet until
+    // a newer release ships.
+    try {
+      await this.maybeShowBootUpdatePrompt();
+    } catch { /* never let the update prompt crash boot */ }
+
     // Bottom prompt hint — final line of the boot card.
     display.write('\n');
     display.write(display.bottomPromptHint() + '\n');
+  }
+
+  /**
+   * v4.5 update system — orchestrates the boot prompt. Lazy-imports
+   * the update modules so non-boot code paths (e.g. test harness
+   * sessions constructed without paths wired) don't pay the cost.
+   */
+  private async maybeShowBootUpdatePrompt(): Promise<void> {
+    if (!this.opts.paths) return;
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const cu = require('../../core/v4/update/checkUpdate') as typeof import('../../core/v4/update/checkUpdate');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const md = require('../../core/v4/update/installMethodDetect') as typeof import('../../core/v4/update/installMethodDetect');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const ss = require('../../core/v4/update/skipState') as typeof import('../../core/v4/update/skipState');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const bp = require('./updateBootPrompt') as typeof import('./updateBootPrompt');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const ei = require('../../core/v4/update/executeInstall') as typeof import('../../core/v4/update/executeInstall');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const ver = require('../../core/version') as { VERSION: string };
+
+    const status = await cu.checkForUpdate({ paths: this.opts.paths, installedVersion: ver.VERSION });
+    if (!status.updateAvailable || !status.latest || status.skipped) return;
+
+    const method = md.detectInstallMethod();
+    const choice = await bp.showBootUpdatePrompt({
+      status, method,
+      display: { write: (s) => this.opts.display.write(s), dim: (s) => this.opts.display.dim(s) },
+    });
+
+    if (choice === 'install') {
+      if (method.inProcessInstallSupported) {
+        this.opts.display.write(`Installing aiden-runtime ${status.latest}…\n`);
+        const result = await ei.executeInstall({ packageSpec: `aiden-runtime@${status.latest}` });
+        if (result.success) {
+          this.opts.display.write(`  ✓ aiden-runtime ${result.installedVersion ?? status.latest} installed.\n`);
+          this.opts.display.dim('Restart Aiden to apply: type /quit then re-run `aiden`.');
+        } else {
+          this.opts.display.warn(result.error ?? 'Install failed (no error message).');
+        }
+      } else {
+        this.opts.display.write(`To update, run:\n  ${method.updateCommand(status.latest)}\n`);
+      }
+    } else if (choice === 'skip') {
+      await cu.updateCacheFile(this.opts.paths, (current) => ss.applySkip(current, status.latest!));
+      this.opts.display.dim(`  skipped ${status.latest}. Boot prompt resumes when a newer version ships.`);
+    }
+    // 'later' = no-op; prompt fires again next session.
   }
 
   /** Phase 22 Task 4: state transitions for the right-most segment. */

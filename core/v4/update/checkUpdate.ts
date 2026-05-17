@@ -39,7 +39,11 @@ import path from 'node:path';
 import type { AidenPaths } from '../paths';
 
 const REGISTRY_URL = 'https://registry.npmjs.org/aiden-runtime/latest';
-const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 h
+// v4.5 update system — TTL bumped 6h → 24h per spec. The old 6h
+// supported the firstRun loud-warn UX; the new interactive boot
+// prompt makes the prompt itself the prominent surface, so we can
+// relax the refresh cadence.
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const REGISTRY_TIMEOUT_MS = 4_000;
 
 export interface UpdateCacheShape {
@@ -49,6 +53,21 @@ export interface UpdateCacheShape {
   latest: string | null;
   /** Installed version when this cache was written. Cache invalidates on bump. */
   installed: string;
+  /**
+   * v4.5 update system — first descriptive line of the GitHub
+   * release body (~120 chars) and the release-page URL. Optional;
+   * populated only when GitHub releases endpoint responded with a
+   * matching tag.
+   */
+  releaseNotes?: string;
+  releaseUrl?:   string;
+  /**
+   * v4.5 update system — user typed 'n' on this version. The boot
+   * prompt suppresses re-prompting until npm publishes a newer
+   * version. Q-U7(b) "skip until newer than X" semantics — see
+   * `core/v4/update/skipState.ts::isVersionSkipped`.
+   */
+  skippedVersion?: string;
 }
 
 export interface UpdateStatus {
@@ -66,8 +85,26 @@ export interface UpdateStatus {
    * path surface a louder warn() instead of the dim() update line, since
    * a brand-new install shipping with a stale version is unusual enough
    * to flag explicitly.
+   *
+   * v4.5 note: the new interactive boot prompt UX replaces the
+   * loud-warn/dim split — firstRun is retained for diagnostic
+   * surfaces (e.g. `aiden doctor`) but no longer drives the
+   * loud-warn rendering path.
    */
   firstRun: boolean;
+  /**
+   * v4.5 update system — release-notes blurb populated when the
+   * GitHub releases endpoint responded. Omitted otherwise. The
+   * boot prompt + `/update` slash both consult this.
+   */
+  releaseNotes?: string;
+  releaseUrl?:   string;
+  /**
+   * v4.5 update system — `true` when the user previously typed 'n'
+   * on this latest version (cache.skippedVersion >= latest). The
+   * boot prompt MUST suppress when this is true.
+   */
+  skipped:       boolean;
 }
 
 export interface CheckUpdateOptions {
@@ -151,6 +188,32 @@ async function writeCache(file: string, cache: UpdateCacheShape): Promise<void> 
   }
 }
 
+/**
+ * v4.5 update system — public cache writer for the skip-state +
+ * release-notes machinery. `mutate` receives the current cache
+ * (or a fresh empty shell when none exists) and returns the new
+ * cache content; this function persists. Used by:
+ *
+ *   - `/update skip <v>` slash command (writes skippedVersion)
+ *   - boot prompt path (writes skippedVersion on 'n')
+ *   - registry probe path (writes releaseNotes / releaseUrl)
+ *
+ * Never throws — best-effort I/O.
+ */
+export async function updateCacheFile(
+  paths:  AidenPaths,
+  mutate: (current: UpdateCacheShape) => UpdateCacheShape,
+): Promise<void> {
+  const file = defaultCacheFile(paths);
+  const current = (await readCache(file)) ?? {
+    ts:        0,
+    latest:    null,
+    installed: '',
+  };
+  const next = mutate(current);
+  await writeCache(file, next);
+}
+
 /** Default fetch wrapper with a 4-second AbortController timeout. */
 async function defaultFetch(url: string): Promise<{ version: string }> {
   const controller = new AbortController();
@@ -195,6 +258,7 @@ export async function checkForUpdate(opts: CheckUpdateOptions): Promise<UpdateSt
       updateAvailable: false,
       fromCache: false,
       firstRun: false,
+      skipped: false,
     };
   }
 
@@ -207,12 +271,23 @@ export async function checkForUpdate(opts: CheckUpdateOptions): Promise<UpdateSt
   if (cached && now - cached.ts < ttl && cached.installed === installed) {
     const updateAvailable =
       cached.latest !== null && safeCompare(cached.latest, installed) > 0;
+    // v4.5 — surface skip-state lazily so the boot prompt can decide
+    // whether to render the box at all. The compare is cheap; we
+    // avoid pulling skipState.ts module-level to keep this file's
+    // dep graph minimal.
+    const skipped =
+      typeof cached.skippedVersion === 'string' &&
+      cached.latest !== null &&
+      safeCompare(cached.skippedVersion, cached.latest) >= 0;
     return {
       installed,
       latest: cached.latest,
       updateAvailable,
       fromCache: true,
       firstRun: false,
+      releaseNotes: cached.releaseNotes,
+      releaseUrl:   cached.releaseUrl,
+      skipped,
     };
   }
 
@@ -225,10 +300,33 @@ export async function checkForUpdate(opts: CheckUpdateOptions): Promise<UpdateSt
     latest = null;
   }
 
-  await writeCache(cacheFile, { ts: now, latest, installed });
+  // v4.5 — preserve skippedVersion + release-notes across cache
+  // refreshes. The fresh probe overwrites the {ts, latest, installed}
+  // triple; everything else carries forward from the prior cache.
+  await writeCache(cacheFile, {
+    ts:             now,
+    latest,
+    installed,
+    releaseNotes:   cached?.releaseNotes,
+    releaseUrl:     cached?.releaseUrl,
+    skippedVersion: cached?.skippedVersion,
+  });
 
   const updateAvailable = latest !== null && safeCompare(latest, installed) > 0;
-  return { installed, latest, updateAvailable, fromCache: false, firstRun };
+  const skipped =
+    typeof cached?.skippedVersion === 'string' &&
+    latest !== null &&
+    safeCompare(cached.skippedVersion, latest) >= 0;
+  return {
+    installed,
+    latest,
+    updateAvailable,
+    fromCache: false,
+    firstRun,
+    releaseNotes: cached?.releaseNotes,
+    releaseUrl:   cached?.releaseUrl,
+    skipped,
+  };
 }
 
 /** Wrap `compareVersions` so unparseable strings don't blow up the boot path. */

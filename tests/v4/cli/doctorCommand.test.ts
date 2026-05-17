@@ -76,11 +76,13 @@ describe('/doctor slash command', () => {
       path.join(repoRoot, 'cli', 'v4', 'aidenCLI.ts'),
       'utf8',
     );
-    // The Phase 20 Task 5 wiring uses setImmediate + dynamic import of
-    // checkForUpdate. Either gets renamed in the future without invalidating
-    // this guard would still need to keep the symbol referenced from boot.
+    // Phase 20 wired update check via setImmediate + dynamic import of
+    // checkForUpdate. v4.5 update system kept the pre-warm in aidenCLI
+    // (cache freshening) and moved the user-visible prompt into
+    // chatSession's maybeShowBootUpdatePrompt. Either way, the
+    // boot path must still reference these symbols so the cache is
+    // primed before the prompt fires.
     expect(src).toContain('setImmediate');
     expect(src).toContain('checkForUpdate');
-    expect(src).toContain('formatUpdateLine');
   });
 });

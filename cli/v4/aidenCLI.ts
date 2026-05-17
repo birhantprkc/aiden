@@ -1061,29 +1061,19 @@ export async function buildAgentRuntime(
     display.dim(`[soul] ${soulNotice}`);
   }
 
-  // Phase 20 Task 5: non-blocking npm update check. Fires on a separate
-  // microtask so REPL boot is unaffected. The cache hit path is sub-ms;
-  // the cache miss path is bounded by REGISTRY_TIMEOUT_MS (4 s) and runs
-  // after the prompt is already up. Honors AIDEN_NO_UPDATE_CHECK=1.
+  // v4.5 update system — the old setImmediate dim/warn one-liner
+  // here was superseded by the interactive boot prompt rendered
+  // later inside `chatSession.run()::maybeShowBootUpdatePrompt`.
+  // Single surface for update notification: the boxed prompt.
+  // Pre-warm the registry probe so the cache is fresh by the time
+  // the prompt asks — same non-blocking pattern, same opt-out
+  // semantics, no user-visible output from this call.
   setImmediate(async () => {
     try {
-      const { checkForUpdate, formatUpdateLine } = await import(
-        '../../core/v4/update/checkUpdate'
-      );
+      const { checkForUpdate } = await import('../../core/v4/update/checkUpdate');
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const pkg = require('../../package.json') as { version: string };
-      const status = await checkForUpdate({
-        paths,
-        installedVersion: pkg.version,
-      });
-      const line = formatUpdateLine(status);
-      if (line) {
-        // Phase 20 Task 6: louder surfacing on first-ever boot when the
-        // installed package is already behind. Subsequent boots stay
-        // low-key (dim) — users have seen the line before.
-        if (status.firstRun && status.updateAvailable) display.warn(line);
-        else display.dim(line);
-      }
+      await checkForUpdate({ paths, installedVersion: pkg.version });
     } catch {
       /* silent — update check is best-effort */
     }

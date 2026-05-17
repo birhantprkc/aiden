@@ -23,8 +23,10 @@
 
 import type { SlashCommand, SlashCommandContext } from '../commandRegistry';
 import { VERSION as INSTALLED_VERSION } from '../../../core/version';
-import { checkForUpdate } from '../../../core/v4/update/checkUpdate';
+import { checkForUpdate, updateCacheFile, compareVersions } from '../../../core/v4/update/checkUpdate';
 import { executeInstall } from '../../../core/v4/update/executeInstall';
+import { detectInstallMethod } from '../../../core/v4/update/installMethodDetect';
+import { applySkip, clearSkip } from '../../../core/v4/update/skipState';
 
 async function printStatus(ctx: SlashCommandContext): Promise<void> {
   if (!ctx.paths) {
@@ -97,17 +99,109 @@ async function runInstall(ctx: SlashCommandContext): Promise<void> {
   ctx.display.warn(result.error ?? 'Install failed (no error message).');
 }
 
+// ── v4.5 update system — skip + auto subcommands ───────────────────────────
+
+async function runSkip(ctx: SlashCommandContext): Promise<void> {
+  if (!ctx.paths) {
+    ctx.display.warn('/update skip needs Aiden user-data paths — try in a real session.');
+    return;
+  }
+  const version = ctx.args[1];
+  if (!version || version.trim().length === 0) {
+    ctx.display.printError(
+      'Usage: /update skip <version>\n' +
+      'Example: /update skip 4.5.1\n' +
+      'Suppresses the boot prompt for that version + any older. Newer versions still prompt.',
+    );
+    return;
+  }
+  // Reject obviously-bad inputs early so users get a clear error.
+  try { compareVersions(version, version); }
+  catch {
+    ctx.display.printError(`/update skip: "${version}" is not a recognised version (expected MAJOR.MINOR.PATCH).`);
+    return;
+  }
+  try {
+    await updateCacheFile(ctx.paths, (current) => applySkip(current, version));
+    ctx.display.write(`Skipping ${version}. Boot prompt will resume when a newer version ships.\n`);
+  } catch (e) {
+    ctx.display.warn(`/update skip: failed to persist (${e instanceof Error ? e.message : String(e)}).`);
+  }
+}
+
+async function runAuto(ctx: SlashCommandContext): Promise<void> {
+  const sub = (ctx.args[1] ?? 'status').toLowerCase();
+  if (sub === 'status') {
+    const off = process.env.AIDEN_NO_UPDATE_CHECK === '1';
+    ctx.display.write(`Update auto-check: ${off ? 'OFF' : 'ON'}   (source: ${off ? 'env' : 'default'})\n`);
+    if (off) {
+      ctx.display.dim('  unset AIDEN_NO_UPDATE_CHECK or run `/update auto on` to re-enable.');
+    }
+    return;
+  }
+  if (sub === 'on' || sub === 'off') {
+    // The env var is the authoritative gate (matches existing Phase 20
+    // contract). `/update auto on` clears it for the current process;
+    // permanent off needs the user's shell to keep it set, since we
+    // shouldn't quietly write env vars to user shells. Document this
+    // clearly so users aren't confused.
+    if (sub === 'on') {
+      delete process.env.AIDEN_NO_UPDATE_CHECK;
+      ctx.display.write('Update auto-check: ON for this session.\n');
+      ctx.display.dim('  To persist: ensure AIDEN_NO_UPDATE_CHECK is unset in your shell init.');
+    } else {
+      process.env.AIDEN_NO_UPDATE_CHECK = '1';
+      ctx.display.write('Update auto-check: OFF for this session.\n');
+      ctx.display.dim('  To persist: set AIDEN_NO_UPDATE_CHECK=1 in your shell init.');
+    }
+    return;
+  }
+  ctx.display.printError('Usage: /update auto on|off|status');
+}
+
+async function runClearSkip(ctx: SlashCommandContext): Promise<void> {
+  if (!ctx.paths) {
+    ctx.display.warn('/update unskip needs Aiden user-data paths — try in a real session.');
+    return;
+  }
+  try {
+    await updateCacheFile(ctx.paths, (current) => clearSkip(current));
+    ctx.display.write('Cleared skipped-version state. The boot prompt will re-fire next session.\n');
+  } catch (e) {
+    ctx.display.warn(`/update unskip: failed to persist (${e instanceof Error ? e.message : String(e)}).`);
+  }
+}
+
 export const update: SlashCommand = {
   name: 'update',
-  description: 'Check for / install the latest aiden-runtime. Use "install" subcommand to apply.',
+  description: 'Check, install, or skip aiden-runtime updates.',
   category: 'system',
   icon: '⬆',
   handler: async (ctx) => {
     const sub = (ctx.args[0] ?? '').toLowerCase();
+    // Display install method on `/update` default so users see how
+    // their install will be updated before they trigger one.
     if (sub === 'install') {
       await runInstall(ctx);
-    } else {
-      await printStatus(ctx);
+      return;
+    }
+    if (sub === 'skip') {
+      await runSkip(ctx);
+      return;
+    }
+    if (sub === 'unskip') {
+      await runClearSkip(ctx);
+      return;
+    }
+    if (sub === 'auto') {
+      await runAuto(ctx);
+      return;
+    }
+    // Default ('' / 'check') → status probe.
+    await printStatus(ctx);
+    if (ctx.paths) {
+      const method = detectInstallMethod();
+      ctx.display.dim(`  install method: ${method.description}`);
     }
   },
 };
