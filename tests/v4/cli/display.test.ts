@@ -613,13 +613,14 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     const total = chunks.join('');
     // Rerender fired (eraser ANSI present).
     expect(total).toMatch(/\x1b\[\d+F\x1b\[J/);
-    // paintBoldUnderline emits both bold-on (\x1b[1m) and underline-on
-    // (\x1b[4m) for the open wrap, and both underline-off (\x1b[24m)
-    // and bold-off (\x1b[22m) for the close. All four must appear.
+    // v4.5 TUI polish — paintEmphasis emits bold-on (\x1b[1m) and
+    // bold-off (\x1b[22m) only. Underline was dropped (was making
+    // bulleted list items look like clickable links per v4.5 polish
+    // feedback). Bold-on/off must appear; underline must NOT.
     expect(total).toMatch(/\x1b\[1m/);
-    expect(total).toMatch(/\x1b\[4m/);
-    expect(total).toMatch(/\x1b\[24m/);
     expect(total).toMatch(/\x1b\[22m/);
+    expect(total).not.toMatch(/\x1b\[4m/);
+    expect(total).not.toMatch(/\x1b\[24m/);
     // Literal asterisks REPLACED by the rendered form.
     expect(stripAnsi(total)).not.toMatch(/\*\*bold text\*\*/);
     // Word still present (just no longer wrapped in asterisks).
@@ -1082,7 +1083,10 @@ describe('isPreFramedLine (v4.1.4 F1)', () => {
   });
 
   it('numbered bullet with bold ANSI → pre-framed', () => {
-    const line = '  1. \x1b[1m\x1b[4mIt targets the thing\x1b[24m\x1b[22m';
+    // v4.5 TUI polish — paintEmphasis dropped the underline pair.
+    // The pre-framed detector still recognises numbered bullets with
+    // bold-only emphasis ANSI.
+    const line = '  1. \x1b[1mIt targets the thing\x1b[22m';
     expect(isPreFramedLine(line)).toBe(true);
   });
 

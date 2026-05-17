@@ -30,24 +30,30 @@ function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
 }
 
-// ANSI sentinels we expect when paintBoldUnderline fires.
-const BOLD_ON      = '\x1b[1m';
+// ANSI sentinels we expect when paintEmphasis fires.
+// v4.5 TUI polish: dropped underline from bold (was making list items
+// look like clickable links). Bold-on/off are the only sentinels now.
+const BOLD_ON  = '\x1b[1m';
+const BOLD_OFF = '\x1b[22m';
+// Underline sentinel retained ONLY for negative assertions — paintEmphasis
+// must never emit it again.
 const UNDERLINE_ON = '\x1b[4m';
-const BOLD_OFF     = '\x1b[22m';
 
 describe('replyRenderer — Fix C (list-item inline expansion)', () => {
   // Renderer is module-cached; reset between describe blocks so any
   // skin-engine state changes elsewhere don't leak in.
   _resetForTests();
 
-  it('numbered list with **bold**: every bullet renders ANSI bold-underline', () => {
+  it('numbered list with **bold**: every bullet renders ANSI bold (no underline)', () => {
     const r = getReplyRenderer();
     const out = r.render('1. **First**\n2. **Second**\n3. **Third**');
     // Bold-on present at least once per bullet (= 3 times).
     const onCount = out.split(BOLD_ON).length - 1;
     expect(onCount).toBeGreaterThanOrEqual(3);
-    expect(out).toContain(UNDERLINE_ON);
     expect(out).toContain(BOLD_OFF);
+    // v4.5 TUI polish — underline must NOT appear (was the cause of
+    // "bullets look like links" user feedback).
+    expect(out).not.toContain(UNDERLINE_ON);
     // Critically: NO literal `**` survives in the rendered bytes.
     expect(out).not.toContain('**');
   });

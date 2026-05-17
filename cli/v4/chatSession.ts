@@ -1656,6 +1656,10 @@ export class ChatSession implements ChatSessionLike {
       }) + '\n',
     );
 
+    // v4.5 TUI polish — blank line so the status pills row doesn't
+    // crowd the muted source annotation right beneath it.
+    display.write('\n');
+
     // v4.1.3-prebump: dim source annotation under the pills row so the
     // user can see WHY this provider/model was chosen — closes the
     // information gap that made Case 3 (persisted-config) look like a

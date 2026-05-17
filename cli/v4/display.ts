@@ -699,14 +699,21 @@ export class Display {
       return text + ' '.repeat(INTERIOR - v);
     };
 
+    // v4.5 TUI polish — add a leading + trailing blank line so the
+    // box has visual breathing room from the lines above/below, and
+    // a trailing interior blank so contact info doesn't crowd the
+    // bottom border.
     return [
+      '',
       lidIndent + lid,
       wallIndent + pipe + ' '.repeat(INTERIOR) + pipe,
       wallIndent + pipe + padInner(`   ${heart}  ${val('Built solo')}`) + pipe,
       wallIndent + pipe + padInner(`   ${lab('GitHub:')}  ${val('github.com/taracodlabs/aiden')}`) + pipe,
       wallIndent + pipe + padInner(`   ${lab('Web:')}     ${val('aiden.taracod.com')}`) + pipe,
       wallIndent + pipe + padInner(`   ${lab('Contact:')} ${val('contact@taracod.com')}`) + pipe,
+      wallIndent + pipe + ' '.repeat(INTERIOR) + pipe,
       wallIndent + pipe + lid + pipe,
+      '',
     ].join('\n');
   }
 

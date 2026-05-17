@@ -44,31 +44,37 @@ function paint(kind: 'brand' | 'heading' | 'muted' | 'agent' | 'tool' | 'success
 }
 
 /**
- * v4.1.3-essentials: bold (`**foo**`) markdown emphasis renders as
- * ANSI bold + underline. Previously painted 'brand' (orange) which
- * collided with the heading hierarchy. Briefly tried bold + bright-
- * white; landed on bold + underline because underline carries
- * emphasis without consuming a color slot — the palette stays
- * available for state semantics (yellow=degraded, red=error, etc.).
+ * v4.1.3-essentials → v4.5 TUI polish: bold (`**foo**`) markdown
+ * emphasis renders as plain ANSI bold. Earlier iterations tried
+ * 'brand' (orange, collided with heading hierarchy), bright-white
+ * (low contrast on dark themes), and bold+underline (made bulleted
+ * list items look like clickable hyperlinks — user feedback after
+ * v4.5 Phase 8 stabilisation).
  *
- * ANSI sequence: `\x1b[1m\x1b[4m{text}\x1b[24m\x1b[22m` — bold ON +
- * underline ON, then underline OFF + bold OFF. Reset order matters
- * (underline first, bold second) so the closing codes don't reorder
- * styles surprisingly on terminals that batch SGR updates.
+ * Landed on bold-only: weight carries emphasis, no color slot
+ * consumed, and no underline confusion with terminal URL/path
+ * auto-highlight features.
  *
- * Bypasses the skin system intentionally — bold-as-underline is an
- * opinionated default for this slice. Same caveat as the prior bold-
- * as-color iteration: nested markdown loses the outer style after
- * close (pre-existing limitation of the painter-stack architecture).
+ * ANSI sequence: `\x1b[1m{text}\x1b[22m` — bold ON, bold OFF.
+ *
+ * Bypasses the skin system intentionally — emphasis is an
+ * opinionated default for this slice. Same caveat as the prior
+ * bold-as-color iteration: nested markdown loses the outer style
+ * after close (pre-existing limitation of the painter-stack
+ * architecture).
  *
  * Honors `NO_COLOR=1` per the standard (skips the wrap entirely).
- * Strictly speaking `NO_COLOR` is about color and underline isn't
- * a color, but the wrap still emits ANSI escapes; honoring the env
- * var keeps output paste-safe in scripted contexts.
+ * Strictly speaking `NO_COLOR` is about color, but the wrap still
+ * emits ANSI escapes; honoring the env var keeps output paste-safe
+ * in scripted contexts.
+ *
+ * Function name: `paintEmphasis` rather than `paintBold` because
+ * the latter is already taken by a different (parameterised) helper
+ * below.
  */
-function paintBoldUnderline(text: string): string {
+function paintEmphasis(text: string): string {
   if (process.env.NO_COLOR && process.env.NO_COLOR !== '') return text;
-  return `\x1b[1m\x1b[4m${text}\x1b[24m\x1b[22m`;
+  return `\x1b[1m${text}\x1b[22m`;
 }
 
 /**
@@ -386,10 +392,12 @@ export function getReplyRenderer(): { render: (text: string) => string } {
     hr:           () => paint('muted')('─'.repeat(getBodyWidth())) + '\n',
     listitem:     renderListItem,
     paragraph:    (text: string) => `${text}\n\n`,
-    // v4.1.3-essentials: bold renders as ANSI bold + underline
-    // (was 'brand' / orange, then bright-white; landed on underline
-    // so the color palette stays available for state semantics).
-    strong:       paintBoldUnderline,
+    // v4.1.3-essentials → v4.5 TUI polish: bold renders as plain ANSI
+    // bold. Earlier iterations tried orange (collision with headings),
+    // bright-white (low contrast), and bold+underline (made bulleted
+    // **labels** look like clickable links — user feedback after v4.5
+    // Phase 8 stabilisation). Weight alone carries emphasis.
+    strong:       paintEmphasis,
     em:           paint('muted'),
     // v4.1.3-essentials reply-polish: inline `` `code` `` — strip
     // the literal backticks (used to leak into the visible output)

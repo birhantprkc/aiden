@@ -1050,6 +1050,9 @@ export async function buildAgentRuntime(
     else if (ln.severity === 'red') display.printError(ln.text);
     else display.dim(ln.text);
   }
+  // v4.5 TUI polish — blank line so the plugin boot card breathes
+  // before the AIDEN banner stamps in below.
+  display.write('\n');
 
   // Phase 16g: surface the SOUL.md upgrade notice once on boot (only
   // when set — for users with edited SOUL.md that would have been
