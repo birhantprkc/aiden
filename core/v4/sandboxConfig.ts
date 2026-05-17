@@ -4,6 +4,8 @@
  *
  * Aiden — local-first agent.
  */
+import { getRuntimeToggles } from './runtimeToggles';
+
 /**
  * core/v4/sandboxConfig.ts — v4.4 Phase 1: Execution sandbox configuration.
  *
@@ -295,13 +297,26 @@ export function readSandboxConfig(
 ): SandboxConfig {
   // v4.4 Phase 6 — default-on transition. AIDEN_SANDBOX is now
   // enabled by default; users opt out with `AIDEN_SANDBOX=0`.
+  //
+  // v4.5 Phase 8a — the actual read goes through the runtimeToggles
+  // singleton so /sandbox slash-command flips and config.yaml
+  // overrides take effect without restart. When the singleton was
+  // initialised by the CLI it consults env > config.yaml > default;
+  // when not initialised (test bench) it falls back to env > default
+  // — the existing semantics.
   //   unset / '1' / 'true' / junk → enabled
   //   '0'                          → disabled
   // Mirrors v4.2 Phase 6 (TCE) + v4.3 Phase 6 (browser depth)
   // semantics exactly. The strict `!== '0'` check matches the
   // pattern those phases set: any explicit "off" value disables;
   // everything else (including unset) enables.
-  const enabled = env.AIDEN_SANDBOX !== '0';
+  // v4.5 Phase 8a — when env (the readSandboxConfig input) is not the
+  // process env (test bench passing a custom env), honour the input
+  // directly to keep test isolation. Otherwise route through the
+  // runtimeToggles singleton.
+  const enabled = env === process.env
+    ? getRuntimeToggles().isEnabled('sandbox')
+    : env.AIDEN_SANDBOX !== '0';
 
   // Allow/deny lists: defaults + user-provided extensions.
   const customAllow = parseList(env.AIDEN_SANDBOX_ALLOW).map(resolveRealPath);
@@ -347,6 +362,7 @@ export function readSandboxConfig(
 // ── Singleton ───────────────────────────────────────────────────────────────
 
 let _singleton: SandboxConfig | null = null;
+let _toggleHookInstalled = false;
 
 /**
  * Read the singleton sandbox config. Initialized on first call from
@@ -355,6 +371,16 @@ let _singleton: SandboxConfig | null = null;
  * — the singleton path is for production CLI startup.
  */
 export function getSandboxConfig(): SandboxConfig {
+  if (!_toggleHookInstalled) {
+    // v4.5 Phase 8a — invalidate the singleton when /sandbox toggles.
+    // Registered lazily on first read so test benches that build
+    // their own runtimeToggles + reset between cases don't carry
+    // hooks across instances.
+    try {
+      getRuntimeToggles().onChange('sandbox', () => { _singleton = null; });
+      _toggleHookInstalled = true;
+    } catch { /* runtimeToggles import / init race — best-effort */ }
+  }
   if (!_singleton) _singleton = readSandboxConfig();
   return _singleton;
 }
@@ -362,5 +388,6 @@ export function getSandboxConfig(): SandboxConfig {
 /** Reset the singleton for test isolation. Production code never calls this. */
 export function _resetSandboxConfigForTests(): void {
   _singleton = null;
+  _toggleHookInstalled = false;
   _clearRealPathCacheForTests();
 }

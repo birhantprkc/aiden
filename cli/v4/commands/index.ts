@@ -45,6 +45,11 @@ import { show } from './show';
 import { history } from './history';
 import { reloadSoul } from './reloadSoul';
 import { update } from './update';
+// v4.5 Phase 8a — subsystem live-flip slash commands.
+import { sandbox } from './sandbox';
+import { tce } from './tce';
+import { browserDepth } from './browserDepth';
+import { daemonStatus } from './daemonStatus';
 
 export {
   help,
@@ -80,6 +85,11 @@ export {
   history,
   reloadSoul,
   update,
+  // v4.5 Phase 8a — subsystem toggles.
+  sandbox,
+  tce,
+  browserDepth,
+  daemonStatus,
 };
 
 /** All built-in system commands, in canonical order. */
@@ -118,6 +128,11 @@ export const allCommands: SlashCommand[] = [
   // probe + shared executeInstall executor (also wired into
   // aiden_self_update tool for natural-language requests).
   update,
+  // v4.5 Phase 8a — subsystem live-flip slash commands.
+  sandbox,
+  tce,
+  browserDepth,
+  daemonStatus,
   clear,
   quit,
 ];

@@ -79,6 +79,11 @@ export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
   history: 'System',
   // Phase v4.1.2-update — npm self-update for the running install.
   update: 'System',
+  // v4.5 Phase 8a — subsystem live-flip slash commands.
+  sandbox: 'System',
+  tce: 'System',
+  'browser-depth': 'System',
+  daemon: 'System',
 
   // ── Authentication ──
   auth: 'Authentication',

@@ -745,6 +745,22 @@ export async function buildAgentRuntime(
   const config = new ConfigManager(paths);
   await config.load();
 
+  // v4.5 Phase 8a — initialise the runtimeToggles singleton with a
+  // ConfigManager seam so /sandbox /tce /browser-depth flips persist
+  // to config.yaml. Core modules (sandboxConfig, turnState,
+  // browserState) consult this singleton; precedence is
+  // env > config.yaml > default per Q-P8a-1(a).
+  {
+    const { initRuntimeToggles } = await import('../../core/v4/runtimeToggles');
+    initRuntimeToggles({
+      configRead: (key) => config.getValue(key),
+      configWriteAndSave: async (key, value) => {
+        config.set(key, value);
+        await config.save();
+      },
+    });
+  }
+
   // Phase 30.2 — fresh-user UX. Detection extends the old
   // `isFreshInstall`-only gate so we cover three new failure modes:
   //   1. fresh user with no env / no OAuth / no config → wizard fires

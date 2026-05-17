@@ -295,8 +295,23 @@ export class TurnState {
     // disable; everything else (unset, `'1'`, empty string, junk)
     // enables. The opts.enabled override still wins when explicitly
     // passed by callers (test fixtures, embedded usage).
-    this.enabled =
-      opts.enabled ?? (process.env.AIDEN_TCE !== '0');
+    // v4.5 Phase 8a — route through the runtimeToggles singleton so
+    // /tce slash-command flips and config.yaml overrides take effect
+    // on the next constructed TurnState. The explicit opts.enabled
+    // override still wins for test fixtures + embedded usage.
+    if (typeof opts.enabled === 'boolean') {
+      this.enabled = opts.enabled;
+    } else {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const rt = require('./runtimeToggles') as typeof import('./runtimeToggles');
+        this.enabled = rt.getRuntimeToggles().isEnabled('tce');
+      } catch {
+        // runtimeToggles unavailable (rare — circular import or test
+        // harness without core/v4 wired). Fall back to direct env read.
+        this.enabled = process.env.AIDEN_TCE !== '0';
+      }
+    }
     this.hintConsec      = opts.hintConsecThreshold     ?? 5;
     this.cooldownConsec  = opts.cooldownConsecThreshold ?? 8;
     this.surfaceConsec   = opts.surfaceConsecThreshold  ?? 11;

@@ -410,7 +410,21 @@ export class BrowserState {
     // string, junk) enables. Mirrors v4.2 Phase 6's TCE flip exactly.
     // The opts.enabled override still wins when explicitly passed
     // by callers (test fixtures, embedded usage).
-    this.enabled = opts.enabled ?? (process.env.AIDEN_BROWSER_DEPTH !== '0');
+    // v4.5 Phase 8a — route through runtimeToggles singleton so
+    // /browser-depth slash-command flips and config.yaml overrides
+    // take effect on the next constructed BrowserState. Explicit
+    // opts.enabled still wins for test fixtures.
+    if (typeof opts.enabled === 'boolean') {
+      this.enabled = opts.enabled;
+    } else {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const rt = require('./runtimeToggles') as typeof import('./runtimeToggles');
+        this.enabled = rt.getRuntimeToggles().isEnabled('browser_depth');
+      } catch {
+        this.enabled = process.env.AIDEN_BROWSER_DEPTH !== '0';
+      }
+    }
   }
 
   isEnabled(): boolean {
