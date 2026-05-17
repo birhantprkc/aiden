@@ -313,16 +313,15 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       // path — subcommands (trigger add/list/show/remove/enable/
       // disable/test, config, --version, --help, doctor, …) do NOT
       // touch the daemon foundation.
-      try {
-        if (process.env.AIDEN_DAEMON === '1') {
-          const { bootstrapDaemon } = await import('../../core/v4/daemon/bootstrap');
-          bootstrapDaemon();
-        }
-      } catch (e) {
-        // Fail-loud but non-fatal — daemon foundation init failure
-        // must not block the user from opening a REPL.
-        console.error('[daemon] bootstrap failed: ' + (e instanceof Error ? e.message : String(e)));
-      }
+      // v4.5 Phase 7b — bootstrapDaemon() was previously called HERE
+      // (top of REPL action), but the Phase 7 agentBuilder injection
+      // needs the REPL's already-initialized provider resolver + tool
+      // registry + auxiliary client + prompt builder. We moved the
+      // bootstrap call into runInteractiveChat() (after
+      // buildAgentRuntime() returns) so the closure has all the
+      // references in scope. The dispatcher's poll loop is bounded
+      // (250ms idle) — moving init a fraction-of-second later is
+      // invisible.
 
       // Tier-3.1: surface --no-ui as an env var so downstream modules
       // (which import uiBuild.ts) see the flag without threading it
@@ -1456,6 +1455,29 @@ export async function buildAgentRuntime(
     agent.markMemoryDirty(file === 'user' ? 'user' : 'memory');
   });
 
+  // v4.5 Phase 7b — daemon agent builder. Captures the references
+  // above so the dispatcher can construct a fresh AidenAgent per
+  // daemon-claimed trigger. Strategy B (closure capture) — REPL
+  // construction stays untouched; we just expose the builder on
+  // the returned AgentRuntime so runInteractiveChat can pass it to
+  // bootstrapDaemon().
+  const { buildDaemonAgentBuilder } = await import('./daemonAgentBuilder');
+  const daemonAgentBuilder = buildDaemonAgentBuilder({
+    paths,
+    resolver,
+    fallbackAdapter: adapter,
+    toolRegistry,
+    toolExecutor,
+    auxiliaryClient,
+    promptBuilder,
+    promptBuilderOptions,
+    memoryManager,
+    resolveVerifiedFlag,
+    resolveToolset,
+    resolveMutates,
+    maxTurns: config.getValue<number>('agent.max_turns', 90)!,
+  });
+
   // Phase v4.1.2 alive-core: SOUL.md file watcher. Best-effort —
   // some filesystems (network mounts, certain WSL configs) don't
   // support fs.watch reliably. We try to attach; if it fails, the
@@ -1849,6 +1871,7 @@ export async function buildAgentRuntime(
     pluginLoader,
     exploreMode,
     channelManager,
+    daemonAgentBuilder,
   };
 }
 
@@ -1924,10 +1947,44 @@ export interface AgentRuntime {
    * `stopAll()` on graceful exit so polling adapters disconnect.
    */
   channelManager: ChannelManager;
+  /**
+   * v4.5 Phase 7b — daemon agent builder closure. Captures the
+   * REPL's initialized provider resolver, tool registry, prompt
+   * builder, etc. The dispatcher invokes this per claimed trigger
+   * event to construct a fresh AidenAgent for the daemon turn.
+   * Passed to `bootstrapDaemon({agentBuilder})` in
+   * runInteractiveChat.
+   */
+  daemonAgentBuilder: import('../../core/v4/daemon/dispatcher').AgentBuilder;
 }
 
 async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void> {
   const runtime = await buildAgentRuntime(cliOpts, opts);
+
+  // v4.5 Phase 7b — bootstrap the daemon AFTER the REPL agent is
+  // built. The daemonAgentBuilder closure (captured in the runtime)
+  // has all the references it needs (provider resolver, tool
+  // registry, prompt builder, auxiliary client, memory manager).
+  // When AIDEN_DAEMON=0 (default), bootstrapDaemon returns the
+  // NOOP_HANDLE — zero overhead. When =1, the dispatcher uses the
+  // real runner backed by our builder; daemon-fired triggers
+  // invoke a real AidenAgent.
+  try {
+    if (process.env.AIDEN_DAEMON === '1') {
+      const { bootstrapDaemon } = await import('../../core/v4/daemon/bootstrap');
+      bootstrapDaemon({
+        agentBuilder: runtime.daemonAgentBuilder,
+        persistedDefaultModel: {
+          provider: runtime.providerId,
+          model:    runtime.modelId,
+        },
+      });
+    }
+  } catch (e) {
+    // Fail-loud but non-fatal — daemon foundation init failure
+    // must not block the user from opening a REPL.
+    console.error('[daemon] bootstrap failed: ' + (e instanceof Error ? e.message : String(e)));
+  }
 
   const sessionOpts = {
     agent: runtime.agent,
