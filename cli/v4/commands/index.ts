@@ -50,6 +50,8 @@ import { sandbox } from './sandbox';
 import { tce } from './tce';
 import { browserDepth } from './browserDepth';
 import { daemonStatus } from './daemonStatus';
+// v4.5 Phase 8b — contextual capability suggestions toggle.
+import { suggestions } from './suggestions';
 
 export {
   help,
@@ -90,6 +92,8 @@ export {
   tce,
   browserDepth,
   daemonStatus,
+  // v4.5 Phase 8b — contextual suggestions toggle.
+  suggestions,
 };
 
 /** All built-in system commands, in canonical order. */
@@ -133,6 +137,8 @@ export const allCommands: SlashCommand[] = [
   tce,
   browserDepth,
   daemonStatus,
+  // v4.5 Phase 8b — contextual suggestions toggle.
+  suggestions,
   clear,
   quit,
 ];

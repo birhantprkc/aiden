@@ -1081,6 +1081,20 @@ export class ChatSession implements ChatSessionLike {
   }
 
   private async runAgentTurn(userInput: string): Promise<void> {
+    // v4.5 Phase 8b — daemon-scheduling intent check on the user's
+    // initial message. Classifies regex hits like "every day at",
+    // "watch this folder", "when an email arrives" — and queues a
+    // tip to render at the END of the agent's response (so it
+    // doesn't crowd the agent's actual reply). Engine handles
+    // budget + dismissal.
+    let _deferredTip: { slot: string; message: string } | null = null;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { getSuggestionEngine } = require('../../core/v4/suggestionEngine');
+      const t = getSuggestionEngine().checkInitialMessage(userInput);
+      if (t) _deferredTip = t;
+    } catch { /* defensive — never block a turn on a suggestion */ }
+
     // Phase 30.2.1 — explore mode: short-circuit BEFORE building the
     // turn-status spinner / agent call. The wizard skipped, so there's
     // no real provider to talk to. Print a friendly redirect to /setup
@@ -1462,6 +1476,19 @@ export class ChatSession implements ChatSessionLike {
 
       this.setStatusState({ kind: 'ready' });
       this.lastTurnElapsedMs = Date.now() - turnStartedAt;
+      // v4.5 Phase 8b — surface a deferred daemon-scheduling tip
+      // queued at turn start. Renders AFTER the agent's response per
+      // Q-P8b-3(b) — the user reads the answer first, then sees the
+      // ambient capability hint.
+      if (_deferredTip) {
+        try {
+          this.opts.display.dim(_deferredTip.message);
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const { getSuggestionEngine } = require('../../core/v4/suggestionEngine');
+          getSuggestionEngine().recordFired(_deferredTip.slot);
+        } catch { /* defensive */ }
+        _deferredTip = null;
+      }
       // Tier-3.1a: dim full-width rule between the agent reply and the
       // post-turn status footer.
       this.opts.display.write(`  ${this.opts.display.rule()}\n`);

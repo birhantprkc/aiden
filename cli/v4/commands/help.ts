@@ -84,6 +84,8 @@ export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
   tce: 'System',
   'browser-depth': 'System',
   daemon: 'System',
+  // v4.5 Phase 8b — contextual capability suggestions.
+  suggestions: 'System',
 
   // ── Authentication ──
   auth: 'Authentication',

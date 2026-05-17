@@ -39,7 +39,7 @@
 
 // ── Public types ───────────────────────────────────────────────────────────
 
-export type ToggleKey = 'sandbox' | 'tce' | 'browser_depth';
+export type ToggleKey = 'sandbox' | 'tce' | 'browser_depth' | 'suggestions';
 
 export type ToggleSource = 'env' | 'config' | 'default';
 
@@ -97,15 +97,20 @@ const ENV_VAR: Record<ToggleKey, string> = {
   sandbox:       'AIDEN_SANDBOX',
   tce:           'AIDEN_TCE',
   browser_depth: 'AIDEN_BROWSER_DEPTH',
+  // v4.5 Phase 8b — contextual capability suggestions. Rarely set as
+  // env (this is mostly a UX toggle) but included for symmetry with
+  // the other subsystem toggles.
+  suggestions:   'AIDEN_SUGGESTIONS',
 };
 
 const CONFIG_KEY: Record<ToggleKey, string> = {
   sandbox:       'runtime_toggles.sandbox',
   tce:           'runtime_toggles.tce',
   browser_depth: 'runtime_toggles.browser_depth',
+  suggestions:   'runtime_toggles.suggestions',
 };
 
-const ALL_KEYS: ReadonlyArray<ToggleKey> = ['sandbox', 'tce', 'browser_depth'];
+const ALL_KEYS: ReadonlyArray<ToggleKey> = ['sandbox', 'tce', 'browser_depth', 'suggestions'];
 
 // ── Resolver primitives ────────────────────────────────────────────────────
 

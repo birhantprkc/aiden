@@ -1437,6 +1437,21 @@ export async function buildAgentRuntime(
       try {
         skillOutcomeTracker.onTool(call, phase, result);
       } catch { /* telemetry must not break the turn */ }
+      // v4.5 Phase 8b — pre-tool-call contextual suggestion. Fires
+      // when the call would benefit from a v4.4/v4.5 subsystem the
+      // user currently has off. Engine handles dismissal + budget;
+      // we just render the tip and tell the engine it was shown.
+      if (phase === 'before') {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const { getSuggestionEngine } = require('../../core/v4/suggestionEngine');
+          const tip = getSuggestionEngine().checkToolCall(call);
+          if (tip) {
+            display.dim(tip.message);
+            getSuggestionEngine().recordFired(tip.slot);
+          }
+        } catch { /* never let a suggestion crash a tool call */ }
+      }
       callbacks.onToolCall?.(call, phase, result);
     },
     onCompression: callbacks.onCompression,

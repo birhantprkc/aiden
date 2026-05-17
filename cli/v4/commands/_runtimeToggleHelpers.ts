@@ -31,12 +31,14 @@ const LABEL: Record<ToggleKey, string> = {
   sandbox:       'Sandbox',
   tce:           'TCE',
   browser_depth: 'Browser depth',
+  suggestions:   'Suggestions',
 };
 
 const CONFIG_DOTTED: Record<ToggleKey, string> = {
   sandbox:       'runtime_toggles.sandbox',
   tce:           'runtime_toggles.tce',
   browser_depth: 'runtime_toggles.browser_depth',
+  suggestions:   'runtime_toggles.suggestions',
 };
 
 /**

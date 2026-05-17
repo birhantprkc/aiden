@@ -74,9 +74,10 @@ describe('barrel exports', () => {
     // Phase v4.1.2 alive-core added /reload-soul (31 → 32).
     // Phase v4.1.2-update added /update (32 → 33).
     // v4.5 Phase 8a added /sandbox /tce /browser-depth /daemon (33 → 37).
-    expect(allCommands.length).toBe(37);
+    // v4.5 Phase 8b added /suggestions (37 → 38).
+    expect(allCommands.length).toBe(38);
     const names = new Set(allCommands.map((c) => c.name));
-    expect(names.size).toBe(37);
+    expect(names.size).toBe(38);
   });
 
   it('every command exposes name, description, category', () => {
