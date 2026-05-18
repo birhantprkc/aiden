@@ -181,7 +181,7 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
 
   async call(input: ProviderCallInput): Promise<ProviderCallOutput> {
     const body  = this.buildBody(input, /* streaming */ false);
-    const reply = await this.dispatch(body, /* streaming */ false);
+    const reply = await this.dispatch(body, /* streaming */ false, input.signal);
     const text  = await reply.text();
     let parsed: WireResponse;
     try {
@@ -206,7 +206,7 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
 
   async *callStream(input: ProviderCallInput): AsyncGenerator<StreamEvent, void, void> {
     const body  = this.buildBody(input, /* streaming */ true);
-    const reply = await this.dispatch(body, /* streaming */ true);
+    const reply = await this.dispatch(body, /* streaming */ true, input.signal);
     if (!reply.body) {
       yield {
         type: 'done',
@@ -266,7 +266,11 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
     return { ...headers, ...this.extraHeaders };
   }
 
-  private async dispatch(body: WireRequestBody, streaming: boolean): Promise<Response> {
+  private async dispatch(
+    body: WireRequestBody,
+    streaming: boolean,
+    externalSignal?: AbortSignal,
+  ): Promise<Response> {
     const headers    = this.buildHeaders(streaming);
     const serialised = JSON.stringify(body);
     const totalTries = this.maxRetries + 1;
@@ -276,6 +280,18 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
     for (let attempt = 0; attempt < totalTries; attempt++) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+      // v4.6 prep — forward external abort into the internal controller.
+      // External aborts surface as raw AbortError so AidenAgent routes
+      // them as 'interrupted' rather than retrying as ProviderTimeoutError.
+      let externalAbortHandler: (() => void) | null = null;
+      if (externalSignal) {
+        if (externalSignal.aborted) {
+          controller.abort();
+        } else {
+          externalAbortHandler = () => controller.abort();
+          externalSignal.addEventListener('abort', externalAbortHandler, { once: true });
+        }
+      }
 
       let response: Response;
       try {
@@ -287,7 +303,14 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
         });
       } catch (err: any) {
         clearTimeout(timer);
+        if (externalAbortHandler && externalSignal) {
+          externalSignal.removeEventListener('abort', externalAbortHandler);
+        }
         if (err?.name === 'AbortError') {
+          // v4.6 prep — external abort takes priority over internal timeout.
+          if (externalSignal?.aborted) {
+            throw err;
+          }
           lastErr = new ProviderTimeoutError(this.providerName, this.timeoutMs);
         } else {
           lastErr = new ProviderError(
@@ -305,6 +328,9 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
         throw lastErr;
       }
       clearTimeout(timer);
+      if (externalAbortHandler && externalSignal) {
+        externalSignal.removeEventListener('abort', externalAbortHandler);
+      }
 
       if (response.ok) return response;
 

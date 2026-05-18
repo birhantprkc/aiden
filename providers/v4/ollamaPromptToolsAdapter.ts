@@ -124,7 +124,7 @@ export class OllamaPromptToolsAdapter implements ProviderAdapter {
 
     for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
       try {
-        const response = await this.fetchWithTimeout(url, headers, body);
+        const response = await this.fetchWithTimeout(url, headers, body, input.signal);
         if (response.ok) {
           const json = (await response.json()) as OllamaChatResponse;
           return this.parseResponse(json);
@@ -212,6 +212,16 @@ export class OllamaPromptToolsAdapter implements ProviderAdapter {
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    // v4.6 prep — forward external abort into the internal controller.
+    let externalAbortHandler: (() => void) | null = null;
+    if (input.signal) {
+      if (input.signal.aborted) {
+        controller.abort();
+      } else {
+        externalAbortHandler = () => controller.abort();
+        input.signal.addEventListener('abort', externalAbortHandler, { once: true });
+      }
+    }
     let response: Response;
     try {
       response = await fetch(url, {
@@ -222,7 +232,14 @@ export class OllamaPromptToolsAdapter implements ProviderAdapter {
       });
     } catch (err) {
       clearTimeout(timer);
+      if (externalAbortHandler && input.signal) {
+        input.signal.removeEventListener('abort', externalAbortHandler);
+      }
       if (err instanceof Error && err.name === 'AbortError') {
+        // v4.6 prep — external abort takes priority over internal timeout.
+        if (input.signal?.aborted) {
+          throw err;
+        }
         throw new ProviderTimeoutError(this.providerName, this.timeoutMs);
       }
       throw new ProviderError(
@@ -236,6 +253,9 @@ export class OllamaPromptToolsAdapter implements ProviderAdapter {
 
     if (!response.ok) {
       clearTimeout(timer);
+      if (externalAbortHandler && input.signal) {
+        input.signal.removeEventListener('abort', externalAbortHandler);
+      }
       const status = response.status;
       const rawText = await this.safeReadText(response);
       // Phase v4.1.1-oauth-fix Phase 5: composeMessage handles body
@@ -250,11 +270,18 @@ export class OllamaPromptToolsAdapter implements ProviderAdapter {
     }
     if (!response.body) {
       clearTimeout(timer);
+      if (externalAbortHandler && input.signal) {
+        input.signal.removeEventListener('abort', externalAbortHandler);
+      }
       throw new ProviderError(
         `Provider ${this.providerName} returned an empty stream body`,
         this.providerName,
       );
     }
+    // Response is good; the stream consumer will run for a while. The
+    // controller stays armed (with `externalSignal` still listening) so
+    // that mid-stream aborts cancel reader.read() via fetch's signal.
+    // Listener cleanup happens in the stream-consumer try/finally below.
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder('utf-8');
@@ -313,6 +340,11 @@ export class OllamaPromptToolsAdapter implements ProviderAdapter {
       }
     } catch (err) {
       clearTimeout(timer);
+      // v4.6 prep — external abort during mid-stream read surfaces as
+      // AbortError; re-throw so AidenAgent routes it as 'interrupted'.
+      if (err instanceof Error && err.name === 'AbortError' && input.signal?.aborted) {
+        throw err;
+      }
       throw new ProviderError(
         `Provider ${this.providerName} stream interrupted: ${err instanceof Error ? err.message : String(err)}`,
         this.providerName,
@@ -322,6 +354,9 @@ export class OllamaPromptToolsAdapter implements ProviderAdapter {
       );
     } finally {
       clearTimeout(timer);
+      if (externalAbortHandler && input.signal) {
+        input.signal.removeEventListener('abort', externalAbortHandler);
+      }
       try {
         reader.releaseLock();
       } catch {
@@ -544,9 +579,20 @@ export class OllamaPromptToolsAdapter implements ProviderAdapter {
     url: string,
     headers: Record<string, string>,
     body: OllamaChatRequest,
+    externalSignal?: AbortSignal,
   ): Promise<Response> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    // v4.6 prep — forward external abort into the internal controller.
+    let externalAbortHandler: (() => void) | null = null;
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        controller.abort();
+      } else {
+        externalAbortHandler = () => controller.abort();
+        externalSignal.addEventListener('abort', externalAbortHandler, { once: true });
+      }
+    }
     try {
       return await fetch(url, {
         method: 'POST',
@@ -556,11 +602,19 @@ export class OllamaPromptToolsAdapter implements ProviderAdapter {
       });
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
+        // v4.6 prep — external abort takes priority over internal timeout.
+        // Surface the raw AbortError so AidenAgent routes it as 'interrupted'.
+        if (externalSignal?.aborted) {
+          throw err;
+        }
         throw new ProviderTimeoutError(this.providerName, this.timeoutMs);
       }
       throw err;
     } finally {
       clearTimeout(timer);
+      if (externalAbortHandler && externalSignal) {
+        externalSignal.removeEventListener('abort', externalAbortHandler);
+      }
     }
   }
 

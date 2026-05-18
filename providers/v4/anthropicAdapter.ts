@@ -186,7 +186,7 @@ export class AnthropicAdapter implements ProviderAdapter {
 
   async call(input: ProviderCallInput): Promise<ProviderCallOutput> {
     const body  = this.buildBody(input, /* streaming */ false);
-    const reply = await this.dispatch(body, /* streaming */ false);
+    const reply = await this.dispatch(body, /* streaming */ false, input.signal);
     const json  = (await reply.json()) as WireMessageBody;
     return decodeResponse(json);
   }
@@ -195,7 +195,7 @@ export class AnthropicAdapter implements ProviderAdapter {
 
   async *callStream(input: ProviderCallInput): AsyncGenerator<StreamEvent, void, void> {
     const body = this.buildBody(input, /* streaming */ true);
-    const reply = await this.dispatch(body, /* streaming */ true);
+    const reply = await this.dispatch(body, /* streaming */ true, input.signal);
     if (!reply.body) {
       // Server promised SSE but gave us nothing — fall through to a synthetic
       // empty done event so the agent loop terminates rather than hangs.
@@ -258,7 +258,11 @@ export class AnthropicAdapter implements ProviderAdapter {
     return { ...headers, ...this.extraHeaders };
   }
 
-  private async dispatch(body: WireRequestBody, streaming: boolean): Promise<Response> {
+  private async dispatch(
+    body: WireRequestBody,
+    streaming: boolean,
+    externalSignal?: AbortSignal,
+  ): Promise<Response> {
     // Resolved once per process via the userAgent module's cache, so paying
     // for the version detection here is cheap on every retry/turn.
     const userAgent   = await getClaudeCliUserAgent();
@@ -271,6 +275,21 @@ export class AnthropicAdapter implements ProviderAdapter {
     for (let attempt = 0; attempt < totalTries; attempt++) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+      // v4.6 prep — forward an external AbortSignal into this attempt's
+      // internal controller so a parent agent that aborts mid-flight
+      // cancels the in-flight fetch. External aborts surface as a raw
+      // AbortError (NOT ProviderTimeoutError) so AidenAgent can route
+      // them as `finishReason: 'interrupted'` instead of treating them
+      // as a retryable timeout.
+      let externalAbortHandler: (() => void) | null = null;
+      if (externalSignal) {
+        if (externalSignal.aborted) {
+          controller.abort();
+        } else {
+          externalAbortHandler = () => controller.abort();
+          externalSignal.addEventListener('abort', externalAbortHandler, { once: true });
+        }
+      }
 
       let response: Response;
       try {
@@ -282,7 +301,16 @@ export class AnthropicAdapter implements ProviderAdapter {
         });
       } catch (err: any) {
         clearTimeout(timer);
+        if (externalAbortHandler && externalSignal) {
+          externalSignal.removeEventListener('abort', externalAbortHandler);
+        }
         if (err?.name === 'AbortError') {
+          // v4.6 prep — external abort takes priority over internal
+          // timeout. Surface the raw AbortError immediately (no retry)
+          // so AidenAgent's catch routes it as 'interrupted'.
+          if (externalSignal?.aborted) {
+            throw err;
+          }
           // Treat timeout as retryable; only surface ProviderTimeoutError if
           // we've burned the last attempt.
           lastErr = new ProviderTimeoutError(this.providerName, this.timeoutMs);
@@ -302,6 +330,9 @@ export class AnthropicAdapter implements ProviderAdapter {
         throw lastErr;
       }
       clearTimeout(timer);
+      if (externalAbortHandler && externalSignal) {
+        externalSignal.removeEventListener('abort', externalAbortHandler);
+      }
 
       if (response.ok) return response;
 

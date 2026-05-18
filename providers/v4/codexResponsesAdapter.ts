@@ -229,7 +229,7 @@ export class CodexResponsesAdapter implements ProviderAdapter {
 
   async call(input: ProviderCallInput): Promise<ProviderCallOutput> {
     const body  = this.buildBody(input);
-    const reply = await this.dispatch(body);
+    const reply = await this.dispatch(body, input.signal);
 
     // Codex backend always streams; aggregate the SSE frames into the
     // same shape the JSON path returns. Plain api.openai.com path returns
@@ -309,7 +309,10 @@ export class CodexResponsesAdapter implements ProviderAdapter {
     return { ...headers, ...this.extraHeaders };
   }
 
-  private async dispatch(body: WireRequestBody): Promise<Response> {
+  private async dispatch(
+    body: WireRequestBody,
+    externalSignal?: AbortSignal,
+  ): Promise<Response> {
     const headers    = this.buildHeaders();
     const serialised = JSON.stringify(body);
     const totalTries = this.maxRetries + 1;
@@ -319,6 +322,18 @@ export class CodexResponsesAdapter implements ProviderAdapter {
     for (let attempt = 0; attempt < totalTries; attempt++) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+      // v4.6 prep — forward external abort into the internal controller.
+      // External aborts surface as raw AbortError so AidenAgent routes
+      // them as 'interrupted' rather than retrying as ProviderTimeoutError.
+      let externalAbortHandler: (() => void) | null = null;
+      if (externalSignal) {
+        if (externalSignal.aborted) {
+          controller.abort();
+        } else {
+          externalAbortHandler = () => controller.abort();
+          externalSignal.addEventListener('abort', externalAbortHandler, { once: true });
+        }
+      }
 
       let response: Response;
       try {
@@ -330,7 +345,14 @@ export class CodexResponsesAdapter implements ProviderAdapter {
         });
       } catch (err: any) {
         clearTimeout(timer);
+        if (externalAbortHandler && externalSignal) {
+          externalSignal.removeEventListener('abort', externalAbortHandler);
+        }
         if (err?.name === 'AbortError') {
+          // v4.6 prep — external abort takes priority over internal timeout.
+          if (externalSignal?.aborted) {
+            throw err;
+          }
           lastErr = new ProviderTimeoutError(this.providerName, this.timeoutMs);
         } else {
           lastErr = new ProviderError(
@@ -348,6 +370,9 @@ export class CodexResponsesAdapter implements ProviderAdapter {
         throw lastErr;
       }
       clearTimeout(timer);
+      if (externalAbortHandler && externalSignal) {
+        externalSignal.removeEventListener('abort', externalAbortHandler);
+      }
 
       if (response.ok) return response;
 

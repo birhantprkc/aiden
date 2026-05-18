@@ -215,6 +215,14 @@ export interface ProviderCallInput {
   temperature?: number;
   stream?: boolean;
   extraBody?: Record<string, unknown>;
+  /**
+   * v4.6 prep — forwarded to the adapter's internal `fetch()` so an
+   * in-flight HTTP request is cancelled when the signal aborts.
+   * Adapters that don't honour AbortSignal MUST still accept the
+   * field without error; the caller treats fetch's `AbortError` as
+   * the signal that the request was cancelled.
+   */
+  signal?: AbortSignal;
 }
 
 /**

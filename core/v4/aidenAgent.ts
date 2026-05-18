@@ -277,7 +277,7 @@ export interface AidenAgentResult {
   turnCount:           number;
   toolCallCount:       number;
   fallbackActivated:   boolean;
-  finishReason:        'stop' | 'budget_exhausted' | 'error' | 'tool_loop';
+  finishReason:        'stop' | 'budget_exhausted' | 'error' | 'tool_loop' | 'interrupted';
   totalUsage:          { inputTokens: number; outputTokens: number };
   toolCallTrace:       HonestyTraceEntry[];
   honestyFindings?:    HonestyFinding[];
@@ -333,6 +333,18 @@ export interface RunConversationOptions {
    * hidden when the adapter never emits — honest degradation.
    */
   onProgress?:       (outputTokens: number, maxTokens?: number) => void;
+  /**
+   * v4.6 prep — cooperative-cancellation primitive. When provided,
+   * the loop checks `signal.aborted` between iterations and before
+   * each tool dispatch, and forwards it to the provider HTTP layer
+   * so in-flight fetches are cancelled. Omit for "no abort possible"
+   * (today's behaviour, preserved for all existing callers).
+   *
+   * On abort, the turn yields with `finishReason: 'interrupted'`
+   * and `finalContent: ''` (delta-accumulation on abort is deferred
+   * to a future phase — see docs/v4.6/phase-1-design.md §11.0).
+   */
+  signal?:           AbortSignal;
 }
 
 interface EmptyResponseMetrics {
@@ -909,7 +921,7 @@ export class AidenAgent {
     turnCount:          number;
     toolCallCount:      number;
     fallbackActivated:  boolean;
-    finishReason:       'stop' | 'budget_exhausted' | 'error' | 'tool_loop';
+    finishReason:       'stop' | 'budget_exhausted' | 'error' | 'tool_loop' | 'interrupted';
     totalUsage:         { inputTokens: number; outputTokens: number };
     toolCallTrace:      HonestyTraceEntry[];
     fullTrace:          Array<{ name: string; args: Record<string, unknown> }>;
@@ -933,7 +945,7 @@ export class AidenAgent {
     let   cautionFired      = false;
     let   warningFired      = false;
     let   emptyRetriesUsed  = 0;
-    let   finishReason: 'stop' | 'budget_exhausted' | 'error' | 'tool_loop' = 'stop';
+    let   finishReason: 'stop' | 'budget_exhausted' | 'error' | 'tool_loop' | 'interrupted' = 'stop';
     let   finalContent      = '';
     // v4.1.6 spike (TCE) — per-turn loop detection + recovery state.
     // Default ON as of v4.2 Phase 6 — set AIDEN_TCE=0 to disable.
@@ -953,6 +965,16 @@ export class AidenAgent {
     let toolLoopCard: AidenAgentResult['toolLoopCard'] = undefined;
 
     while (true) {
+      // v4.6 prep — between-iteration cooperative-cancellation check.
+      // When the caller passed an AbortSignal that has aborted, exit
+      // immediately with `finishReason: 'interrupted'`. Delta accumulation
+      // on abort is deferred — finalContent stays '' in this prep dispatch
+      // (see docs/v4.6/phase-1-design.md §11.0).
+      if (runOptions.signal?.aborted) {
+        finishReason = 'interrupted';
+        finalContent = '';
+        break;
+      }
       // v4.1.6 spike — decrement cooldown counters once per iteration
       // so cooled-down tools eventually return to the schemas. No-op
       // when TCE is disabled.
@@ -996,6 +1018,17 @@ export class AidenAgent {
         output = await this.callProvider(messages, effectiveTools, runOptions);
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
+        // v4.6 prep — external abort takes priority over fallback. An
+        // AbortError surfaced from the adapter when input.signal aborted
+        // is NOT a transient transport failure; surface it immediately
+        // as `finishReason: 'interrupted'` so the calling spawn primitive
+        // can route correctly. Detect via either the live signal flag or
+        // the error name (covers both pre-fetch and mid-flight aborts).
+        if (runOptions.signal?.aborted || error.name === 'AbortError') {
+          finishReason = 'interrupted';
+          finalContent = '';
+          break;
+        }
         if (this.fallback && !fallbackActivated) {
           const next = await this.fallback.activate(error, turnCount);
           if (next) {
@@ -1121,6 +1154,16 @@ export class AidenAgent {
       // then continues the outer iteration loop from a clean baseline.
       let rollbackDecision: RecoveryDecision | null = null;
       for (const call of output.toolCalls) {
+        // v4.6 prep — pre-tool-call cooperative-cancellation check.
+        // If the caller aborted between the model emitting tool calls
+        // and us dispatching them, skip the remaining calls in this
+        // batch. We set finishReason here; the outer-while break is
+        // handled after the for-of exits.
+        if (runOptions.signal?.aborted) {
+          finishReason = 'interrupted';
+          finalContent = '';
+          break;
+        }
         this.onToolCall?.(call, 'before');
         // v4.2 Phase 4 — mark any active checkpoints as containing a
         // mutating call BEFORE dispatch. Done pre-dispatch (not post)
@@ -1253,6 +1296,15 @@ export class AidenAgent {
         }
       }
 
+      // v4.6 prep — if the per-tool-call abort check fired inside the
+      // for-of above, finishReason is now 'interrupted'. Break the outer
+      // while immediately so we don't run another provider call. Done
+      // here (post-for-of) rather than inside the for-of because the
+      // inner `break` only exits the inner loop.
+      if (finishReason === 'interrupted') {
+        break;
+      }
+
       // v4.2 Phase 4 — apply rollback if the controller asked for it.
       // Truncate messages to the captured snapshot length, restore
       // TurnState internals, then push a corrective system message
@@ -1381,7 +1433,9 @@ export class AidenAgent {
       this.onProviderRequestStart?.(this.providerId);
     } catch { /* defensive */ }
     if (!wantStream) {
-      return this.provider.call({ messages, tools });
+      // v4.6 prep — forward the abort signal into the provider call so
+      // an in-flight HTTP request can be cancelled mid-flight.
+      return this.provider.call({ messages, tools, signal: runOptions.signal });
     }
 
     let firstDeltaFired = false;
@@ -1390,6 +1444,9 @@ export class AidenAgent {
       messages,
       tools,
       stream: true,
+      // v4.6 prep — also forward to streaming adapters; mid-stream
+      // aborts cancel the underlying SSE read via the same signal.
+      signal: runOptions.signal,
     });
     for await (const evt of stream) {
       if (evt.type === 'delta') {
@@ -1412,6 +1469,16 @@ export class AidenAgent {
       }
     }
     if (!finalOutput) {
+      // v4.6 prep — if the stream consumer exited without a `done`
+      // event because the signal was aborted mid-stream, surface a
+      // synthetic AbortError so the outer catch routes it as
+      // 'interrupted' rather than the misleading "closed without done"
+      // generic error.
+      if (runOptions.signal?.aborted) {
+        const abortErr = new Error('Streaming provider aborted before done event');
+        abortErr.name = 'AbortError';
+        throw abortErr;
+      }
       throw new Error('Streaming provider closed without a done event');
     }
     return finalOutput;
