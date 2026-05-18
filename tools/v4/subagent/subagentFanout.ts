@@ -45,7 +45,6 @@ import {
   type FanoutMode,
   type FanoutOptions,
   type PartitionTask,
-  type RunChildArgs,
 } from '../../../core/v4/subagent/fanout';
 import {
   resolveAggregatorOverride,
@@ -69,17 +68,8 @@ export interface SubagentFanoutFactoryOptions {
    *  parent's adapter; tests inject a stub. */
   aggregatorAdapter: ProviderAdapter;
   /**
-   * v4.6 Phase 2Q — DEPRECATED. Pre-refactor each fanout child ran
-   * via this callback (which constructed an ad-hoc AidenAgent).
-   * Phase 2Q routes children through the `spawn_sub_agent` primitive
-   * instead — supplied via `spawnDeps`. Kept here for binary type
-   * compatibility with older external callers; will be removed in
-   * v4.7 (Dispatch 2R cleanup). New wiring should omit it.
-   */
-  runChild?: (args: RunChildArgs) => Promise<string>;
-  /**
-   * v4.6 Phase 2Q — deps for `spawnSubAgent` (the primitive the
-   * fanout layer now calls N times). Same shape as
+   * v4.6 Phase 2Q-A — deps for `spawnSubAgent` (the primitive the
+   * fanout layer calls N times). Same shape as
    * `SpawnSubAgentFactoryOptions extends SpawnSubAgentDeps` in
    * `spawnSubAgentTool.ts`. Production wires this from REPL boot.
    *

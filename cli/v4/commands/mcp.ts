@@ -34,6 +34,9 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import os from 'node:os';
+import { randomUUID } from 'node:crypto';
+
 import { resolveAidenPaths, ensureAidenDirsExist } from '../../../core/v4/paths';
 import { ToolRegistry } from '../../../core/v4/toolRegistry';
 import { SkillLoader } from '../../../core/v4/skillLoader';
@@ -48,7 +51,6 @@ import {
   type ProviderSlot,
 } from '../../../core/v4/providerFallback';
 import { ChatCompletionsAdapter } from '../../../providers/v4/chatCompletionsAdapter';
-import { AidenAgent } from '../../../core/v4/aidenAgent';
 import { createBootLogger } from '../../../core/v4/logger/factory';
 import { registerAllTools, makeSubagentFanoutTool } from '../../../tools/v4/index';
 import {
@@ -59,9 +61,21 @@ import {
 } from '../envSources';
 import { CredentialResolver } from '../../../providers/v4/credentialResolver';
 import { RuntimeResolver } from '../../../providers/v4/runtimeResolver';
-import type { ProviderAdapter, Message as ProviderMessage } from '../../../providers/v4/types';
+import type { ProviderAdapter } from '../../../providers/v4/types';
 import type { ProviderOption } from '../../../core/v4/subagent/providerRotation';
-import type { RunChildArgs } from '../../../core/v4/subagent/fanout';
+// v4.6 Phase 2R — MCP-mode subagent_fanout now routes children
+// through the `spawnSubAgent` primitive (same as REPL after 2Q-A).
+// The legacy `runChild` closure + RunChildArgs import are deleted
+// per design doc §12.3 (2R cleanup). MCP needs its own daemon-db
+// connection + instance id so child runs persist under
+// `aiden runs list --include-children` for cross-runtime
+// observability.
+import {
+  openDaemonDb,
+  daemonDbPath,
+  createRunStore,
+} from '../../../core/v4/daemon';
+import { VERSION as AIDEN_VERSION } from '../../../core/version';
 
 import {
   startStdioMcpServer,
@@ -270,6 +284,21 @@ async function wireSubagentFanout(opts: WireOptions): Promise<void> {
 
   const finalAdapter = wrapped;
 
+  // v4.6 Phase 2R — open a daemon-db connection + seed an MCP
+  // instance row so child sub-agent runs (spawned by
+  // subagent_fanout below) persist to the same `runs` table the
+  // REPL writes to. Operators can then see MCP-side fanout
+  // activity under `aiden runs list --include-children`. Same
+  // WAL-coexistence model as REPL — connection.ts caches per-path.
+  const mcpInstanceId = `mcp-${randomUUID().slice(0, 8)}`;
+  const mcpDb         = openDaemonDb(daemonDbPath(opts.paths.root));
+  mcpDb.prepare(
+    `INSERT OR IGNORE INTO daemon_instances
+       (instance_id, pid, hostname, started_at, last_heartbeat, version)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(mcpInstanceId, process.pid, os.hostname(), Date.now(), Date.now(), AIDEN_VERSION);
+  const mcpRunStore = createRunStore({ db: mcpDb });
+
   opts.registry.register(makeSubagentFanoutTool({
     logger: opts.logger,
     resolveActiveModel: () => ({ providerId, modelId }),
@@ -288,73 +317,40 @@ async function wireSubagentFanout(opts: WireOptions): Promise<void> {
       }
       return [{ providerId, modelId }];
     },
-    runChild: async (childOpts: RunChildArgs): Promise<string> => {
-      const childCtx = {
+    // v4.6 Phase 2R — `spawnDeps` mirrors the REPL wiring in
+    // `cli/v4/aidenCLI.ts` (2Q-A). The MCP-mode parentToolContext
+    // is intentionally lean: no approvalEngine (a server has no
+    // human at the REPL to prompt — children's mutating tools are
+    // gated by AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE in childBuilder),
+    // no ssrfProtection/tirithScanner/memoryGuard (MCP's slim
+    // runtime never wired them — see header comment §9).
+    spawnDeps: {
+      toolRegistry:     opts.registry,
+      parentToolContext: {
         cwd:           process.cwd(),
         paths:         opts.paths,
         sessions:      opts.sessionManager,
         memory:        opts.memoryManager,
         skillLoader:   opts.skillLoader,
-        // approvalEngine intentionally undefined — N children
-        // contending for one stdin REPL would deadlock under MCP.
-      };
-
-      // Filter the child tool surface — read-only by default; opt-in
-      // via AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE=1 (mirrors MCP env from
-      // v4.1-mcp). Recursive fanout disallowed (depth=1).
-      const allowDestructive =
-        process.env.AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE === '1' ||
-        process.env.AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE === 'true';
-      const childToolNames: string[] = [];
-      for (const name of opts.registry.list()) {
-        const h = opts.registry.get(name);
-        if (!h) continue;
-        if (h.mutates && !allowDestructive) continue;
-        if (name === 'subagent_fanout') continue;
-        childToolNames.push(name);
-      }
-      const childExecutor = opts.registry.buildExecutor(childCtx);
-      const childTools = childToolNames
-        .map((n) => opts.registry.get(n)?.schema)
-        .filter((s): s is NonNullable<typeof s> => !!s);
-
-      // Per-child cloned FallbackAdapter — own rate-limit state.
-      const childProvider = finalAdapter instanceof FallbackAdapter
-        ? finalAdapter.clone()
-        : finalAdapter;
-
-      const child = new AidenAgent({
-        provider:     childProvider,
-        tools:        childTools,
-        toolExecutor: childExecutor,
-        maxTurns:     childOpts.maxIterations,
-        providerId:   childOpts.provider.providerId,
-        modelId:      childOpts.provider.modelId,
-        // No promptBuilder — children get a brief system prompt
-        // (same lesson as v4.1-subagent.1: full SOUL.md makes
-        // trivial fanouts spend 30s+ on verbose self-introductions).
-      });
-
-      if (childOpts.signal.aborted) {
-        throw new Error('aborted before dispatch');
-      }
-      const roleLine = childOpts.role ? `Role: ${childOpts.role}. ` : '';
-      const childSystemPrompt =
-        `You are one of N parallel subagents. ${roleLine}` +
-        `Answer the user's request concisely. Use available tools when ` +
-        `the answer requires real-world information you don't have memorized.`;
-      const history: ProviderMessage[] = [
-        { role: 'system', content: childSystemPrompt },
-        { role: 'user',   content: childOpts.prompt },
-      ];
-      const result = await child.runConversation(history);
-      return result.finalContent;
+      },
+      parentProvider:   finalAdapter,
+      parentProviderId: providerId,
+      parentModelId:    modelId,
+      runStore:         mcpRunStore,
+      instanceId:       mcpInstanceId,
+      logger:           opts.logger,
     },
+    // No resolveParentRunId / resolveParentSessionId for MCP — the
+    // MCP server doesn't run a turn loop with its own `runs` row;
+    // each tool invocation arrives discrete from the client. Child
+    // rows therefore have NULL spawned_from_run_id, which is the
+    // honest representation (no MCP-side parent to link to).
   }));
   opts.logger.info('subagent_fanout: wired (replaces stub) [mcp serve]', {
     providerId,
     modelId,
     fallback: finalAdapter instanceof FallbackAdapter ? 'FallbackAdapter' : 'direct',
+    instanceId: mcpInstanceId,
   });
 }
 

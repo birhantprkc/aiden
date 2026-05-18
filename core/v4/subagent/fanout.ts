@@ -35,12 +35,13 @@
  *   - destructive tool exposure: caller filters the schemas array
  *     based on `AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE`
  *
- * The orchestrator itself is INTENTIONALLY decoupled from
- * AidenAgent — it takes a `runChild` callback that knows how to run
- * one subagent. The tool wrapper at tools/v4/subagent/subagentFanout
- * supplies the production callback (which constructs an AidenAgent);
- * tests inject a stub that returns canned strings without any
- * provider plumbing. This is what made the offline smoke tractable.
+ * v4.6 Phase 2Q-A — the orchestrator was previously decoupled from
+ * AidenAgent via a `runChild` callback (one closure per fanout call
+ * built the child agent). Post-2Q-A every child flows through the
+ * `spawnSubAgent` primitive, so the legacy `runChild` callback is
+ * gone (deleted in 2R). Behavioural test fakes inject a stub
+ * `SpawnSubAgentDeps` (real `toolRegistry` + mock provider) — see
+ * `tests/v4/subagent/fanout.behavioral.test.ts` for the pattern.
  */
 
 import type { Logger } from '../logger/logger';
@@ -75,27 +76,6 @@ export interface PartitionTask {
 
 export type FanoutMode = 'partition' | 'ensemble';
 
-/** Per-child runner — supplied by the caller. Production wraps an
- *  AidenAgent; tests inject a stub. The runner MUST honour `signal`
- *  and resolve with the final assistant text. Errors thrown become
- *  `error` on the result. */
-export interface RunChildArgs {
-  index: number;
-  /** For ensemble mode this is the same query for every child;
-   *  for partition mode it's the per-task `goal + context`. */
-  prompt: string;
-  /** Tag for diagnostics / role-coloured prompts. */
-  role?: string;
-  provider: ProviderOption;
-  signal: AbortSignal;
-  /** Per-child iteration cap. */
-  maxIterations: number;
-  /** Per-child Logger scope. */
-  logger: Logger;
-}
-
-export type RunChildFn = (args: RunChildArgs) => Promise<string>;
-
 export interface FanoutOptions {
   mode: FanoutMode;
   /** Same query for every child (ensemble mode). Required when
@@ -110,21 +90,11 @@ export interface FanoutOptions {
   /** Available provider options for rotation. */
   providers: ProviderOption[];
   /**
-   * v4.6 Phase 2Q — DEPRECATED. Pre-Phase-2 each fanout call built
-   * an AidenAgent per child via this callback; v4.6 Phase 2Q routes
-   * each child through `spawnSubAgent` instead, so `runChild` is no
-   * longer invoked. Kept as an optional field for binary-compatible
-   * type imports (`aidenCLI.ts`, `commands/mcp.ts` still import
-   * `RunChildArgs`); will be removed in v4.7. New callers should
-   * omit it and supply `spawnDeps` instead.
-   */
-  runChild?: RunChildFn;
-  /**
-   * v4.6 Phase 2Q — required deps the fanout layer threads into each
-   * `spawnSubAgent` call (see `core/v4/subagent/spawnSubAgent.ts`).
-   * Carries `toolRegistry`, `parentProvider` (a FallbackAdapter when
-   * provider rotation is needed), `runStore` for child-run
-   * persistence, etc.
+   * v4.6 Phase 2Q-A — required deps the fanout layer threads into
+   * each `spawnSubAgent` call (see
+   * `core/v4/subagent/spawnSubAgent.ts`). Carries `toolRegistry`,
+   * `parentProvider` (a FallbackAdapter when provider rotation is
+   * needed), `runStore` for child-run persistence, etc.
    */
   spawnDeps: SpawnSubAgentDeps;
   /**

@@ -188,6 +188,11 @@ export function registerReadOnlyTools(registry: ToolRegistry): void {
  *  dependencies. Returns the SAME schema as the real tool so MCP and
  *  /tools see a consistent surface. */
 function makeSubagentFanoutStub() {
+  // v4.6 Phase 2R — `runChild` removed from `SubagentFanoutFactoryOptions`.
+  // The stub returns a "no providers configured" error envelope on every
+  // call via `resolveProviders: () => []`. Production wires real
+  // `spawnDeps` post-runtime build (`cli/v4/aidenCLI.ts` for REPL,
+  // `cli/v4/commands/mcp.ts` for MCP serve).
   return makeSubagentFanoutTool({
     resolveProviders:    () => [],
     resolveActiveModel:  () => ({ providerId: 'unset', modelId: 'unset' }),
@@ -199,11 +204,6 @@ function makeSubagentFanoutStub() {
           'Call register(makeSubagentFanoutTool({...})) after buildAgentRuntime.',
         );
       },
-    },
-    runChild: async () => {
-      throw new Error(
-        'subagent_fanout: tool not wired — runtime did not replace the stub.',
-      );
     },
   });
 }

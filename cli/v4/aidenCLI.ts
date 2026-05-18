@@ -59,7 +59,6 @@ import { ToolRegistry } from '../../core/v4/toolRegistry';
 import { SkillLoader } from '../../core/v4/skillLoader';
 import { makeSubagentFanoutTool } from '../../tools/v4/index';
 import type { ProviderOption } from '../../core/v4/subagent/providerRotation';
-import type { RunChildArgs } from '../../core/v4/subagent/fanout';
 // v4.6 Phase 1 — spawn_sub_agent: always-on runStore + LLM-callable tool.
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
@@ -1642,12 +1641,12 @@ export async function buildAgentRuntime(
   // shared subsystems (registry, skillLoader, paths, memoryManager,
   // promptBuilder, promptBuilderOptions) are read-only and pass by
   // reference.
-  // v4.6 Phase 2Q — `runFanout` now routes each child through
-  // `spawnSubAgent` instead of the legacy `runChild` closure below.
-  // `spawnDeps` mirrors the deps the `makeSpawnSubAgentTool` factory
-  // accepts (see lines below this block). The legacy `runChild`
-  // closure remains for binary type-compat; it is no longer invoked
-  // and will be deleted in v4.7 (Dispatch 2R cleanup).
+  // v4.6 Phase 2Q-A — `runFanout` routes each child through
+  // `spawnSubAgent`. `spawnDeps` mirrors the deps the
+  // `makeSpawnSubAgentTool` factory accepts (see registration below
+  // this block). The legacy per-call `runChild` closure that lived
+  // here pre-2R has been deleted; the primitive owns child
+  // construction now.
   toolRegistry.register(makeSubagentFanoutTool({
     logger: bootLogger.child('subagent'),
     resolveActiveModel: () => ({ providerId, modelId }),
@@ -1700,108 +1699,6 @@ export async function buildAgentRuntime(
         }
       }
       return [{ providerId, modelId }];
-    },
-    runChild: async (childOpts: RunChildArgs): Promise<string> => {
-      // Per-child context: paths / skillLoader / memoryManager / processes
-      // are SAFE to share (read-only or per-call by design). The approval
-      // engine is intentionally OMITTED — N children competing for one
-      // stdin REPL would deadlock.
-      const childCtx = {
-        cwd:           process.cwd(),
-        paths,
-        sessions:      sessionManager,
-        memory:        memoryManager,
-        skillLoader,
-        // approvalEngine, ssrfProtection, tirithScanner, memoryGuard:
-        // SSRF + Tirith would be safe to share but adding them now
-        // expands the per-child surface; keep lean for v4.1-subagent.1
-        // and revisit when fanout actually exercises network or shell
-        // tools (gated by ALLOW_DESTRUCTIVE).
-      };
-
-      // Filter the tool surface. Default-safe: read-only tools only.
-      // AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE=1 mirrors the MCP env from
-      // v4.1-mcp — predictable, env-driven.
-      const allowDestructive =
-        process.env.AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE === '1' ||
-        process.env.AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE === 'true';
-      const childToolNames: string[] = [];
-      for (const name of toolRegistry.list()) {
-        const h = toolRegistry.get(name);
-        if (!h) continue;
-        if (h.mutates && !allowDestructive) continue;
-        // Avoid recursive fanout this phase — children cannot spawn
-        // their own children. Recursion was capped at depth 1 by
-        // default in prior multi-agent systems for the same reason;
-        // v3 starved nested spawns.
-        if (name === 'subagent_fanout') continue;
-        childToolNames.push(name);
-      }
-      const childExecutor = toolRegistry.buildExecutor(childCtx);
-      const childTools = childToolNames
-        .map((n) => toolRegistry.get(n)?.schema)
-        .filter((s): s is NonNullable<typeof s> => !!s);
-
-      // Provider isolation: clone the FallbackAdapter so per-child
-      // rate-limit state doesn't pollute the parent or siblings.
-      // Non-Fallback adapters are stateless by spec (providers/v4/
-      // types.ts:190) so direct reuse is safe.
-      const childProvider = adapter instanceof FallbackAdapter
-        ? adapter.clone()
-        : adapter;
-
-      // Build per-child AidenAgent. Skip the moat layers (PlannerGuard,
-      // HonestyEnforcement, SkillTeacher, SkillEnforcementTracker) —
-      // they're parent-loop concerns and add cost without value at the
-      // child scale. Skip promptBuilder too: children get a SHORT
-      // system prompt (brief identity + role) instead of the parent's
-      // full SOUL.md + 72-skills inventory + memory snapshot. The
-      // tradeoff is deliberate — children answer the GOAL, not "be
-      // Aiden". With the full prompt, trivial queries take 30s+ for
-      // children to generate verbose self-introductions; the lean
-      // child prompt brings n=2 trivial fanouts under 12s. Parent
-      // should pass any context children genuinely need via the
-      // `query` / `tasks[].context` argument.
-      const child = new AidenAgent({
-        provider:             childProvider,
-        tools:                childTools,
-        toolExecutor:         childExecutor,
-        maxTurns:             childOpts.maxIterations,
-        providerId:           childOpts.provider.providerId,
-        modelId:              childOpts.provider.modelId,
-        // No promptBuilder — childSystemPrompt prepended manually below.
-        // No fallback strategy — child failures bubble up to the
-        // orchestrator, which surfaces them in the result envelope.
-      });
-
-      // Honour the abort signal — if the parent aborts mid-call (or the
-      // per-child timeout fires), short-circuit before dispatching to
-      // the provider. AidenAgent doesn't take an AbortSignal directly;
-      // the AbortController plumbing through fetch is the
-      // v4.1-subagent.2 / v4.2 hardening pass. Pre-check here for the
-      // synchronous path.
-      if (childOpts.signal.aborted) {
-        throw new Error('aborted before dispatch');
-      }
-
-      // Brief, role-aware system prompt — drops 5KB+ of Aiden identity
-      // boilerplate that would otherwise inflate every child to 30s+
-      // wall-clock for a trivial query. The parent agent retains the
-      // full prompt when it's the orchestrator; children answer the
-      // goal directly.
-      const roleLine = childOpts.role
-        ? `Role: ${childOpts.role}. `
-        : '';
-      const childSystemPrompt =
-        `You are one of ${childOpts.index >= 0 ? 'N' : '?'} parallel subagents. ` +
-        `${roleLine}Answer the user's request concisely. Use available tools when ` +
-        `the answer requires real-world information you don't have memorized.`;
-      const history: ProviderMessage[] = [
-        { role: 'system', content: childSystemPrompt },
-        { role: 'user',   content: childOpts.prompt },
-      ];
-      const result = await child.runConversation(history);
-      return result.finalContent;
     },
   }));
   bootLogger.child('subagent').info('subagent_fanout: wired (replaces stub)', {

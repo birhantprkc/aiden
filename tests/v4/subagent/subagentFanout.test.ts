@@ -24,7 +24,10 @@ const stubFactoryOpts = {
   // Schema inspection doesn't touch the adapter; cast keeps the test
   // independent of the full ProviderAdapter surface.
   aggregatorAdapter:   {} as never,
-  runChild:            async () => '',
+  // v4.6 Phase 2R — `runChild` removed from the factory options.
+  // Schema construction needs no per-call deps; `spawnDeps` is also
+  // optional at construction time (handler enforces presence at
+  // dispatch via a clear "tool not wired" envelope).
 };
 
 describe('subagent_fanout schema validation (regression for OpenAI 400)', () => {
