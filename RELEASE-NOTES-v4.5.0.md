@@ -1,7 +1,5 @@
 # Aiden 4.5 — Your AI engine now works while you sleep
 
-> _Banner image placeholder — drop a `docs/v4.5/banner.png` here before publishing._
-
 ## What this means
 
 Aiden used to be interactive — you ask, it acts. v4.5 makes Aiden **autonomous**. Register a trigger once, then Aiden wakes up and does real work when files change, webhooks arrive, emails come in, or a cron tick fires. You can sleep, work on other things, gym, dinner. Aiden's still processing.
