@@ -36,7 +36,8 @@
   },
   "bin": {
     "devos-ai": "./dist/bin/npx-init.js",
-    "aiden": "./dist/cli/v4/aidenCLI.js"
+    "aiden": "./dist/cli/v4/aidenCLI.js",
+    "aiden-runtime": "./dist/cli/v4/aidenCLI.js"
   },
   "main": "./dist/cli/v4/aidenCLI.js",
   "files": [
@@ -254,10 +255,12 @@
     "epub2": "^3.0.2",
     "execa": "^8.0.1",
     "express": "^4.18.2",
+    "form-data": "^4.0.0",
     "imap-simple": "^5.1.0",
     "js-tiktoken": "^1.0.21",
     "js-yaml": "^4.1.1",
     "kleur": "^4.1.5",
+    "lru-cache": "^10.0.0",
     "mailparser": "^3.9.8",
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",
@@ -267,6 +270,7 @@
     "open": "^11.0.0",
     "ora": "^9.3.0",
     "pdf-parse": "^1.1.1",
+    "picomatch": "^4.0.0",
     "playwright": "^1.58.2",
     "proper-lockfile": "^4.1.2",
     "puppeteer": "^24.39.1",
@@ -277,6 +281,7 @@
     "stripe": "^20.4.1",
     "tar-stream": "^3.1.8",
     "twilio": "^5.13.1",
+    "undici": "^6.0.0",
     "uuid": "^9.0.0",
     "whatsapp-web.js": "^1.26.0",
     "wrap-ansi": "^9.0.2",
