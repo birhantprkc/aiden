@@ -170,6 +170,18 @@ export const SPAWN_SUB_AGENT_SCHEMA: ToolSchema = {
           "child is signalled to interrupt on timeout; if it doesn't yield " +
           'cooperatively, the worker leaks but the parent stays responsive.',
       },
+      provider: {
+        type: 'string',
+        description:
+          "OPTIONAL — override the child's provider. Pass a provider ID like " +
+          "'groq', 'chatgpt-plus', 'anthropic'. Omit to inherit the parent's " +
+          'provider (recommended for most callers). Mainly used by ' +
+          "`subagent_fanout`'s rotation for provider diversity. Validated " +
+          "against the parent's available pool at dispatch — an unknown name " +
+          "produces a failed envelope with `exitReason: 'provider_not_found'` " +
+          'and lists the valid names in the error message. Single-provider ' +
+          '(non-FallbackAdapter) parents reject this field with an error.',
+      },
     },
   },
 };
@@ -263,6 +275,10 @@ export function makeSpawnSubAgentTool(
           : undefined,
         maxIterations:  typeof args.maxIterations === 'number' ? args.maxIterations : undefined,
         timeoutMs:      typeof args.timeoutMs === 'number'     ? args.timeoutMs     : undefined,
+        // v4.6 Phase 2P — per-spawn provider override (per design doc §12.2).
+        // Validation happens in childBuilder against the parent's FallbackAdapter
+        // provider pool; an unknown name produces a failed envelope.
+        provider:       typeof args.provider === 'string'      ? args.provider      : undefined,
       };
 
       // v4.6 Phase 1 observability — log the parsed spec so the next

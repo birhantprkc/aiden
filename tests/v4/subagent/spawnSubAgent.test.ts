@@ -617,4 +617,170 @@ describe('spawnSubAgent — v4.6 Phase 1 contract', () => {
     expect(out.agent).toBeDefined();
     expect(out.history.length).toBe(2);
   });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Dispatch 2P — per-spawn provider override + env-flag escape hatch
+  // ──────────────────────────────────────────────────────────────────────
+
+  // Construct a real FallbackAdapter with mock slots — exercises the
+  // override resolver (`resolveChildProvider`) via the real
+  // `instanceof FallbackAdapter` guard inside childBuilder.
+  async function buildRealFallback(providerIds: string[]) {
+    const { FallbackAdapter } = await import('../../../core/v4/providerFallback');
+    type Slot = {
+      id: string;
+      providerId: string;
+      modelId: string;
+      keyPresent: boolean;
+      keyTail: string | null;
+      build: () => ProviderAdapter;
+    };
+    const slots: Slot[] = providerIds.map((pid, i) => ({
+      id:         `${pid}-${i}`,
+      providerId: pid,
+      modelId:    'mock-model',
+      keyPresent: true,
+      keyTail:    null,
+      build:      () => new MockProviderAdapter([MockProviderAdapter.stop('child via fallback')]),
+    }));
+    return new FallbackAdapter({
+      apiMode:    'chat_completions',
+      slots:      slots as never,
+      cooldownMs: 60_000,
+    });
+  }
+
+  it('20. provider omitted: child inherits parent provider (Phase 1 regression)', async () => {
+    const deps = makeDeps();
+    const result = await spawnSubAgent({ goal: 'g' }, deps, {});
+    // No provider in spec → Phase 1 path → child uses parent's
+    // adapter. Smoke: succeeds + no provider-not-found error.
+    expect(result.ok).toBe(true);
+    expect(result.exitReason).not.toBe('provider_not_found');
+  });
+
+  it('21. provider supplied + parent is NOT FallbackAdapter: rejected with helpful error', async () => {
+    const deps = makeDeps();
+    const result = await spawnSubAgent(
+      { goal: 'g', provider: 'groq' },
+      deps,
+      {},
+    );
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe('failed');
+    expect(result.exitReason).toBe('provider_not_found');
+    expect(result.error).toMatch(/provider "groq" not in parent's pool/);
+    // Single-provider hint surfaced.
+    expect(result.error).toMatch(/single-provider/i);
+    // Child row was inserted before the failure (observable via runs).
+    expect(result.childRunId).toMatch(/^\d+$/);
+    expect(Number(result.childRunId)).toBeGreaterThan(0);
+  });
+
+  it('22. failed run row persists for provider_not_found (observability)', async () => {
+    const deps = makeDeps();
+    const result = await spawnSubAgent(
+      { goal: 'g', provider: 'definitely-not-a-provider' },
+      deps,
+      {},
+    );
+    const row = db
+      .prepare(`SELECT status, finish_reason FROM runs WHERE id = ?`)
+      .get(Number(result.childRunId)) as { status: string; finish_reason: string };
+    expect(row.status).toBe('failed');
+    expect(row.finish_reason).toBe('provider_not_found');
+  });
+
+  it('23. provider override on FallbackAdapter: resolves to slot-subset clone', async () => {
+    const fb = await buildRealFallback(['groq', 'openrouter']);
+    const deps = { ...makeDeps(), parentProvider: fb as unknown as ProviderAdapter };
+    const result = await spawnSubAgent(
+      { goal: 'g', provider: 'groq' },
+      deps,
+      {},
+    );
+    // Child built successfully (override resolved against the real
+    // FallbackAdapter.getProviderIds() pool).
+    expect(result.exitReason).not.toBe('provider_not_found');
+    expect(result.childRunId).toMatch(/^\d+$/);
+  });
+
+  it('24. unknown provider on FallbackAdapter: lists available names in error', async () => {
+    const fb = await buildRealFallback(['groq', 'openrouter', 'anthropic']);
+    const deps = { ...makeDeps(), parentProvider: fb as unknown as ProviderAdapter };
+    const result = await spawnSubAgent(
+      { goal: 'g', provider: 'nonexistent' },
+      deps,
+      {},
+    );
+    expect(result.ok).toBe(false);
+    expect(result.exitReason).toBe('provider_not_found');
+    expect(result.error).toMatch(/Available: anthropic, groq, openrouter/);
+    expect(result.error).toMatch(/Omit the provider field/);
+  });
+
+  it('25. AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE=1: execute_code dropped from blocklist', () => {
+    const prior = process.env.AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE;
+    process.env.AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE = '1';
+    try {
+      const reg = makeFakeRegistry();
+      const out = buildChildAgent(
+        {
+          toolRegistry:      reg,
+          parentToolContext: makeFakeCtx(),
+          parentProvider:    new MockProviderAdapter([]),
+          parentProviderId:  'mock',
+          parentModelId:     'mock-model',
+        },
+        {
+          sessionId:         'sess-allow-destructive',
+          goal:              'g',
+          requestedToolsets: ['files'],
+          maxIterations:     50,
+        },
+      );
+      const names = (out.agent as unknown as { tools: { name: string }[] }).tools.map((t) => t.name);
+      // execute_code allowed when flag set.
+      expect(names).toContain('execute_code');
+      // Other 4 names STILL blocked regardless.
+      expect(names).not.toContain('spawn_sub_agent');
+      expect(names).not.toContain('clarify');
+      expect(names).not.toContain('memory');
+      expect(names).not.toContain('send_message');
+    } finally {
+      if (prior === undefined) delete process.env.AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE;
+      else process.env.AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE = prior;
+    }
+  });
+
+  it('26. AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE unset: full 5-name blocklist (default)', () => {
+    // Belt-and-suspenders — assert default behaviour with explicit env clear.
+    const prior = process.env.AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE;
+    delete process.env.AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE;
+    try {
+      const reg = makeFakeRegistry();
+      const out = buildChildAgent(
+        {
+          toolRegistry:      reg,
+          parentToolContext: makeFakeCtx(),
+          parentProvider:    new MockProviderAdapter([]),
+          parentProviderId:  'mock',
+          parentModelId:     'mock-model',
+        },
+        {
+          sessionId:         'sess-default-blocklist',
+          goal:              'g',
+          requestedToolsets: ['files'],
+          maxIterations:     50,
+        },
+      );
+      const names = (out.agent as unknown as { tools: { name: string }[] }).tools.map((t) => t.name);
+      // All 5 blocklisted names absent.
+      for (const blocked of SUBAGENT_BLOCKED_TOOL_NAMES) {
+        expect(names).not.toContain(blocked);
+      }
+    } finally {
+      if (prior !== undefined) process.env.AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE = prior;
+    }
+  });
 });

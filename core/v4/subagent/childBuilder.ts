@@ -35,6 +35,7 @@ import { AidenAgent } from '../aidenAgent';
 import type { AidenAgentOptions, ToolExecutor } from '../aidenAgent';
 import type { ToolRegistry, ToolContext } from '../toolRegistry';
 import type { ProviderAdapter, Message, ToolSchema, ToolCallRequest, ToolCallResult } from '../../../providers/v4/types';
+import { FallbackAdapter } from '../providerFallback';
 import type { RunStore } from '../daemon/runStore';
 import type { Logger } from '../logger/logger';
 
@@ -113,6 +114,36 @@ export interface ChildBuildInput {
   requestedToolsets?: string[];
   /** Clamped to [1, 200] before this function is called. */
   maxIterations: number;
+  /**
+   * v4.6 Phase 2P — optional per-spawn provider override. When set,
+   * `buildChildAgent` resolves the named providerId against the
+   * parent's `FallbackAdapter.getProviderIds()` pool and clones with
+   * a slot subset. Unknown names throw `ProviderNotFoundError` which
+   * the caller (`spawnSubAgent`) converts to a failed envelope.
+   */
+  providerOverride?: string;
+}
+
+/**
+ * v4.6 Phase 2P — error thrown by `buildChildAgent` when
+ * `input.providerOverride` doesn't match any provider in the
+ * parent's pool. Caught by `spawnSubAgent` and converted to a
+ * `status: 'failed', exitReason: 'provider_not_found'` envelope
+ * with the failing name + the list of valid alternatives.
+ */
+export class ProviderNotFoundError extends Error {
+  readonly requested: string;
+  readonly available: string[];
+  constructor(requested: string, available: string[], hint?: string) {
+    const base = `spawn_sub_agent: provider "${requested}" not in parent's pool.`;
+    const list = available.length > 0
+      ? ` Available: ${available.join(', ')}.`
+      : ' Parent has no FallbackAdapter pool (single-provider configuration).';
+    super(`${base}${list}${hint ? ' ' + hint : ' Omit the provider field to inherit the parent\'s provider.'}`);
+    this.name = 'ProviderNotFoundError';
+    this.requested = requested;
+    this.available = available;
+  }
 }
 
 /** Output of the builder — the agent plus the prebuilt history the
@@ -205,9 +236,17 @@ export function buildChildAgent(
     ? deps.toolRegistry.getSchemas(chosenToolsets, 'repl')
     : [];  // No matching toolsets means an empty child toolset.
 
-  // Step 4c — strip the hard blocklist.
+  // Step 4c — strip the hard blocklist (with v4.6 Phase 2P legacy
+  // env-flag escape hatch per design doc §12.4). Default: full
+  // 5-name blocklist. When AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE=1 is
+  // set in the environment, `execute_code` is removed from the
+  // blocklist for THIS spawn — backward-compat preservation of any
+  // user's existing v4.1.0 .env workflow. The other 4 names
+  // (spawn_sub_agent, clarify, memory, send_message) remain
+  // blocked regardless of the flag.
+  const blocked = resolveBlocklist(deps.logger);
   const childTools: ToolSchema[] = candidateSchemas.filter(
-    (t) => !SUBAGENT_BLOCKED_TOOL_NAMES.has(t.name),
+    (t) => !blocked.has(t.name),
   );
 
   // ── 5. Provider: clone FallbackAdapter rate-limit state if supported ─────
@@ -216,7 +255,14 @@ export function buildChildAgent(
   // sharing the parent's adapter. Phase 1 accepts that fallback case
   // means a child's 429 affects the parent's quota tracking; that's
   // explicit in the design-doc §5 row.
-  const childProvider = adapterWithCloneOrSame(deps.parentProvider);
+  //
+  // v4.6 Phase 2P — when `input.providerOverride` is supplied, resolve
+  // it against the parent's FallbackAdapter slot pool. Fail-loud on
+  // unknown names (`ProviderNotFoundError`) so fanout's diversity
+  // invariant is preserved (silent fallback would collapse the
+  // rotation). Single-provider parents (non-FallbackAdapter) reject
+  // any override, since there's no pool to select from.
+  const childProvider = resolveChildProvider(deps.parentProvider, input.providerOverride);
 
   // ── 6. Observability — onToolCall → run_events + log ─────────────────────
   // When deps.runStore + deps.childRunId are present (the production
@@ -263,21 +309,79 @@ export function buildChildAgent(
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 /**
- * Best-effort clone for `FallbackAdapter`-shaped providers. If the
- * adapter exposes a `clone(): ProviderAdapter` method, call it.
- * Otherwise return the original adapter (shared mutable state).
+ * v4.6 Phase 2P — resolve the child's provider adapter.
+ *
+ * No override (Phase 1 behavior unchanged):
+ *   - FallbackAdapter → clone with fresh mutable state, all slots.
+ *   - Any other adapter shape with `clone()` → clone.
+ *   - Adapter without `clone()` → reuse the parent's instance.
+ *
+ * Override supplied (Phase 2P):
+ *   - Parent must be FallbackAdapter (only adapter type with a
+ *     multi-provider pool). Otherwise throw `ProviderNotFoundError`.
+ *   - Override must match one of `parent.getProviderIds()`. Otherwise
+ *     throw `ProviderNotFoundError` listing the available pool.
+ *   - On match: clone with slot-subset filter restricted to that
+ *     provider's slots. Child rotates only within the chosen
+ *     provider's slots; the diversity invariant fanout depends on
+ *     is preserved.
  */
-function adapterWithCloneOrSame(adapter: ProviderAdapter): ProviderAdapter {
-  const maybeClone = (adapter as unknown as { clone?: () => ProviderAdapter }).clone;
-  if (typeof maybeClone === 'function') {
-    try {
-      return maybeClone.call(adapter);
-    } catch {
-      // Defensive — a buggy clone should not break the spawn.
-      return adapter;
+function resolveChildProvider(
+  parent:   ProviderAdapter,
+  override: string | undefined,
+): ProviderAdapter {
+  if (!override) {
+    // ── No override path — Phase 1 clone semantics, unchanged. ────────
+    const maybeClone = (parent as unknown as { clone?: () => ProviderAdapter }).clone;
+    if (typeof maybeClone === 'function') {
+      try { return maybeClone.call(parent); }
+      catch { return parent; }
     }
+    return parent;
   }
-  return adapter;
+  // ── Override path — must be FallbackAdapter. ───────────────────────
+  if (!(parent instanceof FallbackAdapter)) {
+    throw new ProviderNotFoundError(
+      override,
+      [],
+      'Parent agent uses a single-provider adapter; provider override is only available when parent is configured with FallbackAdapter (multi-provider pool).',
+    );
+  }
+  const available = parent.getProviderIds();
+  if (!available.includes(override)) {
+    throw new ProviderNotFoundError(override, available);
+  }
+  return parent.clone({ providerId: override });
+}
+
+/**
+ * v4.6 Phase 2P — resolve the effective tool blocklist for THIS
+ * child build. Default is the full 5-name set
+ * (`SUBAGENT_BLOCKED_TOOL_NAMES`). When
+ * `AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE=1` (or any truthy value) is
+ * present in `process.env`, drop `execute_code` — preserves the
+ * v4.1.0 fanout escape hatch for users with that flag in `.env`.
+ * Other 4 names stay blocked regardless.
+ *
+ * Logs a one-line warning when the escape hatch is active so the
+ * relaxation is visible in observability — silently relaxing a
+ * security boundary is exactly the failure mode we want to avoid.
+ */
+function resolveBlocklist(logger?: Logger): ReadonlySet<string> {
+  const raw = process.env.AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE;
+  if (!raw) return SUBAGENT_BLOCKED_TOOL_NAMES;
+  const flag = String(raw).trim().toLowerCase();
+  if (flag === '1' || flag === 'true' || flag === 'on' || flag === 'yes') {
+    logger?.warn?.(
+      'spawn_sub_agent: AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE escape hatch active; ' +
+      'execute_code dropped from child blocklist (other 4 names still blocked)',
+      { source: 'env', flag: raw },
+    );
+    const relaxed = new Set(SUBAGENT_BLOCKED_TOOL_NAMES);
+    relaxed.delete('execute_code');
+    return relaxed;
+  }
+  return SUBAGENT_BLOCKED_TOOL_NAMES;
 }
 
 /**

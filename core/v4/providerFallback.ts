@@ -575,15 +575,48 @@ export class FallbackAdapter implements ProviderAdapter {
    * provider key, but isolation prevents one slow subagent from
    * starving siblings via parent-side cooldown state.
    */
-  clone(): FallbackAdapter {
+  clone(opts?: { providerId?: string }): FallbackAdapter {
+    // v4.6 Phase 2P — optional `providerId` filter restricts the clone
+    // to slots matching the named provider. Used by `spawn_sub_agent`'s
+    // per-spawn provider override: fanout (and future callers) pass a
+    // specific provider name so the child's FallbackAdapter rotates
+    // only within that provider's slots, preserving the diversity
+    // invariant fanout depends on. When omitted, full-slot clone is
+    // the Phase 1 behaviour (unchanged).
+    //
+    // Caller is responsible for validating `providerId` against
+    // `getProviderIds()` before calling — an unknown providerId
+    // here yields a degenerate clone (zero slots), which the
+    // FallbackAdapter's own dispatch path treats as "no providers"
+    // and would error on first call. Defending here would mask the
+    // upstream validation gap; we prefer fail-loud at the validation
+    // layer instead.
+    const slots = opts?.providerId
+      ? this.slots.filter((s) => s.providerId === opts.providerId)
+      : this.slots;
     return new FallbackAdapter({
       apiMode:     this.apiMode,
-      slots:       this.slots,
+      slots,
       cooldownMs:  this.cooldownMs,
       now:         this.clock,
       onRateLimit: this.onRateLimit,
       onFallback:  this.onFallback,
     });
+  }
+
+  /**
+   * v4.6 Phase 2P — return the set of provider IDs the adapter knows
+   * about (deduplicated, key-present slots only). Used by
+   * `spawn_sub_agent`'s per-spawn provider override validation: the
+   * spec's `provider` field must name one of these. Sorted for
+   * stable diagnostic output in error messages.
+   */
+  getProviderIds(): string[] {
+    const seen = new Set<string>();
+    for (const slot of this.slots) {
+      if (slot.keyPresent) seen.add(slot.providerId);
+    }
+    return [...seen].sort();
   }
 
   /**

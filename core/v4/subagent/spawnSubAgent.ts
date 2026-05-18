@@ -26,7 +26,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { buildChildAgent } from './childBuilder';
+import { buildChildAgent, ProviderNotFoundError } from './childBuilder';
 import type { ChildBuilderDeps } from './childBuilder';
 import type { RunStore } from '../daemon/runStore';
 import type { Logger } from '../logger/logger';
@@ -43,6 +43,24 @@ export interface SubAgentSpec {
   maxIterations?: number;
   /** Defaults to 600_000ms (10 min); minimum 1_000ms. */
   timeoutMs?: number;
+  /**
+   * v4.6 Phase 2P (per design doc §12.2) — optional per-spawn
+   * provider override. When supplied, must name a provider available
+   * in the parent's resolved provider pool (validated against
+   * `FallbackAdapter.getProviderIds()`). When omitted, child inherits
+   * the parent's active provider — Phase 1 default, unchanged.
+   *
+   * Validation is fail-loud: an unknown name produces a `status:
+   * 'failed'`, `exitReason: 'provider_not_found'` envelope with a
+   * persisted runs row (observable via `aiden runs show`). Silent
+   * fallback would collapse fanout's rotation diversity, so we
+   * surface the misconfiguration instead of papering over it.
+   *
+   * Most direct callers should OMIT this field. Primarily exists
+   * for `subagent_fanout`'s Phase 2 refactor (Dispatch 2Q), where
+   * the rotation layer needs explicit provider selection per child.
+   */
+  provider?: string;
 }
 
 /** Result envelope per design doc §3, §8. */
@@ -56,7 +74,8 @@ export interface SubAgentResult {
     | 'max_iterations'
     | 'timeout'
     | 'interrupted'
-    | 'error';
+    | 'error'
+    | 'provider_not_found';
   metrics: {
     apiCalls: number;
     durationMs: number;
@@ -191,9 +210,30 @@ export async function spawnSubAgent(
         context:           spec.context,
         requestedToolsets: spec.toolsets,
         maxIterations,
+        // v4.6 Phase 2P — per-spawn provider override (per design doc §12.2).
+        providerOverride:  spec.provider,
       },
     );
   } catch (err) {
+    // v4.6 Phase 2P — distinguish provider-not-found from other build
+    // failures. ProviderNotFoundError carries the failing name + the
+    // list of valid alternatives, surfaced verbatim to the LLM in the
+    // envelope so it can pick a real provider next time. Other build
+    // failures (constructor throws, registry issues, etc.) collapse
+    // to the generic 'error' exitReason.
+    if (err instanceof ProviderNotFoundError) {
+      deps.runStore.setStatus(childRunId, 'failed', { finishReason: 'provider_not_found' });
+      return {
+        ok:             false,
+        status:         'failed',
+        summary:        null,
+        error:          err.message,
+        exitReason:     'provider_not_found',
+        metrics:        { apiCalls: 0, durationMs: Date.now() - startedAt, tokensIn: 0, tokensOut: 0 },
+        childRunId:     String(childRunId),
+        childSessionId,
+      };
+    }
     deps.runStore.setStatus(childRunId, 'failed', { finishReason: 'error' });
     return failureEnvelope({
       childRunId:     String(childRunId),
