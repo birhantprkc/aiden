@@ -659,6 +659,257 @@ For posterity, the conflict surface from Dispatch 1C-PRE:
 - Does NOT add deprecation warnings, slash-command nags, or
   description-text recommendations against `subagent_fanout`.
 
+### 12.1 Layered architecture (Phase 2 target)
+
+Phase 2 refactors `subagent_fanout` to layer over `spawn_sub_agent`.
+The public schema, return shape, and description text the model
+sees are **unchanged** — only internals are replaced. Pre-v4.6
+file modules (`merger.ts`, `providerRotation.ts`, `diagnostics.ts`,
+`budget.ts`) survive as **fanout-specific layers above the
+primitive**; the orchestrator code in `fanout.ts` (the `runFanout`
+function + the `spawnOne` helper) gets rewritten to delegate
+per-child execution to `spawnSubAgent`.
+
+```
+subagent_fanout (tools/v4/subagent/subagentFanout.ts — tool wrapper)
+   │
+   │  unchanged public schema:
+   │    mode, n, query, tasks, merge, timeoutMs
+   │
+   ▼
+runFanout (core/v4/subagent/fanout.ts — orchestrator, REWRITTEN)
+   │
+   ├─ resolveBudget          (budget.ts — preserved)
+   │     → per-child maxIterations + timeoutMs
+   │     → outer wallClockCapMs (5× per-child)
+   │
+   ├─ rotateProviders        (providerRotation.ts — preserved)
+   │     → assignments[i] = ProviderOption for child i
+   │     → singleProviderWarning flag
+   │
+   ├─ outer wall-clock AbortController
+   │     → setTimeout(cap) cascade to childCtrls
+   │     → parentAbort cascade to wallController
+   │
+   ├─ Promise.all(N × spawnSubAgent(spec, deps, {
+   │       signal:   wallController.signal,
+   │       provider: assignments[i].providerId,  ← Phase 2a contract ext
+   │   }))
+   │
+   ├─ mergeResults           (merger.ts — preserved)
+   │     → strategy: 'all' | 'vote' | 'pick-best' | 'combine'
+   │     → optional aggregator LLM pass
+   │
+   └─ buildDiagnostics       (diagnostics.ts — preserved)
+         → build, launched/succeeded/failed counts
+         → providerDistribution, singleProviderWarning
+
+      ▼
+
+spawn_sub_agent  (core/v4/subagent/spawnSubAgent.ts — Phase 1 primitive)
+   │
+   ├─ childBuilder           (childBuilder.ts)
+   │     → fresh AidenAgent
+   │     → intersected toolset minus blocklist
+   │     → cloned FallbackAdapter rate-limit state
+   │     → fresh ApprovalEngine with auto-deny callbacks
+   │
+   ├─ runConversation        (AidenAgent — abort-aware as of fd62f96d)
+   │     → child runs to completion or cooperative interrupt
+   │     → emits tool_call_started / _completed run_events
+   │
+   └─ envelope (per §3 schema)
+         → status, exitReason, summary, error
+         → metrics: apiCalls, durationMs, tokensIn, tokensOut
+         → childRunId, childSessionId
+```
+
+**Responsibility split:**
+
+| Layer | Responsibility |
+|---|---|
+| `subagent_fanout` tool wrapper | Validate model args, coerce to `FanoutOptions`, resolve providers + aggregator at call time, return structured `{success, merged, results, diagnostics}` envelope. |
+| `runFanout` orchestrator | Sequencing — budget → rotation → outer wall-clock → fan out via primitive → merge → diagnostics. NEVER builds AidenAgents directly anymore. |
+| `spawn_sub_agent` primitive | Construct one child, run it, return one envelope. Single point for `runs`-table persistence, observability, blocklist enforcement, rate-limit clone. |
+
+### 12.2 Phase 2a — per-spawn provider override (contract extension)
+
+The faithful refactor (Option B in the Dispatch 2N audit) requires
+extending the Phase 1 spawn primitive with a per-spawn provider
+override. This unlocks fanout's provider rotation as a layer over
+the primitive without forking the child-build code path.
+
+**Spec extension:**
+
+```ts
+interface SubAgentSpec {
+  goal: string;
+  context?: string;
+  toolsets?: string[];
+  maxIterations?: number;
+  timeoutMs?: number;
+  /**
+   * v4.6 Phase 2a (deferred from §10) — optional per-spawn provider
+   * override. When supplied, must name a provider available in the
+   * parent's resolved provider pool. When omitted, child inherits
+   * the parent's active provider (Phase 1 default — UNCHANGED).
+   */
+  provider?: string;
+}
+```
+
+**Childbuilder behavior:**
+
+- `spec.provider` omitted → use `deps.parentProvider` (current Phase 1
+  behavior; zero regression for existing callers).
+- `spec.provider` supplied → look it up in the parent's provider pool
+  (via a new `resolveProviderById(id): ProviderAdapter | null` resolver
+  on `ChildBuilderDeps`).
+- Resolver returns `null` → **fail loud**, NOT silent fallback.
+  Envelope returns `status: 'error'`, `exitReason: 'error'`,
+  `error: 'spawn_sub_agent: provider "<name>" not in parent pool'`.
+  Fanout's rotation depends on every assignment being honored
+  exactly; silent fallback would collapse N children onto one
+  provider and defeat the diversity invariant the rotation
+  exists to enforce.
+
+**Validation timing:**
+
+- Validation happens inside `childBuilder` AFTER the run row is
+  inserted (so the failure shows up as a persisted child row with
+  `status='failed'` + an `error` payload, observable via
+  `aiden runs show <id>`). The envelope is still well-formed —
+  this is just one more `failureEnvelope(...)` path.
+
+**Test cases (Phase 2P):**
+
+- `provider` omitted → child uses parent's adapter (regression test).
+- `provider` supplied + present in pool → child uses the resolved adapter.
+- `provider` supplied + NOT in pool → envelope `status: 'error'`,
+  child run row written with `status='failed'`.
+- Fanout layer passes per-child providers → each child uses a
+  distinct adapter (integration test against `runFanout`).
+- **Legacy env flag honored:** `AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE=1`
+  set → child's blocklist drops `execute_code`, retains the other 4
+  names (`spawn_sub_agent`, `clarify`, `memory`, `send_message`).
+  Without the env flag → full 5-name blocklist applied as default.
+  Existing fanout users with the flag in `.env` see no behaviour
+  change. Implementation reads the env at `childBuilder` time so
+  per-call boot-time `.env` mutations take effect; no per-process
+  cache.
+
+### 12.3 Phase 2b/2c — refactor + cleanup sequencing
+
+**2P — Phase 2a contract extension** *(separate dispatch):*
+
+- Add `provider?: string` to `SubAgentSpec` in `core/v4/subagent/spawnSubAgent.ts`.
+- Add `resolveProviderById(id): ProviderAdapter | null` to `ChildBuilderDeps`.
+- Wire validation + failure envelope in `childBuilder.ts`.
+- New tests (4 cases above).
+- REPL wiring in `cli/v4/aidenCLI.ts` supplies the resolver from the
+  parent's FallbackAdapter's slot list (so REPL parent + fanout layer
+  both reach the same provider pool).
+
+**2Q — Refactor `runFanout`** *(separate dispatch, depends on 2P):*
+
+- Inside `core/v4/subagent/fanout.ts`, replace `spawnOne(...)` calls
+  with `spawnSubAgent(spec, deps, ctx)` calls.
+- Each fanout child's `spec` carries:
+  - `goal` (from per-child prompt — ensemble query or partition task.goal)
+  - `maxIterations: budget.maxIterations` (preserves fanout's 20-iter default)
+  - `timeoutMs: budget.perSubagentTimeoutMs` (preserves fanout's 90s default)
+  - `provider: rotation.assignments[i].providerId` (the rotation pick)
+- Each fanout child's `ctx` carries:
+  - `signal: wallController.signal` (so outer wall-clock cap cascades)
+  - `parentRunId` / `parentSessionId` (whatever the fanout layer is given)
+- Map each `SubAgentResult` envelope → fanout's existing `SubagentResult`
+  shape (small adapter; keeps merger.ts happy without changes).
+- New behavioral tests (Dispatch 2N flagged this as the test-coverage
+  gap): ensemble end-to-end, partition end-to-end, each merge strategy,
+  singleProviderWarning trip, outer wall-clock cap, parent abort.
+- **Runs-list filtering tests (per §12.4 hide-by-default decision):**
+  - `aiden runs list` default → returns only top-level rows
+    (`WHERE spawned_from_run_id IS NULL`); fanout children excluded.
+  - `aiden runs list --include-children` → flat view, all rows
+    visible including fanout children. Order preserved by `started_at`.
+  - **Child-count badge** on parent row in default output:
+    parent row carries `child_count` + `child_succeeded` aggregates
+    populated by a `LEFT JOIN ... GROUP BY` on `spawned_from_run_id`.
+    Format: `"Run #5 (fanout, 5 children, 4 succeeded)"`.
+  - `aiden runs show <parent-id>` → parent detail + inline child
+    summary list (one line per child: id, status, exitReason,
+    durationMs, summary preview).
+  - `aiden runs show <child-id>` direct access by ID → unchanged
+    (already works in v4.6 Phase 1; just no longer dead-link in
+    the default listing).
+  - Top-level run that is NOT a fanout parent (REPL turn, daemon
+    trigger fire) → badge absent, default output unchanged from
+    Phase 1.
+
+**2R — Cleanup** *(separate dispatch, depends on 2Q):*
+
+- Delete `spawnOne(...)` (now unused).
+- Delete any orphaned helpers in `fanout.ts` (the per-child agent
+  construction code that `spawnOne` used — `_build_child_agent`-style
+  internals).
+- Verify no other module imports the deleted symbols.
+- The four pre-v4.6 modules survive: `budget.ts`, `diagnostics.ts`,
+  `merger.ts`, `providerRotation.ts` (all preserved as layers).
+- `fanout.ts` shrinks from 328 LOC to ~150 LOC (delete ~180 LOC of
+  duplicated agent-construction code).
+
+### 12.4 Behavioral changes locked in
+
+The Phase 2 refactor preserves the **public API** (model-facing
+schema, tool name, return shape) but **changes some internals**.
+Documenting these explicitly so 2Q's smoke test doesn't surprise
+operators who relied on the v4.1.0 behaviour.
+
+| Concern | Pre-Phase 2 (v4.1.0–v4.6 Phase 1) | Post-Phase 2 |
+|---|---|---|
+| **Persistence** | None — `runFanout` returned results in-memory; no `runs` row, no `run_events`. | Each fanout child writes a `runs` row via `spawn_sub_agent`'s primitive path. N children = N child rows linked to the parent's run row (when present) via `spawned_from_run_id`. Visible to `aiden runs list / show`. |
+| **Observability** | `logger.info` on launch + complete; no per-tool-call event stream. | Per-tool-call `tool_call_started` / `tool_call_completed` run_events on each child's runs row (the Dispatch 2K wiring). `aiden trigger logs` / direct DB queries surface child behaviour. |
+| **Tool blocklist with legacy escape hatch** | Env-flag `AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE` + caller-side schema filter in `subagentFanout.ts`. | Hard-coded 5-name blocklist (`spawn_sub_agent`, `clarify`, `memory`, `execute_code`, `send_message`) enforced inside `childBuilder.ts` by default. **`AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE=1` is HONORED as a backward-compat escape hatch** — when set, `execute_code` is removed from the blocklist for that session; the other 4 names remain blocked. Zero-risk preservation of any user's existing `.env` workflow. May be removed in v4.7 if telemetry/feedback shows zero usage. Documented in release notes as a quiet preservation, not a feature. |
+| **Budget defaults** | `runFanout` resolved budget via `resolveBudget()` — 20 iter / 90s per child / 5× wall-clock cap. | Fanout's `runFanout` STILL resolves budget the same way (`budget.ts` preserved) and STILL passes those values explicitly to `spawnSubAgent` as `maxIterations` / `timeoutMs`. The primitive's own defaults (50 iter / 600s) are NOT inherited — fanout's tighter snug defaults are preserved. |
+| **`FallbackAdapter.clone()`** | Mentioned in `fanout.ts` docstring but never actually called in production (Dispatch 2D-PRE audit). Children shared mutable rate-limit state with the parent. | Each child gets a real `.clone()` via `spawnSubAgent`'s `childBuilder` (Dispatch 2E). Per-child 429 no longer collapses the parent's quota tracking. Genuine isolation, not aspirational. |
+| **Wall-clock outer cap** | `runFanout` set `wallClockCapMs = 5 × perSubagentTimeoutMs` via outer AbortController. | Preserved — `runFanout` keeps the outer cap and passes `wallController.signal` to each `spawnSubAgent` call's `ctx.signal`. Cascade semantics from the primitive's cooperative-cancellation path. |
+| **Provider rotation diversity** | `rotateProviders` returned `assignments[i] = ProviderOption` and `runFanout` built each child with that adapter. | Preserved via the Phase 2a contract extension — `spec.provider: assignments[i].providerId` per child. `singleProviderWarning` still fires when rotation collapses to one provider's slots. |
+| **Merge strategies** | `mergeResults({ strategy: 'all' \| 'vote' \| 'pick-best' \| 'combine' })`. | Preserved — `merger.ts` untouched. Aggregator LLM passes still happen for `vote`/`pick-best`/`combine`. `'all'` (FREE option) returns raw N envelopes. |
+| **Concurrency** | `Promise.all` over N children. | Same — `Promise.all` over N `spawnSubAgent` calls. |
+| **Approval engine in child** | Children inherited parent's approval engine indirectly (toolExecutor was shared). | Each child gets a fresh `ApprovalEngine('smart')` with auto-deny `promptUser` callback (Dispatch 2E pattern). No interactive prompting in fanout children either. Mostly invisible — fanout children never reached interactive prompt path in practice. |
+
+**Aiden `runs list` behavior (v4.6 → Phase 2).** Before Phase 2,
+fanout children were in-memory only and invisible to `aiden runs
+list`. Post-Phase 2 each fanout child writes its own runs row linked
+via `spawned_from_run_id`. To prevent the default `runs list` output
+from ballooning (5 fanout calls → 25 extra rows), **children are
+hidden by default**. The parent run row shows a child-count badge
+in default output, e.g.:
+
+```
+Run #5  (fanout, 5 children, 4 succeeded)
+Run #6  (REPL turn)
+Run #7  (trigger: file, 1 child)
+```
+
+Operator escape hatches when full detail is needed:
+
+- `aiden runs list --include-children` — flat view, every child row visible alongside parents
+- `aiden runs show <parent-id>` — parent detail PLUS each child's summary inlined
+- `aiden runs show <child-id>` — direct access by ID (always works)
+
+**Implementation note for Dispatch 2Q:** filter at the SQL layer
+(`WHERE spawned_from_run_id IS NULL` in the default `listRecent`
+query, lifted to `IS NULL OR include_children` when the flag is
+set). Push the child-count badge in via a `LEFT JOIN ... GROUP BY`
+on parent → child count + success count. Scales to thousands of
+children without display-layer filtering overhead.
+
+Recommend documenting the hide-by-default behaviour + escape hatches
+in the v4.6 release notes ahead of ship — operators tail-following
+`runs list` need to know children exist (the badge tells them) but
+also need to know how to drill in.
+
 ---
 
 **Implementation begins in Phase 2.** Phase 1 (this document + the
