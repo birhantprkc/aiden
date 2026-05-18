@@ -170,14 +170,14 @@ daemon. Everything else is enforced server-side.
 | Token budget | ❌ | ✅ | Child has its own `maxIterations` (from spawn arg). Parent's `maxTokensPerFire` (daemon-mode) does NOT bound the child directly — it bounds the PARENT, which means a spawn near the parent's budget edge will be reflected when the child's tokens roll up into the parent total (see §6). |
 | Cost rollup | rollup | — | Child's `tokensIn + tokensOut` and estimated cost roll INTO the parent's session totals when the spawn returns. Per-layer additive. |
 | File-op cache (`task_id` namespace) | ❌ | ✅ | Child gets a fresh `task_id` (`subagent-<run_id>-<rand>`). File reads/writes don't cross the namespace. Parent-vs-child file conflict detection deferred to Phase 2. |
-| Approval lock (TUI prompt mutex) | shared | — | If the child attempts a tool requiring approval and approval is interactive (parent has TUI), the prompt serialises through the parent's approval lock. Phase 1 ships with all `dangerous`-tier child tool calls auto-denied via blocklist + sandbox — interactive approval should be unreachable in practice. |
+| **`moat/approvalEngine.ts`** (ApprovalEngine instance + session-scoped allowlist) | ❌ | ✅ | Fresh `new ApprovalEngine(mode)` per agent — verified at `cli/v4/aidenCLI.ts:1092` (REPL) and `cli/v4/daemonAgentBuilder.ts:113` (per daemon turn). The session-scoped allowlist (`approve-once` decisions, `approve-session` grants) lives on the instance and never leaks across agents. Child gets a fresh engine constructed with auto-deny callbacks; the parent's interactive callbacks (REPL TUI prompts) are NOT passed in, since the child cannot prompt the user. Concurrent approval requests cannot occur within one parent's turn (the agent loop's tool dispatch is sequential), and across parent+child the engines are independent — no mutex is needed because there is no shared mutable approval state. |
 | **`core/v4/browserState.ts`** (v4.3 browser depth observer) | ❌ | ✅ | Observer is keyed by `sessionId`. Fresh child `sessionId` ⇒ fresh observer slot ⇒ implicit isolation. Parent's browser state is not visible to the child and vice versa. |
 | **`core/v4/dockerSession.ts`** (v4.4 per-`sessionId` docker session cache) | partial | partial | Cache slot is per-`sessionId` so the child gets a clean entry (isolated). The underlying docker daemon socket and pulled images are process-level (shared). Implication: child containers don't inherit parent container state, but spinning up a new container in the child does not re-pull images. |
 | **`core/v4/skillLoader.ts`** (skill registry) | ✅ (read-only) | — | Skill registry is a filesystem-backed process-level singleton. Child reads the same registry; child does NOT write to it. If a skill is dynamically loaded by the child, it becomes visible to the parent's later turns (intentional — skills are user-installed artifacts, not per-turn state). |
 | **`core/v4/toolRegistry.ts`** (registry **instance**, distinct from toolset intersection above) | ✅ (read-only) | — | The registry object itself is shared — the child reads the same `ToolDef[]` the parent compiled. The TOOLSET intersection rule (row above) filters which tool NAMES the child sees; this row clarifies the underlying registry instance is not cloned. No child mutation of the registry permitted. |
 | **`core/v4/memoryManager.ts`** (memory snapshot) | ✅ (read-only) | — | The `memory` tool is in the Q5 blocklist so the child cannot WRITE. The manager INSTANCE is shared so the child can READ parent's MEMORY.md / durable facts — matches the existing `core/v4/subagent/fanout.ts` precedent ("Shared (read-only) across children: memoryManager"). |
 | **`core/v4/plugins/pluginPermissions.ts`** (`.granted-permissions.json` consumers) | ✅ | — | Child inherits the parent process's granted-permissions state. A plugin granted `browser/subprocess/network` for the parent is granted for the child (same process, same registry). No per-child re-grant flow in Phase 1. |
-| **`core/v4/suggestionEngine.ts`** (`firedSlots` Set + catalog) | partial | partial | Catalog (rule definitions) is shared read-only. `firedSlots` Set is per-session — child gets a fresh budget (so child can fire contextual suggestions too). Child suggestions are emitted on the CHILD's `run_events`, not the parent's; parent's UI does not surface child suggestions in Phase 1. |
+| **`core/v4/suggestionEngine.ts`** (`firedSlots` Set + catalog) | ✅ (process-level singleton) | — | Verified at `core/v4/suggestionEngine.ts:253-255` — the `SuggestionEngine` is a process-level singleton accessed via `getSuggestionEngine()`. The `firedSlots: Set<SuggestionSlot>` (line 168) lives inside the singleton's closure and is shared across ALL agents in the process. Implication: child agents draw from the SAME suggestion budget the parent does. If `spawn_sub_agent` is in a suggestion-firing toolset, child suggestions deplete the shared budget. Phase 1 accepts this as the singleton's current semantics; per-agent budget masking is a Phase 2+ knob if real-world use surfaces a need. |
 | **`core/v4/runtimeToggles.ts`** (live-flip slash command state: `/sandbox`, `/tce`, `/browser-depth`, `/suggestions`) | ✅ | — | Toggles are process-level singletons. Child sees whatever the parent has flipped. If the parent flips `/sandbox on` MID-spawn, the change is visible to the child on its next tool dispatch (read-on-each-call). No snapshot-at-spawn-time semantics in Phase 1. |
 | **`core/updateChecker.ts`** (update-check cache + skip-version persistence) | N/A | — | Update checker only runs at boot and on `/update`. A sub-agent never boots and never runs the `/update` slash command — there is no execution path from a child into the update checker. Listed for completeness; no design surface. |
 | **Provider rate-limit pools** (`FallbackAdapter` mutable state, per `core/v4/subagent/fanout.ts` precedent) | partial | partial | Resolver and credential set inherit (shared read-only); rate-limit / cooldown state is cloned per child via the existing `FallbackAdapter` clone pattern. This isolates per-child rate-limit bookkeeping so a child hitting a 429 does not collapse the parent's quota tracking. Implementation MUST mirror the existing v4.1-subagent clone pattern in Phase 2. |
@@ -472,6 +472,24 @@ CREATE INDEX IF NOT EXISTS idx_runs_spawned_from
   (e.g. via daemon retry matrix), should the previous spawn's result
   be replayed or re-spawned? Likely "re-spawn, with a new child
   run_id" — but the semantics need explicit documentation.
+- **Verify `core/v4/plugins/pluginPermissions.ts` singleton vs
+  per-context construction** before Phase 2 wiring. Flagged in
+  Dispatch 2D-DOCFIX Task 2 audit — the §5 matrix row for
+  `pluginPermissions` (line 179) was not fully verifiable via grep
+  (no clear singleton pattern surfaced). Almost certainly fine
+  because `.granted-permissions.json` is filesystem-backed and
+  any consumer reads the same on-disk state regardless of in-memory
+  structure, but worth a clean read of the module before the
+  spawn primitive depends on it.
+- **Per-agent suggestion budget masking** — `firedSlots` is a
+  process-level singleton today (verified at
+  `core/v4/suggestionEngine.ts:253-255`). Phase 1 ships with child
+  agents drawing from the shared parent budget. If real-world use
+  shows children silently depleting the parent's suggestion budget
+  before the parent's own slots fire, add per-agent masking in
+  Phase 2+ (e.g. a `withSuggestionScope(agentId, fn)` helper that
+  swaps in a per-agent `firedSlots` Set for the duration of the
+  agent's lifetime).
 
 ## 11. Test plan (Phase 5)
 
