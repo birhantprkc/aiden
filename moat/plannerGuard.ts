@@ -143,10 +143,40 @@ const RULES: KeywordRule[] = [
     toolsets: ['execute'],
   },
   // Process registry
+  //
+  // Note: the bare word "spawn" appears in this rule's keyword list
+  // (legacy — predates v4.6 sub-agents). The dedicated 'subagent'
+  // rule below ALSO matches "spawn" via a tighter delegation
+  // vocabulary, so a message like "spawn a background server" hits
+  // BOTH rules and adds both toolsets — UNION semantics make this
+  // additive, not conflicting.
   {
     keywords:
       /\b(process|background|long.?running|server|spawn|kill|daemon)\b/i,
     toolsets: ['process'],
+  },
+  // v4.6 Phase 1 — sub-agent delegation surface (spawn_sub_agent +
+  // subagent_fanout). Both tools live in toolset `'subagent'`, which
+  // no pre-v4.6 rule mapped to — so PlannerGuard's per-turn narrowing
+  // silently stripped them from the model's catalog whenever any
+  // other rule fired. The model could see them via lookup_tool_schema
+  // but failed to actually invoke them because the provider tool list
+  // (post-narrow) didn't include them — see Dispatch 2H diagnostic.
+  //
+  // Regex notes:
+  //   - `spawn_sub_agent` and `subagent_fanout` literals are listed
+  //     explicitly because `\bspawn\b` does NOT match within
+  //     `spawn_sub_agent` (underscore is a word char in JS regex,
+  //     so there's no word boundary between `n` and `_`). Users who
+  //     name the tool directly hit the literal arm.
+  //   - The free-form vocabulary arm (`spawn`, `delegate`, etc.)
+  //     catches natural-language delegation intent. UNION semantics
+  //     with other rules let "spawn a child to read files" surface
+  //     both 'subagent' AND 'files'.
+  {
+    keywords:
+      /\b(spawn_sub_agent|subagent_fanout|spawn|subagent|sub.?agent|delegate|fanout|fan.?out|child.?agent|parallel|isolated)\b/i,
+    toolsets: ['subagent'],
   },
   // Media playback control (v4.1.4-media)
   //

@@ -350,3 +350,100 @@ describe('PlannerGuard — llm_classified', () => {
     expect(decision.selectedTools).not.toContain('media_transport');
   });
 });
+
+// ── v4.6 Phase 1 — sub-agent toolset rule ──────────────────────────────────
+
+describe('PlannerGuard — subagent rule (v4.6 Phase 1)', () => {
+  // Dedicated registry with the two real sub-agent tools so the
+  // narrowed-list assertions don't depend on FULL_REGISTRY's count.
+  // 'web' toolset added so the "spawn a child to read files" test can
+  // verify UNION semantics across rules.
+  const SUBAGENT_REGISTRY = new MockRegistry([
+    handler('file_read',        'files'),
+    handler('file_write',       'files'),
+    handler('web_search',       'web'),
+    handler('shell_exec',       'terminal'),
+    handler('spawn_sub_agent',  'subagent'),
+    handler('subagent_fanout',  'subagent'),
+    handler('skills_list',      'skills'),
+    handler('lookup_tool_schema', 'meta'),
+    handler('session_search',   'sessions'),
+  ]);
+
+  it('21. "spawn" keyword selects subagent toolset', async () => {
+    const guard = new PlannerGuard(SUBAGENT_REGISTRY, 'rule_based');
+    const decision = await guard.decide('please spawn a sub-agent', []);
+    expect(decision.selectedTools).toContain('spawn_sub_agent');
+    expect(decision.selectedTools).toContain('subagent_fanout');
+  });
+
+  it('22. "delegate" keyword selects subagent toolset', async () => {
+    const guard = new PlannerGuard(SUBAGENT_REGISTRY, 'rule_based');
+    const decision = await guard.decide('delegate this task to a worker', []);
+    expect(decision.selectedTools).toContain('spawn_sub_agent');
+    expect(decision.selectedTools).toContain('subagent_fanout');
+  });
+
+  it('23. "subagent" / "sub-agent" keyword variants both match', async () => {
+    const guard = new PlannerGuard(SUBAGENT_REGISTRY, 'rule_based');
+    const d1 = await guard.decide('use the subagent system', []);
+    const d2 = await guard.decide('build a sub-agent for this', []);
+    expect(d1.selectedTools).toContain('spawn_sub_agent');
+    expect(d2.selectedTools).toContain('spawn_sub_agent');
+  });
+
+  it('24. "fanout" / "fan out" keyword variants both match', async () => {
+    const guard = new PlannerGuard(SUBAGENT_REGISTRY, 'rule_based');
+    const d1 = await guard.decide('fanout this query across providers', []);
+    const d2 = await guard.decide('fan out the work', []);
+    expect(d1.selectedTools).toContain('subagent_fanout');
+    expect(d2.selectedTools).toContain('subagent_fanout');
+  });
+
+  it('25. "parallel" keyword triggers subagent toolset', async () => {
+    const guard = new PlannerGuard(SUBAGENT_REGISTRY, 'rule_based');
+    const decision = await guard.decide('run these in parallel', []);
+    expect(decision.selectedTools).toContain('spawn_sub_agent');
+  });
+
+  it('26. message with NO subagent keyword does NOT surface subagent tools when another rule fires', async () => {
+    const guard = new PlannerGuard(SUBAGENT_REGISTRY, 'rule_based');
+    // Triggers the 'files' rule; nothing in the subagent vocabulary.
+    const decision = await guard.decide('read my README.md file', []);
+    expect(decision.selectedTools).toContain('file_read');
+    expect(decision.selectedTools).not.toContain('spawn_sub_agent');
+    expect(decision.selectedTools).not.toContain('subagent_fanout');
+  });
+
+  it('27. UNION semantics — "spawn a child to read files" matches BOTH subagent and files', async () => {
+    const guard = new PlannerGuard(SUBAGENT_REGISTRY, 'rule_based');
+    const decision = await guard.decide('spawn a child to read files', []);
+    // 'spawn' → subagent rule; 'read' + 'files' → files rule.
+    expect(decision.selectedTools).toContain('spawn_sub_agent');
+    expect(decision.selectedTools).toContain('subagent_fanout');
+    expect(decision.selectedTools).toContain('file_read');
+    expect(decision.selectedTools).toContain('file_write');
+  });
+
+  it('28. integration — Dispatch 2H bug repro: spawn-intent message reaches model', async () => {
+    // Pre-fix: PlannerGuard's narrowed selection excluded spawn_sub_agent
+    // because no rule mapped to the 'subagent' toolset. The model could
+    // see the schema via lookup_tool_schema but failed to invoke the tool
+    // because the provider's tool list (post-narrow) didn't include it.
+    //
+    // Post-fix: the user's exact message from Dispatch 2H now reaches the
+    // model with the spawn tool in the narrowed catalog. Both subagent
+    // tools surface together (they share the same toolset) plus the
+    // files-rule tools (UNION semantics from the 'file' keyword).
+    const guard = new PlannerGuard(SUBAGENT_REGISTRY, 'rule_based');
+    const decision = await guard.decide(
+      'Use spawn_sub_agent to count the number of TypeScript files in core/',
+      [],
+    );
+    expect(decision.selectedTools).toContain('spawn_sub_agent');
+    expect(decision.selectedTools).toContain('subagent_fanout');
+    // Files rule also fires (file/files keyword present).
+    expect(decision.selectedTools).toContain('file_read');
+    expect(decision.reason).toBe('rule_match');
+  });
+});

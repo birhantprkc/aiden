@@ -64,7 +64,12 @@ export function makeLookupToolSchema(registry: ToolRegistry): ToolHandler {
         category: handler.category,
         mutates: handler.mutates,
         toolset: handler.toolset,
-  riskTier: 'safe',   // v4.4 Phase 1
+        // v4.6 Phase 1 — read the queried tool's actual risk tier
+        // (was previously hardcoded to 'safe' regardless of the tool,
+        // which mis-reported caution/dangerous tools as safe in the
+        // /tools surface). Falls back to 'safe' for tools that never
+        // annotated their tier — matches the registry-level default.
+        riskTier: handler.riskTier ?? 'safe',
       };
     },
   };
