@@ -1874,6 +1874,19 @@ export class ChatSession implements ChatSessionLike {
       await this.maybeShowBootUpdatePrompt();
     } catch { /* never let the update prompt crash boot */ }
 
+    // ONB1 slice 9 — one-time first-run hint banner. Renders below
+    // the boot card on the very first session after a successful
+    // setup; dismissed when the user sends their first message or
+    // runs /dismiss. Lazy-required so test-harness sessions that
+    // omit `paths` don't pay the fs cost.
+    try {
+      if (this.opts.paths) {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { renderFirstRunHint } = require('./repl/firstRunHint') as typeof import('./repl/firstRunHint');
+        await renderFirstRunHint({ paths: this.opts.paths, out: process.stdout });
+      }
+    } catch { /* never let a missing marker crash boot */ }
+
     // Bottom prompt hint — final line of the boot card.
     display.write('\n');
     display.write(display.bottomPromptHint() + '\n');
