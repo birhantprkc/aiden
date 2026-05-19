@@ -823,12 +823,19 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
       `  Tokens stored at: ${path.join(paths.root, 'auth', `${provider.id}.json`)}\n`,
     );
     display.write(`  Expires: ${expIso}\n`);
+    // ONB1 slice 7: encryption disclosure demoted from a paragraph to
+    // a one-line `?` hint. The full explainer remains available via
+    // `aiden doctor` — the wizard is the wrong moment for a security
+    // primer.
     display.write(
-      `\nTokens encrypted with a machine-derived key. Protects against casual ` +
-        `file inspection but NOT against code execution on this machine. ` +
-        `Real OS keychain integration in v4.1.\n`,
+      `${kleur.dim('  Tokens encrypted at rest · run `aiden doctor` for details')}\n`,
     );
-    printPostWizardTutorial(display, AIDEN_VERSION);
+    // ONB1 slice 8: success screen replaces the prior "Try: aiden" tail.
+    // The wizard already returns to the boot path, which then drops into
+    // the REPL — no process restart needed.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { renderSuccessScreen: rss } = require('./onboarding/successScreen') as typeof import('./onboarding/successScreen');
+    rss({ out: process.stdout });
 
     return { status: 'configured', ran: true, config, envFile: paths.envFile };
   }
@@ -1055,11 +1062,16 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     await upsertEnvVar(paths.envFile, 'CUSTOM_BASE_URL', baseUrl);
   }
 
-  // Step 6: tutorial
+  // Step 6: success — wizard drops straight into the REPL via the
+  // outer boot path. No "Try: aiden" advice needed; the user is
+  // already on their way to chat.
   display.write(
     `\n${kleur.green(`✓ ${provider.shortLabel}`)} configured with model ${kleur.cyan(modelId)}.\n`,
   );
-  printPostWizardTutorial(display, AIDEN_VERSION);
+  // ONB1 slice 8: success screen + REPL handoff.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { renderSuccessScreen } = require('./onboarding/successScreen') as typeof import('./onboarding/successScreen');
+  renderSuccessScreen({ out: process.stdout });
 
   return { status: 'configured', ran: true, config, envFile: paths.envFile };
   } // end of outer: while (true) — every path inside either continues,
