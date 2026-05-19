@@ -845,23 +845,17 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     return { status: 'configured', ran: true, config, envFile: paths.envFile };
   }
 
-  // Step 2: model selection. Phase 30.2.1: subsequent prompts use
-  // `shortLabel` instead of the full picker `label` to drop the
-  // parenthetical description from the wall of text.
-  let modelId = provider.defaultModel ?? '';
-  if (provider.models && provider.models.length > 1) {
-    const modelIndex = await prompts.choose(
-      `Pick a model for ${provider.shortLabel}`,
-      provider.models,
-    );
-    modelId = provider.models[modelIndex - 1];
-  } else if (provider.kind === 'local') {
-    modelId = await prompts.input('Ollama model id', { default: provider.defaultModel ?? 'llama3.1:8b' });
-  } else if (!modelId) {
-    modelId = await prompts.input('Model id', { default: '' });
-  }
+  // ONB1-WIRE-2 Slice B — flow reorder + live model fetch.
+  //
+  // Old order: pick model → ask key → validate. That worked because
+  // model selection came from the curated PROVIDERS.models array and
+  // didn't need the key. Live fetch from /models endpoints requires
+  // the key (Anthropic, OpenAI, Groq, Gemini all gate /models behind
+  // auth), so we now ask for credentials FIRST and pick the model
+  // FROM the live response. Falls back to the curated MODEL_CATALOG
+  // when the live endpoint is unreachable.
 
-  // Step 3: credentials
+  // Step 2: credentials (moved up from old step 3)
   let apiKey: string | undefined;
   let baseUrl: string | undefined;
 
@@ -884,6 +878,58 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
   } else if (provider.kind === 'key' || provider.kind === 'subscription') {
     if (provider.envVar) {
       apiKey = await prompts.input(`API key for ${provider.shortLabel}`, { mask: true });
+    }
+  }
+
+  // Step 3: live model fetch + pick.
+  let modelId = provider.defaultModel ?? '';
+  {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { fetchModels } = require('../../core/v4/providers/modelFetch') as typeof import('../../core/v4/providers/modelFetch');
+    const spinner = display.startSpinner(`Fetching available models for ${provider.shortLabel}…`);
+    let fetchResult;
+    try {
+      fetchResult = await fetchModels({ providerId: provider.id, apiKey, baseUrl, fetchImpl });
+    } finally {
+      spinner.stop();
+    }
+
+    if (fetchResult.source === 'fallback' && fetchResult.reason) {
+      display.write(
+        `${kleur.dim(`  Couldn't reach API — showing recommended models offline (${fetchResult.reason})`)}\n`,
+      );
+    } else if (fetchResult.source === 'live') {
+      display.write(
+        `${kleur.dim(`  Live from ${provider.shortLabel} API · ${fetchResult.models.length} model${fetchResult.models.length === 1 ? '' : 's'}`)}\n`,
+      );
+    }
+
+    if (fetchResult.models.length === 0) {
+      // No models from live or static catalog — fall back to a free-text input.
+      if (provider.kind === 'local') {
+        modelId = await prompts.input('Ollama model id', {
+          default: provider.defaultModel ?? 'llama3.1:8b',
+        });
+      } else {
+        modelId = await prompts.input('Model id', { default: provider.defaultModel ?? '' });
+      }
+    } else if (fetchResult.models.length === 1) {
+      modelId = fetchResult.models[0].id;
+      display.write(`${kleur.dim(`  Only one model available — using ${modelId}.`)}\n`);
+    } else {
+      // Render picker. modelFetch already sorts recommended first; we
+      // append a `· recommended` marker so the user spots them visually.
+      const labels = fetchResult.models.map((m) =>
+        m.recommended ? `${m.displayName} · recommended` : m.displayName,
+      );
+      const recIdx = fetchResult.models.findIndex((m) => m.recommended);
+      const defaultIdx = recIdx >= 0 ? recIdx + 1 : 1;
+      const idx = await prompts.choose(
+        `Pick a model for ${provider.shortLabel}`,
+        labels,
+        defaultIdx,
+      );
+      modelId = fetchResult.models[idx - 1].id;
     }
   }
 
