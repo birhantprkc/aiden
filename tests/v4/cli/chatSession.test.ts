@@ -269,8 +269,12 @@ describe('ChatSession.run', () => {
     // Credits scroll (≥75 cols mock terminal — full scroll).
     expect(text).toContain('Built solo');
     expect(text).toContain('github.com/taracodlabs/aiden');
-    // Bottom prompt hint.
-    expect(text).toContain('▲ Type your message');
+    // Bottom prompt hint. v4.8.0 Slice 11 — leading ▲ dropped (the
+    // inquirer prompt below the hint already paints the brand
+    // triangle as its input prefix; the hint's own ▲ read as a
+    // duplicate orphan one row above the active cursor).
+    expect(text).toContain('Type your message');
+    expect(text).not.toMatch(/▲\s+Type your message/);
     expect(text).toMatch(/\/help for commands/);
     expect(text).toContain('/skills');
   });

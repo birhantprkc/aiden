@@ -202,6 +202,19 @@ export const glyphs = {
     filled: '●',
     empty:  '○',
   },
+  /**
+   * v4.8.0 Slice 11 — single-row activity-indicator shimmer track.
+   * Replaces the prior 2-row layout (verb row + `▓`/`░` wave bar) with
+   * one row whose leading glyph cluster is a 4-cell `█` (U+2588 FULL
+   * BLOCK) segment sliding left-to-right on a muted `─` track. Both
+   * glyphs are CP437-safe and already shipping in chrome elsewhere
+   * (`hLine`, panel `bar`). Colour, not glyph, signals state: the
+   * filled block paints `brand`, the track paints `muted`.
+   */
+  shimmer: {
+    block: '█',
+    track: '─',
+  },
 } as const;
 
 // ── Spacing ───────────────────────────────────────────────────────────────

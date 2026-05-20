@@ -1203,12 +1203,31 @@ export async function buildAgentRuntime(
     // Missing or unreadable file is fine — no permanent allowlist yet.
   }
 
-  // Auxiliary client (compression / risk-assessment cheap LLM). Default to
-  // the same provider/model as the main loop — the resolver hands the
-  // auxiliary client a separately-configured cheap model later (v4.1).
+  // Auxiliary client (compression / risk-assessment / session-summary
+  // / skill-describe). v4.8.0 Slice 11 — route through Groq's cheap
+  // 8B model as the default, with the parent provider/model as the
+  // fallback when Groq isn't configured. Fixes the ChatGPT Plus +
+  // gpt-5 routing bug: pre-Slice-11 auxiliary inherited the parent
+  // (codex backend, accepts only `gpt-5-codex`/`gpt-4.1-mini`/etc.)
+  // and every aux call returned a 400 model-not-supported. Groq is
+  // cheap, fast, and reliable for the cheap classify/summarise jobs
+  // auxiliary is designed for. If the user has no GROQ_API_KEY, the
+  // resolver throws and we fall through to the parent — no regression
+  // for non-codex users.
+  //
+  // Skip the parent fallback when the parent IS already the Groq cheap
+  // model — same identity attempt twice is just noise in the verbose
+  // log. (Resolver dedup; the auxiliary client itself doesn't filter.)
+  const AUX_DEFAULT_PROVIDER = 'groq';
+  const AUX_DEFAULT_MODEL    = 'llama-3.1-8b-instant';
+  const parentSameAsDefault =
+    providerId === AUX_DEFAULT_PROVIDER && modelId === AUX_DEFAULT_MODEL;
   const auxiliaryClient = new AuxiliaryClient({
-    defaultProvider: providerId,
-    defaultModel: modelId,
+    defaultProvider: AUX_DEFAULT_PROVIDER,
+    defaultModel:    AUX_DEFAULT_MODEL,
+    fallbacks: parentSameAsDefault
+      ? []
+      : [{ providerId, modelId }],
     // Phase 21 #5: ensure the auxiliary path also honors entry.oauth →
     // tokenStore. If a user runs the auxiliary cheap LLM through an
     // OAuth-only provider, omitting `paths` would skip the fast-path

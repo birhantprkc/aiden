@@ -107,16 +107,22 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     vi.useRealTimers();
   });
 
-  it('TTY: initial paint contains ⌛ + verb (Slice 10 — hourglass replaces ▲)', () => {
+  it('TTY: initial paint contains shimmer block + verb (Slice 11 — █ replaces ⌛)', () => {
     const { d, chunks } = makeDisplay({ tty: true });
     const handle = d.activityIndicator('thinking');
     const out = stripAnsi(chunks.join(''));
-    // v4.8.0 Slice 10 — activity indicator's leading glyph is the
-    // hourglass (⌛), not the brand triangle (▲). Reads as a wait/timing
-    // affordance. The triangle stays as the user-prompt + status-footer
+    // v4.8.0 Slice 11 — activity indicator's leading glyph cluster is
+    // a 4-cell `█` segment sliding on a `─` track. Replaces the static
+    // `⌛` hourglass (Slice 10) which itself replaced the brand triangle
+    // (Slice 0). The triangle stays as the user-prompt + status-footer
     // identity glyph.
-    expect(out).toContain('⌛');
+    expect(out).toContain('█');
+    expect(out).toContain('─');
     expect(out).toContain('thinking');
+    // Slice 11 regression sentinels.
+    expect(out).not.toContain('⌛');
+    expect(out).not.toContain('▓'); // legacy wave-bar glyphs
+    expect(out).not.toContain('░');
     // Issue F: the Ctrl+C cancel hint was visually noisy on the
     // activity line and collided with planner-debug dim writes.
     // Dropped in Phase 3b'. Sentinel against regression.
@@ -280,87 +286,79 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     handle.stop();
   });
 
-  // ── v4.1.5 Issue K — wave-bar coverage ─────────────────────────────────
+  // ── v4.8.0 Slice 11 — sliding-block shimmer coverage ──────────────────
   //
-  // The wave bar is a 10-cell `▰▱` snake-scroll that paints below
-  // the verb row. 3-cell `▰` block slides right by 1 cell per tick,
-  // wraps at the right edge. Same 250ms cadence as the verb dot pulse
-  // (single shared timer).
+  // The shimmer is a single-row 10-cell `█`/`─` track that replaces
+  // the prior 2-row (verb + wave-bar) layout. A 4-cell `█` segment
+  // slides right by 1 cell per tick, wrapping at the right edge.
+  // Same 250ms cadence as the verb dot pulse — one timer drives
+  // both motion cues.
 
-  it('wave-bar default ON: initial paint emits 2 rows with CP437-safe glyphs (v4.1.5 Q-P1)', () => {
+  it('shimmer default ON: initial paint emits 1 row with █/─ track (Slice 11)', () => {
     const { d, chunks } = makeDisplay({ tty: true });
     const handle = d.activityIndicator('thinking');
     const initial = stripAnsi(chunks.join(''));
-    // Both rows present.
     expect(initial).toContain('thinking');
-    // v4.1.5 Phase 1d Q-P1: wave bar uses `▓` (U+2593 DARK SHADE)
-    // and `░` (U+2591 LIGHT SHADE) — CP437-safe glyphs. Was `▰`/`▱`
-    // (U+25B0/B1) which legacy Windows console fonts garble.
-    // At frame 0 leading 3-cell block sits at positions 0..2.
-    expect(initial).toContain('▓▓▓░░░░░░░');
-    // Regression sentinel: the old garbled glyphs must NOT appear.
+    // v4.8.0 Slice 11 — shimmer uses `█` (U+2588 FULL BLOCK) on a `─`
+    // (U+2500 BOX DRAWING LIGHT HORIZONTAL) track. Both CP437-safe.
+    // At frame 0 the leading 4-cell block sits at positions 0..3.
+    expect(initial).toContain('████──────');
+    // Regression sentinels: legacy wave-bar + glyph palettes must NOT appear.
+    expect(initial).not.toContain('▓');
+    expect(initial).not.toContain('░');
     expect(initial).not.toContain('▰');
     expect(initial).not.toContain('▱');
+    expect(initial).not.toContain('⌛');
     handle.stop();
   });
 
-  it('wave-bar: 3-cell ▓ block slides across 10 cells (Q-P1 glyphs)', () => {
+  it('shimmer: 4-cell █ block slides across 10 cells (Slice 11)', () => {
     const { d, chunks } = makeDisplay({ tty: true });
     const handle = d.activityIndicator('thinking');
     chunks.length = 0;
     vi.advanceTimersByTime(500); // 2 ticks at 250ms
     const tick2 = stripAnsi(chunks.join(''));
-    // waveFrame=2 → block at cells 2,3,4 with the new glyph palette.
-    expect(tick2).toMatch(/░░▓▓▓░░░░░/);
+    // shimmerFrame=2 → block at cells 2,3,4,5.
+    expect(tick2).toMatch(/──████────/);
     handle.stop();
   });
 
-  it('wave-bar: wraps at right edge (frame 8 → block straddles), CP437 glyphs', () => {
+  it('shimmer: wraps at right edge (frame 8 → block straddles)', () => {
     const { d, chunks } = makeDisplay({ tty: true });
     const handle = d.activityIndicator('thinking');
     chunks.length = 0;
-    vi.advanceTimersByTime(250 * 8); // waveFrame=8
+    vi.advanceTimersByTime(250 * 8); // shimmerFrame=8
     const tick8 = stripAnsi(chunks.join(''));
-    // Block straddles the wrap: cell 0 filled, cells 8,9 filled.
-    expect(tick8).toMatch(/▓░░░░░░░▓▓/);
+    // Block straddles the wrap: cells 0,1 filled at the head, cells 8,9 filled at the tail.
+    expect(tick8).toMatch(/██──────██/);
     handle.stop();
   });
 
-  it('wave-bar opt-out: { waveBar: false } produces single-row paint', () => {
+  it('shimmer opt-out: { waveBar: false } produces bare-verb paint', () => {
     const { d, chunks } = makeDisplay({ tty: true });
     const handle = d.activityIndicator('thinking', { waveBar: false });
     const initial = stripAnsi(chunks.join(''));
     expect(initial).toContain('thinking');
-    // Wave bar glyphs must NOT appear (neither old nor new).
+    // Shimmer glyphs must NOT appear when explicitly opted out.
+    expect(initial).not.toContain('█');
+    // Legacy wave-bar glyphs must not appear either.
     expect(initial).not.toContain('▓');
     expect(initial).not.toContain('░');
-    expect(initial).not.toContain('▰');
-    expect(initial).not.toContain('▱');
     handle.stop();
   });
 
-  it('wave-bar erase walks up TWO rows (verb + bar)', () => {
+  it('Slice 11: erase walks up ONE row (single-row layout)', () => {
     const { d, chunks } = makeDisplay({ tty: true });
-    const handle = d.activityIndicator('thinking'); // wave-bar default on
+    const handle = d.activityIndicator('thinking'); // shimmer default on
     chunks.length = 0;
     handle.stop();
     const after = chunks.join('');
-    // Two `\x1b[1A\x1b[2K` sequences chained for the 2-row erase.
+    // Single `\x1b[1A\x1b[2K` sequence for the 1-row erase.
     const occurrences = (after.match(/\x1b\[1A\x1b\[2K/g) ?? []).length;
-    expect(occurrences).toBe(2);
+    expect(occurrences).toBe(1);
   });
 
   it('v4.1.6 Polish 1: erase output ends with newline (breathing-space gutter)', () => {
-    // Prior behaviour: erase = `\x1b[1A\x1b[2K\x1b[1A\x1b[2K` (no
-    // trailing newline) → cursor parked at col 0 of the just-erased
-    // verb row → next write (agentHeader, tool row, etc.) sat tight
-    // against where the indicator had been. v4.1.5 visual smoke
-    // flagged the wave-bar → "┃ Aiden" proximity as feeling cramped.
-    //
-    // Polish 1: erase now ends with `\n`, leaving cursor on a blank
-    // row below the indicator's old footprint. One visible blank
-    // row of breathing space. Also adds another Windows ConPTY flush
-    // trigger (Issue M).
     const { d, chunks } = makeDisplay({ tty: true });
     const handle = d.activityIndicator('thinking');
     chunks.length = 0;
@@ -369,14 +367,13 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     expect(after.endsWith('\n')).toBe(true);
   });
 
-  it('v4.1.6 Polish 1: single-row (waveBar: false) erase also ends with newline', () => {
+  it('Slice 11: opt-out (waveBar: false) erase also ends with newline + 1 walk-up', () => {
     const { d, chunks } = makeDisplay({ tty: true });
     const handle = d.activityIndicator('thinking', { waveBar: false });
     chunks.length = 0;
     handle.stop();
     const after = chunks.join('');
     expect(after.endsWith('\n')).toBe(true);
-    // Only one walk-up-erase (single-row path).
     const occurrences = (after.match(/\x1b\[1A\x1b\[2K/g) ?? []).length;
     expect(occurrences).toBe(1);
   });
@@ -391,7 +388,7 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     handle.stop();
   });
 
-  it('wave-bar setVerb mutates verb row, bar continues animating', () => {
+  it('shimmer setVerb mutates verb row, shimmer continues animating', () => {
     const { d, chunks } = makeDisplay({ tty: true });
     const handle = d.activityIndicator('thinking');
     chunks.length = 0;
@@ -399,16 +396,28 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     vi.advanceTimersByTime(250);
     const full = stripAnsi(chunks.join(''));
     expect(full).toContain('refreshing memory');
-    // Wave bar still present in the same tick output (CP437 glyphs).
-    expect(full).toMatch(/▓{1,3}/);
+    // Shimmer still present in the same tick output (Slice 11 glyphs).
+    expect(full).toMatch(/█{1,4}/);
     handle.stop();
   });
 
-  it('initial paint includes brand-paint ⌛ glyph (Slice 10 — hourglass)', () => {
+  it('Slice 11: initial paint starts with breathing-space newline', () => {
+    // v4.8.0 Slice 11 — the indicator's first paint prepends `\n`
+    // so there is one visible row of breathing space above it. Prior
+    // behaviour butted the indicator flush against whatever the
+    // caller had just written (usually the user-prompt row).
+    const { d, chunks } = makeDisplay({ tty: true });
+    const handle = d.activityIndicator('thinking');
+    const initial = chunks.join('');
+    expect(initial.startsWith('\n')).toBe(true);
+    handle.stop();
+  });
+
+  it('initial paint includes brand-paint shimmer block (Slice 11 — █)', () => {
     // v4.1.4 Phase 3b' Issue F: the muted "▸▸ Ctrl+C cancel" hint was
-    // dropped from the line, so the ONLY skin paint on initial render
-    // (elapsed < 1s) is the brand-orange leading glyph. v4.8.0 Slice 10
-    // swapped that glyph from ▲ → ⌛ to read as wait/timing.
+    // dropped from the line, so the brand-orange paint on initial
+    // render (elapsed < 1s) is the leading shimmer block. v4.8.0
+    // Slice 11 swapped that block from ⌛ → 4-cell sliding `█`.
     const chunks: string[] = [];
     const out = new Writable({
       write(c, _e, cb) { chunks.push(c.toString()); cb(); },
@@ -421,7 +430,8 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     const initial = chunks.join('');
     // Brand orange = #FF6B35 = rgb 255,107,53.
     expect(initial).toContain('\x1b[38;2;255;107;53m');
-    expect(initial).toContain('⌛');
+    expect(initial).toContain('█');
+    expect(initial).not.toContain('⌛');
     handle.stop();
   });
 });

@@ -35,9 +35,29 @@ export interface AuxiliaryResolver {
   }): Promise<ProviderAdapter>;
 }
 
+/**
+ * v4.8.0 Slice 11 — single provider+model attempt. The resolution
+ * chain (default → fallbacks[]) is tried in order; the first
+ * adapter that resolves wins. Used to route auxiliary cheap-LLM
+ * calls through Groq when configured, falling back to the parent
+ * loop's provider when Groq is absent. Fixes the ChatGPT Plus +
+ * gpt-5 routing bug where parent inheritance forced auxiliary
+ * traffic through an adapter that doesn't accept `gpt-5`.
+ */
+export interface AuxiliaryAttempt {
+  providerId: string;
+  modelId: string;
+}
+
 export interface AuxiliaryClientOptions {
   defaultProvider: string;
   defaultModel: string;
+  /**
+   * v4.8.0 Slice 11 — ordered list of secondary attempts. Tried only
+   * if the default provider/model resolution throws. First successful
+   * resolution wins and is cached for the lifetime of the client.
+   */
+  fallbacks?: AuxiliaryAttempt[];
   resolver?: AuxiliaryResolver;
   /**
    * Pre-resolved adapter — if provided, the resolver is not called.
@@ -102,20 +122,37 @@ export class AuxiliaryClient {
   private async resolveOnce(): Promise<ProviderAdapter | null> {
     if (this.opts.adapter) return this.opts.adapter;
     if (!this.opts.resolver) return null;
-    this.resolveCallCount += 1;
-    try {
-      const adapter = await this.opts.resolver.resolve({
-        providerId: this.opts.defaultProvider,
-        modelId: this.opts.defaultModel,
-      });
-      return adapter;
-    } catch (err) {
-      this.warn(
-        `auxiliary client unavailable (${this.opts.defaultProvider}/${this.opts.defaultModel}): ${(err as Error).message}`,
-      );
-      this.adapterUnavailable = true;
-      return null;
+
+    // v4.8.0 Slice 11 — resolution chain: default first, then each
+    // fallback in order. The first attempt that resolves wins. This
+    // is the routing-fix entry point for the chatgpt-plus + gpt-5
+    // bug: aidenCLI hands us Groq as the default and the parent
+    // provider/model as the fallback, so auxiliary calls land on
+    // Groq when configured and the parent only sees traffic when
+    // Groq is absent.
+    const attempts: AuxiliaryAttempt[] = [
+      { providerId: this.opts.defaultProvider, modelId: this.opts.defaultModel },
+      ...(this.opts.fallbacks ?? []),
+    ];
+    const failures: string[] = [];
+    for (const att of attempts) {
+      this.resolveCallCount += 1;
+      try {
+        const adapter = await this.opts.resolver.resolve({
+          providerId: att.providerId,
+          modelId: att.modelId,
+        });
+        this.warn(`auxiliary resolved via ${att.providerId}/${att.modelId}`);
+        return adapter;
+      } catch (err) {
+        failures.push(`${att.providerId}/${att.modelId}: ${(err as Error).message}`);
+      }
     }
+    this.warn(
+      `auxiliary client unavailable (tried ${attempts.length}): ${failures.join('; ')}`,
+    );
+    this.adapterUnavailable = true;
+    return null;
   }
 
   /** Resolve count for tests (verifies single-resolution behaviour). */
@@ -193,14 +230,23 @@ export class AuxiliaryClient {
   }
 
   private warn(msg: string) {
-    // v4.8.0 Slice 5 — gate behind AIDEN_VERBOSE. Auxiliary failures
-    // are recoverable (the main loop continues; result content is just
-    // empty), so the warning is pure noise for end users. Power users
-    // set AIDEN_VERBOSE=1 to surface them. Inline env-read preserves
-    // the core → cli no-import invariant; canonical isVerbose() lives
-    // at cli/v4/design/tokens.ts.
+    // v4.8.0 Slice 5 — gate console output behind AIDEN_VERBOSE.
+    // Auxiliary failures are recoverable (the main loop continues;
+    // result content is just empty), so the warning is pure noise
+    // for end users. Power users set AIDEN_VERBOSE=1 to surface them.
+    // Inline env-read preserves the core → cli no-import invariant;
+    // canonical isVerbose() lives at cli/v4/design/tokens.ts.
+    //
+    // v4.8.0 Slice 11 — if opts.warn is explicitly injected, always
+    // forward (tests + advanced callers register their own sink and
+    // expect every message). The AIDEN_VERBOSE gate now applies only
+    // to the default console.warn fallback that end-users see.
+    if (this.opts.warn) {
+      this.opts.warn(msg);
+      return;
+    }
     if (process.env.AIDEN_VERBOSE !== '1') return;
-    (this.opts.warn ?? ((m: string) => console.warn(`[auxiliary] ${m}`)))(msg);
+    console.warn(`[auxiliary] ${msg}`);
   }
 
   private async withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {

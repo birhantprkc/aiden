@@ -730,16 +730,22 @@ export class Display {
 
   /**
    * Bottom prompt hint that replaces the prior `ready ▸  /help` +
-   * `✦ Tip:` lines. `▲` in brand, body in muted.
+   * `✦ Tip:` lines.
+   *
+   * v4.8.0 Slice 11 — dropped the leading `▲` glyph. The inquirer
+   * prompt that paints immediately below this hint already carries
+   * the brand triangle as its input prefix (`display.promptPrefix()`),
+   * so the hint's own `▲` read as a duplicate orphan sitting one row
+   * above the active cursor. Hint is now text-only-muted; `▲` stays
+   * exclusively as the user-input identity glyph.
    */
   bottomPromptHint(): string {
     const sk = this.skin;
-    const tri = sk.applyColors('▲', 'brand');
     const text = sk.applyColors(
       'Type your message · /help for commands · /skills to add more',
       'muted',
     );
-    return `  ${tri} ${text}`;
+    return `    ${text}`;
   }
 
   /**
@@ -1098,24 +1104,52 @@ export class Display {
     // (Ns) counter hasn't ticked. Slow enough not to flicker on SSH
     // / slow ConPTY refresh.
     const TICK_MS = 250;
-    // v4.8.0 Slice 10 — leading glyph swapped from the brand triangle
-    // (▲) to the hourglass (⌛, glyphs.status.timer) to read as a
-    // wait/timing affordance rather than a generic identity marker.
-    // The dots pulse + wave bar still provide motion; the hourglass
-    // is intentionally static so users can read "this is loading"
-    // without animation flicker on slow terminals. The ▲ triangle
-    // stays as the user-prompt prefix elsewhere (display.promptPrefix)
-    // and the status footer identity marker, preserving its role as
-    // the Aiden brand glyph in non-wait contexts.
-    const glyph = sk.applyColors(glyphs.status.timer, 'brand');
 
-    // v4.1.5 Issue K — wave-bar state. Snake-scroll: a 3-cell `▰`
-    // block slides across 10 cells, wrapping at the right edge. Same
-    // 250ms tick as the verb dot pulse — one timer drives both rows.
-    const waveBarEnabled = opts.waveBar !== false; // default true
-    const WAVE_CELLS = 10;
-    const WAVE_BLOCK = 3;
-    let waveFrame = 0;
+    // v4.8.0 Slice 11 — leading glyph is no longer a static `⌛` (or
+    // a separate 2nd-row wave bar). Now it's a single-row sliding
+    // shimmer: a 4-cell brand-orange `█` segment that scrolls L→R
+    // across a muted `─` track, wrapping at the right edge. The dots
+    // pulse + (Ns) timer keep their roles as secondary motion cues;
+    // the shimmer is the primary "something is happening" affordance
+    // in TTFT space. Token-sourced from `glyphs.shimmer` so the glyph
+    // pair lives next to the rest of the v4.8.0 design system.
+    //
+    // `opts.waveBar` is preserved as a back-compat option that maps
+    // to "shimmer enabled". Pass `{ waveBar: false }` to drop the
+    // shimmer cluster and render the bare verb row (the legacy
+    // v4.1.4 single-row indicator). Default ON.
+    const shimmerEnabled = opts.waveBar !== false;
+    const SHIMMER_CELLS  = 10;
+    const SHIMMER_BLOCK  = 4;
+    let shimmerFrame = 0;
+
+    /**
+     * v4.8.0 Slice 11 — render the sliding-block shimmer. A 4-cell
+     * `█` (U+2588 FULL BLOCK) segment at positions `[frame,
+     * frame+1, frame+2, frame+3]` mod 10, on a muted `─` track.
+     * Brand-orange block, muted track. Token-sourced glyphs;
+     * cell-by-cell paint keeps glyph order true to position so
+     * the wrap visibly slides rather than jumping.
+     *
+     * Heartbeat semantics: this is NOT progress. The block moves
+     * at a constant 250ms cadence regardless of any backend metric.
+     * It exists purely so the user sees motion during the
+     * unobservable TTFT (time-to-first-token) wait. The verb +
+     * dot pulse + (Ns) timer carry the real lifecycle signal.
+     */
+    const buildShimmer = (): string => {
+      const filled = new Set<number>();
+      for (let i = 0; i < SHIMMER_BLOCK; i += 1) {
+        filled.add((shimmerFrame + i) % SHIMMER_CELLS);
+      }
+      const cells: string[] = [];
+      for (let c = 0; c < SHIMMER_CELLS; c += 1) {
+        cells.push(filled.has(c)
+          ? sk.applyColors(glyphs.shimmer.block, 'brand')
+          : sk.applyColors(glyphs.shimmer.track, 'muted'));
+      }
+      return cells.join('');
+    };
 
     const buildLine = (): string => {
       const dots = '.'.repeat(dotFrame); // 0..3 dots
@@ -1123,47 +1157,9 @@ export class Display {
       const elapsedStr = elapsedSec >= 1
         ? ` ${sk.applyColors(`(${elapsedSec}s)`, 'muted')}`
         : '';
-      // `▲ {verb}{dots-padded-to-3}{elapsed?}`
-      return `${glyph} ${verb}${dots.padEnd(3, ' ')}${elapsedStr}`;
-    };
-
-    /**
-     * v4.1.5 Issue K — render the wave-bar row. A 3-cell `▰` block at
-     * positions `[waveFrame, waveFrame+1, waveFrame+2]` mod 10. The
-     * filled cells paint brand orange, empty cells paint warm-muted.
-     * Same width + glyph set as the token progress bar so the two
-     * rows feel like a coherent palette (one is heartbeat, the other
-     * is real progress).
-     *
-     * Heartbeat semantics: this is NOT progress. The wave moves at a
-     * constant 250ms cadence regardless of any backend metric. It
-     * exists purely so the user sees motion during the unobservable
-     * TTFT (time-to-first-token) wait. The verb row above carries
-     * any real lifecycle signal via `setVerb()`.
-     */
-    const buildWave = (): string => {
-      // v4.1.5 Phase 1d (Q-P1) — glyph palette switch. Was `▰`/`▱`
-      // (U+25B0/B1, Geometric Shapes) which legacy Windows console
-      // fonts render as tofu. Now `▓`/`░` (U+2593/91, Block Elements
-      // — in CP437, universally supported). Matches the existing
-      // statusFooter chrome that's shipped since v3 without ever
-      // being garbled.
-      const filled = new Set<number>();
-      for (let i = 0; i < WAVE_BLOCK; i += 1) {
-        filled.add((waveFrame + i) % WAVE_CELLS);
-      }
-      // Render cells in order so the snake-scroll visually slides:
-      // we paint cell-by-cell with the right color, joined into one
-      // string. ANSI runs reset per cell — slight overhead but keeps
-      // glyph order true to position. Brand orange filled, warm-muted
-      // empty.
-      const cells: string[] = [];
-      for (let c = 0; c < WAVE_CELLS; c += 1) {
-        cells.push(filled.has(c)
-          ? sk.applyColors('▓', 'brand')
-          : sk.applyColors('░', 'muted'));
-      }
-      return cells.join('');
+      // Shimmer prefix (or none, when opts.waveBar === false).
+      const prefix = shimmerEnabled ? `${buildShimmer()} ` : '';
+      return `${prefix}${verb}${dots.padEnd(3, ' ')}${elapsedStr}`;
     };
 
     // v4.1.5 Part 1a — Issue M (Windows ConPTY buffering fix).
@@ -1196,25 +1192,15 @@ export class Display {
     const renderTick = (): void => {
       if (stopped || paused || !isTty) return;
       dotFrame = (dotFrame + 1) % 4;
-      // v4.1.5 Issue K — wave snake-scroll advances 1 cell per tick.
-      // Same 250ms cadence as the dot pulse, so both rows move in
-      // visible lockstep. Modulo WAVE_CELLS wraps the leading block
-      // back to the left edge.
-      waveFrame = (waveFrame + 1) % WAVE_CELLS;
-      if (waveBarEnabled) {
-        // 2-row layout: walk up TWO rows (two separate up-1+erase
-        // sequences, which keeps the `\x1b[1A\x1b[2K` substring
-        // assertion-compatible), repaint both, drop newlines so the
-        // cursor lands on the row below the wave bar.
-        out.write(
-          `${ANSI_UP_ERASE}${ANSI_UP_ERASE}` +
-          `${buildLine()}\n` +
-          `${buildWave()}\n`,
-        );
-      } else {
-        // Single-row layout (back-compat with v4.1.4 tests).
-        out.write(`${ANSI_UP_ERASE}${buildLine()}\n`);
-      }
+      // v4.8.0 Slice 11 — shimmer slides 1 cell per tick. Same 250ms
+      // cadence as the dot pulse, so block + dots move in visible
+      // lockstep. Modulo SHIMMER_CELLS wraps the leading block back
+      // to the left edge.
+      shimmerFrame = (shimmerFrame + 1) % SHIMMER_CELLS;
+      // Single-row layout: walk up 1, erase, repaint, newline. Cursor
+      // lands on the row below the indicator, ready for the next
+      // tick to walk back up.
+      out.write(`${ANSI_UP_ERASE}${buildLine()}\n`);
     };
 
     const startTick = (): void => {
@@ -1230,39 +1216,23 @@ export class Display {
     };
 
     const eraseLine = (): void => {
-      // Walk up to the indicator's row(s) + erase, then drop ONE
-      // newline so the cursor lands on a blank line BELOW the
-      // indicator's old footprint. v4.1.6 polish: previous behavior
-      // left the cursor at col 0 of the just-erased row so caller
-      // writes (agentHeader, tool row, etc.) sat tight against where
-      // the indicator had been. v4.1.5 visual smoke flagged the
-      // wave-bar→`┃ Aiden` proximity as feeling cramped. The
-      // trailing `\n` gains one visible blank row of breathing space
-      // AND adds another Windows ConPTY flush trigger (Issue M).
-      //
-      // v4.1.5 Issue K — with wave bar enabled, walk up 2 rows (two
-      // up-1+erase sequences). Without the bar, walk up 1 row.
+      // Walk up 1 row + erase + drop a newline so the cursor lands
+      // on a blank line BELOW the indicator's old footprint. The
+      // trailing `\n` provides one visible blank row of breathing
+      // space and acts as a Windows ConPTY flush trigger (v4.1.5
+      // Issue M). Slice 11 collapsed the prior 2-row layout to 1.
       if (!isTty || !printed) return;
-      if (waveBarEnabled) {
-        out.write(`${ANSI_UP_ERASE}${ANSI_UP_ERASE}\n`);
-      } else {
-        out.write(`${ANSI_UP_ERASE}\n`);
-      }
+      out.write(`${ANSI_UP_ERASE}\n`);
     };
 
-    // Initial paint — only on TTY. Indicator + `\n` so the buffer
-    // flushes and the cursor sits on the row below, ready for the
-    // first tick to walk back up.
-    //
-    // v4.1.5 Issue K — when wave bar is enabled, paint TWO rows:
-    // verb row + wave row, each with trailing `\n`. Cursor lands on
-    // the row below the wave bar. The first tick will walk up 2.
+    // Initial paint — only on TTY. v4.8.0 Slice 11 — prepend a blank
+    // `\n` so the indicator gets one visible row of breathing space
+    // above it. Prior behaviour butted the indicator flush against
+    // the user-prompt row, which read as cramped. The trailing `\n`
+    // on the verb row sits the cursor below the indicator, ready
+    // for the first tick to walk back up.
     if (isTty) {
-      if (waveBarEnabled) {
-        out.write(`${buildLine()}\n${buildWave()}\n`);
-      } else {
-        out.write(`${buildLine()}\n`);
-      }
+      out.write(`\n${buildLine()}\n`);
       printed = true;
       startTick();
     }
@@ -1286,16 +1256,16 @@ export class Display {
         // Caller has just finished writing its own content (typically
         // ending with `\n`), so the cursor is on a fresh line below
         // whatever was there. Paint the indicator + `\n` to claim the
-        // current row(s) and leave the cursor on the row below — same
+        // current row and leave the cursor on the row below — same
         // invariant the initial paint and tick maintain. Trailing `\n`
         // also flushes Windows ConPTY buffering (Issue M).
         //
-        // v4.1.5 Issue K — repaint BOTH rows when wave bar enabled.
-        if (waveBarEnabled) {
-          out.write(`${buildLine()}\n${buildWave()}\n`);
-        } else {
-          out.write(`${buildLine()}\n`);
-        }
+        // v4.8.0 Slice 11 — single-row layout: paint one row only.
+        // (Initial paint includes a leading `\n` for breathing space;
+        // resume omits it because the caller has already written its
+        // own content above this point and an extra blank would
+        // double up.)
+        out.write(`${buildLine()}\n`);
         printed = true;
         startTick();
       },

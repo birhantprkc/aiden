@@ -175,6 +175,72 @@ describe('AuxiliaryClient', () => {
     expect(warns.some((w) => w.includes('failed'))).toBe(true);
   });
 
+  // ── v4.8.0 Slice 11 — fallback chain coverage ─────────────────────────
+  //
+  // The resolver chain is `default → fallbacks[0] → fallbacks[1]` …
+  // The first attempt that returns an adapter wins; failures are
+  // recorded and the next attempt fires. If every attempt fails the
+  // client logs a single combined warning and marks itself unavailable.
+
+  it('11. fallback chain: falls through to fallback when default resolver throws', async () => {
+    const adapter = new StubAdapter();
+    const warns: string[] = [];
+    let attemptIndex = 0;
+    const c = new AuxiliaryClient({
+      defaultProvider: 'groq',
+      defaultModel:    'llama-3.1-8b-instant',
+      fallbacks:       [{ providerId: 'chatgpt-plus', modelId: 'gpt-5' }],
+      resolver: {
+        resolve: async (o) => {
+          attemptIndex += 1;
+          if (o.providerId === 'groq') throw new Error('no GROQ_API_KEY');
+          return adapter;
+        },
+      },
+      warn: (m) => warns.push(m),
+    });
+    const r = await c.call({ purpose: 'risk_assess', prompt: 'is this safe?' });
+    expect(r.content).toBe('ok');
+    expect(attemptIndex).toBe(2);
+    // Verbose log surfaces which attempt succeeded (Slice 11 telemetry).
+    expect(warns.some((w) => w.includes('resolved via chatgpt-plus/gpt-5'))).toBe(true);
+  });
+
+  it('12. fallback chain: default wins when it resolves cleanly', async () => {
+    const adapter = new StubAdapter();
+    const warns: string[] = [];
+    const c = new AuxiliaryClient({
+      defaultProvider: 'groq',
+      defaultModel:    'llama-3.1-8b-instant',
+      fallbacks:       [{ providerId: 'anthropic', modelId: 'claude' }],
+      resolver: { resolve: async () => adapter },
+      warn: (m) => warns.push(m),
+    });
+    await c.call({ purpose: 'risk_assess', prompt: 'x' });
+    // Only the default attempt fired — _resolveCallCount = 1.
+    expect(c._resolveCallCount()).toBe(1);
+    expect(warns.some((w) => w.includes('resolved via groq/llama-3.1-8b-instant'))).toBe(true);
+  });
+
+  it('13. fallback chain: every attempt fails → empty content + isUnavailable()', async () => {
+    const warns: string[] = [];
+    const c = new AuxiliaryClient({
+      defaultProvider: 'groq',
+      defaultModel:    'm',
+      fallbacks:       [{ providerId: 'p2', modelId: 'm2' }],
+      resolver: { resolve: async () => { throw new Error('boom'); } },
+      warn: (m) => warns.push(m),
+    });
+    const r = await c.call({ purpose: 'compression', prompt: 'x' });
+    expect(r.content).toBe('');
+    expect(c.isUnavailable()).toBe(true);
+    // Combined unavailability warning mentions BOTH attempts.
+    const combined = warns.find((w) => w.includes('unavailable'));
+    expect(combined).toBeDefined();
+    expect(combined).toContain('groq/m');
+    expect(combined).toContain('p2/m2');
+  });
+
   it('10. concurrent calls record usage independently (no race-bleed)', async () => {
     const adapter = new StubAdapter();
     const c = new AuxiliaryClient({
