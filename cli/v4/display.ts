@@ -2136,6 +2136,17 @@ export class Display {
     // Unknown event names silent-ignore (defensive — future registrations).
   }
 
+  /**
+   * v4.8.0 Phase 2.4 polish — build one trail-gutter row matching the
+   * `toolRow` chrome (muted `┊` + space + colored content + `\n`).
+   * Splits on embedded newlines so multi-line surfaces (capped stdout,
+   * preview tails, optional reasons) carry the gutter on every line.
+   */
+  private uiTrailRow(content: string, kind: ColorKind): string {
+    const pipe = this.skin.applyColors(TRAIL_PIPE, 'muted');
+    return content.split('\n').map(l => `${pipe} ${this.skin.applyColors(l, kind)}\n`).join('');
+  }
+
   private renderUiTaskUpdate(args: Record<string, unknown>): void {
     const taskId  = typeof args.task_id === 'string' ? args.task_id : '';
     const label   = typeof args.label   === 'string' ? args.label   : '';
@@ -2148,11 +2159,10 @@ export class Display {
     const colorKind: ColorKind = status === 'running' ? 'tool' : 'warn';
     this.uiTaskRows.set(taskId, { label });
     const short  = label.length > 80 ? label.slice(0, 79) + '…' : label;
-    // v4.8.0 Phase 2.4 — subagent kind: indent by depth so nested rows
-    // visually tier below their parent. parent_id telemetry lands in
-    // Phase 2.5 (daemon serializer); the renderer only uses depth.
+    // v4.8.0 Phase 2.4 — subagent kind: indent by depth inside the
+    // gutter so nested rows tier below their parent.
     const indent = kindArg === 'subagent' ? '  '.repeat(depth) : '';
-    this.out.write(`${indent}${this.skin.applyColors(`${glyph} ${short}`, colorKind)}\n`);
+    this.out.write(this.uiTrailRow(`${indent}${glyph} ${short}`, colorKind));
     this.streamLastEndedNewline = true;
   }
 
@@ -2172,7 +2182,7 @@ export class Display {
     const shortLabel = label.length > 80 ? label.slice(0, 79) + '…' : label;
     const shortSum   = summary.length > 120 ? summary.slice(0, 119) + '…' : summary;
     const tail = shortSum ? ` — ${shortSum}` : '';
-    this.out.write(`${this.skin.applyColors(`${glyph} ${shortLabel}${tail}`, kind)}\n`);
+    this.out.write(this.uiTrailRow(`${glyph} ${shortLabel}${tail}`, kind));
     this.streamLastEndedNewline = true;
   }
 
@@ -2183,12 +2193,12 @@ export class Display {
     const stderr  = typeof args.stderr  === 'string' ? args.stderr  : '';
     const exitCode = typeof args.exit_code === 'number' ? args.exit_code : 0;
     this.commitStreamChunk();
-    const sk = this.skin, ok = exitCode === 0;
+    const ok = exitCode === 0;
     const cap = (t: string): string => t.split('\n').slice(0, 5).join('\n');
-    let out = `${sk.applyColors(`▸ ${command}`, ok ? 'success' : 'error')}\n`;
-    if (stdout) out += `${sk.applyColors(cap(stdout), 'muted')}\n`;
-    if (stderr) out += `${sk.applyColors(cap(stderr), 'error')}\n`;
-    if (!ok)    out += `${sk.applyColors(`(exit ${exitCode})`, 'error')}\n`;
+    let out = this.uiTrailRow(`▸ ${command}`, ok ? 'success' : 'error');
+    if (stdout) out += this.uiTrailRow(cap(stdout), 'muted');
+    if (stderr) out += this.uiTrailRow(cap(stderr), 'error');
+    if (!ok)    out += this.uiTrailRow(`(exit ${exitCode})`, 'error');
     this.out.write(out);
     this.streamLastEndedNewline = true;
   }
@@ -2205,7 +2215,7 @@ export class Display {
     const parts = [`${passed} passed`, `${failed} failed`];
     if (skipped > 0) parts.push(`${skipped} skipped`);
     const dur = durationMs > 0 ? ` in ${durationMs}ms` : '';
-    this.out.write(`${this.skin.applyColors(`${ok ? '✓' : '✗'} ${framework}: ${parts.join(', ')}${dur}`, ok ? 'success' : 'error')}\n`);
+    this.out.write(this.uiTrailRow(`${ok ? '✓' : '✗'} ${framework}: ${parts.join(', ')}${dur}`, ok ? 'success' : 'error'));
     this.streamLastEndedNewline = true;
   }
 
@@ -2218,10 +2228,10 @@ export class Display {
     const kind: ColorKind = riskTier === 'low' ? 'success'
       : (riskTier === 'high' || riskTier === 'critical') ? 'error' : 'warn';
     const shortP = prompt.length > 160 ? prompt.slice(0, 159) + '…' : prompt;
-    let out = `${this.skin.applyColors(`⚠ Approval needed: ${shortP}`, kind)}\n`;
+    let out = this.uiTrailRow(`⚠ Approval needed: ${shortP}`, kind);
     if (reason) {
       const shortR = reason.length > 200 ? reason.slice(0, 199) + '…' : reason;
-      out += `  ${this.skin.applyColors(shortR, 'muted')}\n`;
+      out += this.uiTrailRow(`  ${shortR}`, 'muted');
     }
     this.out.write(out);
     this.streamLastEndedNewline = true;
@@ -2235,7 +2245,7 @@ export class Display {
     const glyph = kindArg === 'success' ? '✓' : kindArg === 'warning' ? '⚠' : kindArg === 'error' ? '✗' : 'ℹ';
     const kind: ColorKind = kindArg === 'success' ? 'success' : kindArg === 'warning' ? 'warn' : kindArg === 'error' ? 'error' : 'tool';
     const short = message.length > 120 ? message.slice(0, 119) + '…' : message;
-    this.out.write(`${this.skin.applyColors(`${glyph} ${short}`, kind)}\n`);
+    this.out.write(this.uiTrailRow(`${glyph} ${short}`, kind));
     this.streamLastEndedNewline = true;
   }
 
@@ -2246,10 +2256,10 @@ export class Display {
     const preview = typeof args.preview === 'string' ? args.preview : '';
     this.commitStreamChunk();
     const glyph = kindArg === 'skill' ? '🛠' : kindArg === 'directory' ? '📁' : '📄';
-    let out = `${this.skin.applyColors(`${glyph} Created: ${path}`, 'accent')}\n`;
+    let out = this.uiTrailRow(`${glyph} Created: ${path}`, 'accent');
     if (preview) {
       const shortP = preview.length > 200 ? preview.slice(0, 199) + '…' : preview;
-      out += `  ${this.skin.applyColors(shortP, 'muted')}\n`;
+      out += this.uiTrailRow(`  ${shortP}`, 'muted');
     }
     this.out.write(out);
     this.streamLastEndedNewline = true;
