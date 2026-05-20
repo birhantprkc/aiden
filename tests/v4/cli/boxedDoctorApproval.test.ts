@@ -183,9 +183,11 @@ describe('renderApprovalBox (Phase 22 Task 5B)', () => {
     reason: 'destructive operation',
   };
 
-  it('Slice 6: every line carries the 2-space indent + ▎ accent bar (no rounded corners)', () => {
+  it('Slice 6 hotfix: every content line carries the 2-space indent + ▎ accent bar', () => {
     const display = makeDisplay({ mono: true });
     const out = renderApprovalBox(SAMPLE_REQ as any, display);
+    // Output leads + trails with a blank line for breathing room;
+    // every non-blank line carries the indented bar.
     for (const line of out.split('\n').filter(l => l.length > 0)) {
       expect(line.startsWith('  ▎')).toBe(true);
     }
@@ -196,10 +198,32 @@ describe('renderApprovalBox (Phase 22 Task 5B)', () => {
     expect(out).not.toContain('┘');
   });
 
-  it('Slice 6: renders key/value rows for tool, reason, and args', () => {
+  it('Slice 6 hotfix: NO duplicate "Approval needed" title row (Phase 2.5 event owns the headline)', () => {
     const display = makeDisplay({ mono: true });
     const out = stripAnsi(renderApprovalBox(SAMPLE_REQ as any, display));
-    // New chrome: key column (lowercase, padded) then value.
+    expect(out).not.toMatch(/Approval needed/);
+  });
+
+  it('Slice 6 hotfix: leading + trailing blank lines for breathing room', () => {
+    const display = makeDisplay({ mono: true });
+    const out = renderApprovalBox(SAMPLE_REQ as any, display);
+    expect(out.startsWith('\n')).toBe(true);
+    expect(out.endsWith('\n')).toBe(true);
+  });
+
+  it('Slice 6 hotfix: key column is consistently aligned across all rows', () => {
+    const display = makeDisplay({ mono: true });
+    const out = stripAnsi(renderApprovalBox(SAMPLE_REQ as any, display));
+    // Pull the col-index where each key starts. tool/reason/args must
+    // share the same x position.
+    const keyCols = ['tool', 'reason', 'args']
+      .map(k => out.split('\n').find(l => l.includes(k))?.indexOf(k) ?? -1);
+    expect(new Set(keyCols).size).toBe(1);
+  });
+
+  it('renders key/value rows for tool, reason, and args', () => {
+    const display = makeDisplay({ mono: true });
+    const out = stripAnsi(renderApprovalBox(SAMPLE_REQ as any, display));
     expect(out).toMatch(/tool\s+file_delete/);
     expect(out).toMatch(/reason\s+destructive operation/);
     expect(out).toMatch(/args\s+\{"path":"C:\\\\Users\\\\shiva\\\\backups\\\\old\.zip"\}/);
@@ -220,18 +244,19 @@ describe('renderApprovalBox (Phase 22 Task 5B)', () => {
     expect(out).toMatch(/args\s+\{"blob":"x+…/);
   });
 
-  it('shows the [y]/[a]/[n] action keys in the footer hint', () => {
+  it('Slice 6 hotfix: footer hint matches the inquirer mechanic (arrow nav)', () => {
     const display = makeDisplay({ mono: true });
     const out = stripAnsi(renderApprovalBox(SAMPLE_REQ as any, display));
-    expect(out).toMatch(/\[y\] allow once.*\[a\] allow always.*\[n\] deny/);
+    expect(out).toMatch(/↑↓ navigate · enter select · esc cancel/);
+    // The old [y]/[a]/[n] hint LIED about the input mechanic; it must not
+    // appear in the new chrome.
+    expect(out).not.toMatch(/\[y\] allow once/);
   });
 
-  it('Slice 6: the left bar paints brand orange (#FF6B35), tier badge paints semantic colour', () => {
+  it('Slice 6 hotfix: left bar paints brand orange (#FF6B35)', () => {
     const display = makeDisplay({ mono: false });
     const out = renderApprovalBox(SAMPLE_REQ as any, display);
     // brand orange = #FF6B35 → rgb 255, 107, 53.
     expect(out).toContain('\x1b[38;2;255;107;53m');
-    // caution tier → warn colour = #FFC107 → rgb 255, 193, 7.
-    expect(out).toContain('\x1b[38;2;255;193;7m');
   });
 });

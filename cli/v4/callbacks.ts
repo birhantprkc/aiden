@@ -751,23 +751,20 @@ const APPROVAL_ARGS_LIMIT = 50;
  * tier-semantic (badge), muted (everything else) — ≤3 distinct colours.
  */
 export function renderApprovalBox(req: ApprovalRequest, display: Display): string {
+  // v4.8.0 Slice 6 hotfix:
+  //   - Drop panel title + tier badge (Phase 2.5 ui_approval_request event
+  //     row above already announces the headline + tier-by-colour).
+  //   - Lead with structured key/value rows; unify inner-padding so keys
+  //     and dividers share the same left edge.
+  //   - Footer hint matches the actual inquirer select() mechanic
+  //     (arrow-key navigation), not fictional y/a/n keystrokes.
+  //   - Leading + trailing blank lines for vertical breathing room
+  //     between the event row above and the inquirer picker below.
   const indent = '  ';
   const innerW = APPROVAL_BOX_WIDTH;
   const bar = display.applyColors(glyphs.panel.bar, 'brand');
-  const line = (content: string): string => `${indent}${bar} ${content}`;
+  const line = (content: string): string => `${indent}${bar}  ${content}`;
   const divider = display.muted(glyphs.chrome.hLine.repeat(innerW - 2));
-
-  // Title row: `Approval needed` (brand) + tier badge right-aligned (semantic).
-  const tierKind: ColorKind =
-    req.riskTier === 'safe'      ? 'success' :
-    req.riskTier === 'dangerous' ? 'error'   :
-    req.riskTier === 'caution'   ? 'warn'    : 'muted';
-  const title    = display.applyColors('Approval needed', 'heading');
-  const tierText = req.riskTier ?? '';
-  const gap = ' '.repeat(Math.max(1, innerW - 1 - 'Approval needed'.length - tierText.length));
-  const titleRow = tierText
-    ? ` ${title}${gap}${display.applyColors(tierText, tierKind)}`
-    : ` ${title}`;
 
   let argsPreview = '';
   try { argsPreview = JSON.stringify(req.args); }
@@ -777,19 +774,20 @@ export function renderApprovalBox(req: ApprovalRequest, display: Display): strin
   }
 
   // Key-value rows. Key column padded to 12 cells for vertical alignment.
+  const KEY_W = 12;
   const kv = (k: string, v: string): string =>
-    `  ${display.muted(k.padEnd(12))}${v}`;
+    `${display.muted(k.padEnd(KEY_W))}${v}`;
 
   const lines: string[] = [
-    line(titleRow),
-    line(' ' + divider),
     line(kv('tool', req.toolName)),
   ];
   if (req.reason) lines.push(line(kv('reason', req.reason)));
   lines.push(line(kv('args', argsPreview)));
-  lines.push(line(' ' + divider));
-  lines.push(line(
-    `  ${display.brand('[y]')} allow once  ${display.brand('[a]')} allow always  ${display.brand('[n]')} deny`,
-  ));
-  return lines.join('\n');
+  lines.push(line(divider));
+  lines.push(line(display.muted('↑↓ navigate · enter select · esc cancel')));
+
+  // Leading + trailing blank lines: caller already adds one trailing
+  // newline, so producing '\n<panel>\n' yields one blank above + one
+  // blank below once the caller's own '\n' lands.
+  return '\n' + lines.join('\n') + '\n';
 }
