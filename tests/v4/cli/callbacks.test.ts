@@ -60,11 +60,13 @@ describe('CliCallbacks.promptApproval', () => {
     });
     expect(decision).toBe('allow');
     const out = output();
-    // Phase 22 Task 5B: rendered as a yellow-bordered rounded box.
-    expect(out).toMatch(/┌── Approval required /);
-    expect(out).toMatch(/Tool: shell_exec/);
-    expect(out).toMatch(/dangerous/);
-    expect(out).toMatch(/Reason: destructive command/);
+    // Slice 6 (commit 5a90c0e8) + Slice 6 hotfix (d251382f): rendered
+    // as the orange-bar framed panel — key/value rows, no rounded box,
+    // no "Approval needed" title (Phase 2.5 event row owns the headline).
+    expect(out).toMatch(/▎/);
+    expect(out).toMatch(/tool\s+shell_exec/);
+    expect(out).toMatch(/reason\s+destructive command/);
+    expect(out).not.toMatch(/┌── Approval required /);
   });
 
   it('returns the chosen decision verbatim', async () => {

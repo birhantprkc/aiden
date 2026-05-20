@@ -98,11 +98,10 @@ describe('/help', () => {
     const { ctx, output } = makeCtx();
     await help.handler(ctx as any);
     const out = output();
-    // Phase 22 Task 2 swapped the flat "System commands:" header for
-    // ── Section ── banners. /help and /quit live in the Help and
-    // System buckets respectively.
-    expect(out).toMatch(/── Help ──/);
-    expect(out).toMatch(/── System ──/);
+    // Slice 4 (commit 1545e590): /help adopts framedPanel chrome.
+    // Sections render as orange-bar panel titles, not `── Section ──` rules.
+    expect(out).toMatch(/▎\s*Help\b/);
+    expect(out).toMatch(/▎\s*System\b/);
     expect(out).toMatch(/\/help/);
     expect(out).toMatch(/\/quit/);
   });

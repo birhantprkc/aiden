@@ -2006,14 +2006,16 @@ export class ChatSession implements ChatSessionLike {
     const usedTokens = this.modelMetadata.estimateMessageTokens(this.history);
     const maxTokens = limits.contextLength;
 
+    // v4.8.0 Slice 7 hotfix — predictable 1-blank-line rhythm: one
+    // blank above the footer (visual breath after the reply), one
+    // blank below (before the next prompt).
     display.write(
-      display.statusFooter({
+      '\n' + display.statusFooter({
         provider,
         model,
         ctxUsed: usedTokens,
         ctxMax: maxTokens,
         elapsedMs: this.lastTurnElapsedMs,
-        // v4.8.0 Slice 7 — packed info density (wide-terminal additions).
         turnCount: this.turnCount,
         sessionMs: Date.now() - this.startedAt,
         state:     this.lastTurnOutcome,

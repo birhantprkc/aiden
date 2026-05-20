@@ -152,6 +152,15 @@ export const glyphs = {
   panel: {
     bar: '▎',
   },
+  /**
+   * v4.8.0 Slice 7 hotfix — hex-dot progress bar pair. Replaces the
+   * generic shaded blocks (▓/░) for a more distinctive Aiden look.
+   * Used by the status footer's context-fill bar.
+   */
+  bar: {
+    filled: '⬢',
+    empty:  '⬡',
+  },
 } as const;
 
 // ── Spacing ───────────────────────────────────────────────────────────────

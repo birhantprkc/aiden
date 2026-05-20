@@ -476,12 +476,16 @@ export class Display {
    * Returns one indented line with a trailing newline.
    */
   agentHeader(): string {
-    const bar = this.skin.applyColors('┃', 'brand');
+    // v4.8.0 Slice 7 hotfix — replace v4.7 ┃ heavy-vertical with the
+    // Slice 4 framedPanel bar `▎` so reply chrome matches /help,
+    // approval prompt, and other Slice 4+ surfaces. Trailing `\n\n`
+    // (was `\n`) puts one blank between header and first content row.
+    const bar = this.skin.applyColors(glyphs.panel.bar, 'brand');
     const head = this.skin.applyColors('Aiden', 'brand');
     if (process.env.AIDEN_UI_TIMESTAMPS === '1') {
-      return `${this.timestampPrefix()}  ${bar} ${head}\n`;
+      return `${this.timestampPrefix()}  ${bar} ${head}\n\n`;
     }
-    return `  ${bar} ${head}\n`;
+    return `  ${bar} ${head}\n\n`;
   }
 
   /**
@@ -492,7 +496,12 @@ export class Display {
    * surface.
    */
   printTurnSeparator(): void {
-    this.out.write(`  ${this.rule()}\n\n`);
+    // v4.8.0 Slice 7 hotfix — drop the trailing blank line. Inquirer's
+    // own prompt leading newline + the Aiden header's leading 2-space
+    // indent provide enough breathing room; the extra blank was
+    // stacking with other emit points to produce 3+ blank lines
+    // between user prompt and reply.
+    this.out.write(`  ${this.rule()}\n`);
   }
 
   /**
@@ -784,9 +793,11 @@ export class Display {
     const filled = Math.round((pct / 100) * barW);
     const ctxKind: 'success' | 'warn' | 'error' =
       pct < 60 ? 'success' : pct < 85 ? 'warn' : 'error';
+    // v4.8.0 Slice 7 hotfix — hex-dot pair from tokens.bar replaces
+    // the generic shaded-block bar for a more distinctive Aiden look.
     const bar =
-      sk.applyColors('▓'.repeat(filled), ctxKind) +
-      sk.applyColors('░'.repeat(barW - filled), 'muted');
+      sk.applyColors(glyphs.bar.filled.repeat(filled), ctxKind) +
+      sk.applyColors(glyphs.bar.empty.repeat(barW - filled), 'muted');
     const ctxRatio = `${formatCompactTokens(args.ctxUsed)}/${formatCompactTokens(args.ctxMax)}`;
     const ctxPctText = `${pct}%`;
 
@@ -807,8 +818,12 @@ export class Display {
     const turnSeg = args.turnCount !== undefined
       ? `${sk.applyColors(glyphs.status.turn, 'muted')} ${sk.applyColors(String(args.turnCount), 'agent')}`
       : '';
-    const sessionSeg = args.sessionMs !== undefined
-      ? `${sk.applyColors(glyphs.status.timer, 'muted')} ${sk.applyColors(formatElapsedShort(args.sessionMs), 'muted')}`
+    // v4.8.0 Slice 7 hotfix — ⏱ slot now shows per-turn elapsed time
+    // (was session uptime — over-engineered; user expects per-turn at
+    // the right edge). `sessionMs` plumbed-but-unused stays for
+    // backward compat with the field name.
+    const sessionSeg = args.elapsedMs !== undefined
+      ? `${sk.applyColors(glyphs.status.timer, 'muted')} ${sk.applyColors(formatElapsedShort(args.elapsedMs), 'muted')}`
       : '';
     const ctxSegFull = `${sk.applyColors(ctxRatio, 'muted')} ${bar} ${sk.applyColors(ctxPctText, ctxKind)}`;
     const ctxSegCompact = `${bar} ${sk.applyColors(ctxPctText, ctxKind)}`;

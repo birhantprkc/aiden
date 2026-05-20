@@ -30,10 +30,11 @@ describe('toolTrail constants', () => {
 
 describe('iconForTool — exact-match category routing', () => {
   it('file_read → reading', () => {
-    expect(iconForTool('file_read')).toEqual({ icon: '👁', verb: 'reading' });
+    // a99d6178: VS16 appended for emoji-presentation width consistency.
+    expect(iconForTool('file_read')).toEqual({ icon: '👁️', verb: 'reading' });
   });
   it('file_write → writing', () => {
-    expect(iconForTool('file_write')).toEqual({ icon: '✏', verb: 'writing' });
+    expect(iconForTool('file_write')).toEqual({ icon: '✏️', verb: 'writing' });
   });
   it('skill_view → running', () => {
     expect(iconForTool('skill_view')).toEqual({ icon: '⚡', verb: 'running' });
