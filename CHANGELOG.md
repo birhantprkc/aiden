@@ -1,3 +1,23 @@
+## v4.6.2 — 2026-05-20
+
+### Security
+- Fix critical SSRF in transitive `form-data@2.3.x` (GHSA scoped via `request` chain). Scoped override pins `form-data >= 2.5.5` along that path while keeping direct `form-data` at v4.
+- Bump direct `ws` 8.20.0 → 8.20.1 (regex DoS, GHSA-3h5v-q93c-6h6q).
+- Pin transitive `qs >= 6.14.1`, `tough-cookie >= 4.1.3`, `protobufjs >= 7.5.8` via npm `overrides`.
+- Bump `next` to 16.2.6 in `dashboard-next` (covers 11 stacked Next.js CVEs).
+- Pin `postcss >= 8.5.10` in dashboard overrides (transitive vuln in next's bundled postcss).
+- Dependabot count: 19 → 4 residuals, no user-facing behavior change.
+
+### Known issues
+- 4 residual alerts chain through deprecated `request` (via `node-telegram-bot-api`). `request` will never be patched upstream. Real-world risk in Aiden's usage is essentially zero (bot lib calls Telegram API with no user-controlled URLs). Full fix requires swapping to a maintained telegram client — scoped for v4.7.x.
+
+### Notes
+- No application code changed. Dependency overrides only.
+- 56 tools still register. Build clean.
+- Carries forward all v4.6.1 onboarding work.
+
+---
+
 ## v4.6.1 — 2026-05-20
 
 ### Onboarding redesign
