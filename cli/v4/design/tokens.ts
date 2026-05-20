@@ -1,0 +1,174 @@
+/**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
+ * cli/v4/design/tokens.ts — v4.8.0 Slice 2 design-system foundation.
+ *
+ * Color, glyph, and spacing tokens consumed by every subsequent slice
+ * (tables, panels, status bar, markdown, loading state). Hex strings
+ * here parallel the RGB tuples in `skinEngine.ts` — tokens.ts is the
+ * design intent, skinEngine is the runtime color authority for
+ * `applyColors(text, kind)`. Renderer slices (3+) consume these.
+ * isVerbose() reads env at call time (Ollama-options precedent).
+ */
+
+// Re-export so consumers can import the trail gutter from tokens
+// alongside the rest of the design system. The original constant
+// stays at its current home for backward compatibility with code
+// that imports from `display/toolTrail` directly.
+export { TRAIL_PIPE } from '../display/toolTrail';
+
+// ── Colors ────────────────────────────────────────────────────────────────
+
+/**
+ * Hex color tokens. Mirrors skinEngine RGB tuples for existing kinds;
+ * adds `content.tertiary`, `semantic.info`, `surface.*` (renderer
+ * slices propagate these to skinEngine). Content primary lifted
+ * `#e0e0e0` → `#e8ebf0` for legibility on dark terminals.
+ */
+export const colors = {
+  brand: {
+    /** Aiden signature orange — already used by skinEngine's `brand`. */
+    primary: '#FF6B35',
+    /** 30%-luma brand orange for borders and dim brand surfaces. */
+    muted:   '#7a3119',
+  },
+  content: {
+    /** Brightest text — primary reply content, headings on dark bg. */
+    primary:   '#e8ebf0',
+    /** Warm muted — gutter, secondary detail, post-action timeline. */
+    secondary: '#b8a89a',
+    /** Least-important text — captions, dim status, deprecated rows. */
+    tertiary:  '#6a6a6a',
+  },
+  semantic: {
+    success: '#7fc28b',
+    warn:    '#e0a040',
+    error:   '#e05a5a',
+    info:    '#7da7c7',
+  },
+  surface: {
+    /** Terminal background reference; tokens never paint bg directly. */
+    bg:       '#0d0e10',
+    /** Elevated panel fill (Slice 4 cards / boxed surfaces). */
+    elevated: '#16181b',
+    /** Panel borders — frames around tables, capability cards. */
+    border:   '#2a2a2a',
+    /** Section dividers — between boot card and REPL, between events. */
+    divider:  '#3a3a3a',
+  },
+} as const;
+
+// ── Glyphs ────────────────────────────────────────────────────────────────
+
+/**
+ * Centralized glyph vocabulary. Four namespaces — `event` (ui_* row
+ * glyphs), `status` (boot/footer chrome), `util` (bullets, dividers,
+ * checks), `trail` (tool-trail row prefix). Renderer slices (3+)
+ * replace inline literals with these references.
+ */
+export const glyphs = {
+  event: {
+    /** ui_task_update status:'running' */
+    running:    '⟳',
+    /** ui_task_done status:'success' */
+    done:       '✓',
+    /** ui_task_done status:'failure' */
+    fail:       '✗',
+    /** ui_task_done status:'blocked' / hard-blocked */
+    blocked:    '⊘',
+    /** ui_task_update status:'paused' */
+    paused:     '⏸',
+    /** ui_task_update status:'blocked' (soft block, awaiting input) */
+    hardBlock:  '⛔',
+    /** ui_approval_request leading glyph + ui_toast kind:'warning' */
+    warning:    '⚠',
+    /** ui_toast kind:'info' */
+    info:       'ℹ',
+    /** ui_command_result header glyph */
+    cmd:        '▸',
+    /** ui_artifact_created kind:'file' */
+    file:       '📄',
+    /** ui_artifact_created kind:'skill' */
+    skill:      '🛠',
+    /** ui_artifact_created kind:'directory' */
+    directory:  '📁',
+  },
+  status: {
+    /** User-prompt prefix + Aiden brand triangle (activityIndicator). */
+    triangle: '▲',
+    /** Solid filled dot — used for `●` status markers. */
+    dot:      '●',
+    /** Hollow dot — companion to `dot` for inactive states. */
+    dotOpen:  '○',
+    /** Status footer column separator. */
+    sep:      '│',
+  },
+  util: {
+    /** Section / row divider. */
+    divider:    '─',
+    /** Solid bullet for list rows. */
+    bullet:     '●',
+    /** Hollow bullet (inactive / unselected). */
+    bulletOpen: '○',
+    /** Mid-dot — existing skin bullet for compact lists. */
+    midDot:     '•',
+    /** Check-success — heavier than ui-event `✓` for emphasis. */
+    check:      '✔',
+    /** Inline arrow — submenu, breadcrumb. */
+    arrow:      '›',
+    /** Trail-style horizontal arrow — ui_command_result header. */
+    triArrow:   '▸',
+  },
+  trail: {
+    /** Tool-trail gutter character. Re-exported from toolTrail.ts. */
+    gutter: '┊' as const,
+  },
+} as const;
+
+// ── Spacing ───────────────────────────────────────────────────────────────
+
+/**
+ * Integer spacing tokens. 0-indexed column counts; subagent depth
+ * indent is INSIDE the gutter (`┊` stays at col 0, indent shifts the
+ * glyph + content right).
+ */
+export const spacing = {
+  indent: {
+    /** Column where the trail gutter `┊` lands. */
+    gutter:           0,
+    /** Column where the event glyph lands (after `┊` + space). */
+    glyph:            2,
+    /** Column where primary content text lands (after glyph + space). */
+    content:          4,
+    /** Column where secondary detail text lands (after primary + space). */
+    detail:           6,
+    /** Spaces per subagent depth level (inside the gutter). */
+    subagentPerDepth: 2,
+  },
+  between: {
+    /** Blank rows between related events in the same group. */
+    sameGroup:    0,
+    /** Blank rows between event groups. */
+    groups:       1,
+    /** Blank rows between top-level sections (boot card → REPL → events). */
+    sections:     2,
+  },
+} as const;
+
+// ── Verbose-mode env-gated flag ───────────────────────────────────────────
+
+/** Env var name; Slice 5 consumes via isVerbose() to gate debug surfaces. */
+export const VERBOSE_MODE_ENV = 'AIDEN_VERBOSE';
+
+/**
+ * Verbose flag, read at call time. Only literal `'1'` enables; any
+ * other value (`'true'`, `'yes'`, etc.) is off so the gate stays
+ * unambiguous. Matches the Ollama-options env-time-read precedent.
+ */
+export function isVerbose(): boolean {
+  return process.env[VERBOSE_MODE_ENV] === '1';
+}
