@@ -56,12 +56,14 @@ export function renderSuccessScreen(opts: SuccessScreenOptions = {}): void {
   }
 
   // v4.8.0 Slice 10b — Aiden-native framed panel chrome. Each row
-  // carries the orange `▎` bar; content (title + examples + closing
+  // carries the orange bar; content (title + examples + closing
   // hint) preserved verbatim so content-level test assertions hold.
+  // v4.8.0 Slice 11c — `▎` swapped for `│` (U+2502); same swap as
+  // glyphs.panel.bar in the design tokens.
   const w = termWidth();
   const sepW = Math.min(w - 4, 64);
   const narrow = w < 60;
-  const bar = c.primary('▎');
+  const bar = c.primary('│');
   const divider = c.muted('─'.repeat(sepW - 2));
   const line = (s: string) => `  ${bar}  ${s}`;
 

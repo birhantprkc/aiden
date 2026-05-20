@@ -111,7 +111,9 @@ function renderDisclaimerBody(version: string): string {
 
   // Slice 10c framed-panel chrome. Orange bar at col 2; content + 2
   // inner spaces; muted `─` divider between sections.
-  const bar = c.primary('▎');
+  // v4.8.0 Slice 11c — `▎` swapped for `│` (U+2502); same swap as
+  // glyphs.panel.bar in the design tokens.
+  const bar = c.primary('│');
   const divider = c.muted('─'.repeat(innerW - 2));
   const line = (s: string) => `  ${bar}  ${s}\n`;
 

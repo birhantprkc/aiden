@@ -168,12 +168,20 @@ export const glyphs = {
    * Aiden-native framed-panel chrome (Slice 4). Left-edge accent bar
    * gives panels brand identity without a closing box; asymmetric
    * chrome (top + bottom dividers, no corners) reads as intentional
-   * Aiden signature rather than borrowed pattern. `bar` is the
-   * one-eighth solid block — widely supported in fonts; falls back
-   * gracefully to `|` on dumb sinks.
+   * Aiden signature rather than borrowed pattern.
+   *
+   * v4.8.0 Slice 11c — bar glyph swapped from `▎` (U+258E LEFT ONE
+   * QUARTER BLOCK) to `│` (U+2502 BOX DRAWING LIGHT VERTICAL).
+   * `▎` rendered as outline-tofu on Cascadia / common Windows
+   * ConPTY fonts; `│` is universally supported across Consolas,
+   * Cascadia, SF Mono, JetBrains Mono, etc. (same source as the
+   * existing `chrome.vLine`). Brand identity now carried by colour,
+   * not by an exotic codepoint. Propagates to all panel surfaces:
+   * /help, approval prompt, Aiden reply header, setup wizard,
+   * Built solo card, and the framed-panel renderer.
    */
   panel: {
-    bar: '▎',
+    bar: '│',
   },
   /**
    * v4.8.0 Slice 10d — rounded heavy frame for identity / credits

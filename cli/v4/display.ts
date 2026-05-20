@@ -1350,12 +1350,19 @@ export class Display {
     // Running row — muted pipe, raw icon, tool-colored verb, muted detail.
     // The optional `running Ns…` tail appears once the tool crosses the
     // 1-second mark; the tick interval below redraws this row every 1s.
+    //
+    // v4.8.0 Slice 11c — double-space between `${glyph}` and `${padVerb}`.
+    // Emoji-class icons (`👁️`, `✏️`, `📋`, `🌐`, etc.) render 2-cell-wide
+    // visually on Windows ConPTY but the cursor/column tracker treats
+    // them as 1 cell, so a single trailing space is visually swallowed
+    // by the emoji's right cell. Two spaces guarantees one visible gap
+    // regardless of how the terminal measures the glyph.
     const runningRow = (): string => {
       const elapsed = Date.now() - startedAt;
       const liveSuffix = elapsed >= 1000
         ? `  ${sk.applyColors(`running ${formatToolDuration(elapsed)}…`, 'muted')}`
         : '';
-      return `${sk.applyColors(TRAIL_PIPE, 'muted')} ${glyph} ` +
+      return `${sk.applyColors(TRAIL_PIPE, 'muted')} ${glyph}  ` +
              `${sk.applyColors(padVerb(verb), 'tool')} ` +
              `${sk.applyColors(detail, 'muted')}${liveSuffix}\n`;
     };
@@ -1363,7 +1370,7 @@ export class Display {
     // Outcome row — entire line colored by outcome kind.
     const outcomeRow = (suffix: string, kind: ColorKindForBracket): string => {
       const content =
-        `${TRAIL_PIPE} ${glyph} ${padVerb(verb)} ${detail}` +
+        `${TRAIL_PIPE} ${glyph}  ${padVerb(verb)} ${detail}` +
         (suffix ? `  ${suffix}` : '');
       return `${sk.applyColors(content, kind)}\n`;
     };
@@ -1482,9 +1489,11 @@ export class Display {
         // back over the retry counter with `running Ns…`.
         stopTick();
         // Update the running row with retry count.
+        // v4.8.0 Slice 11c — double-space between glyph and verb (see
+        // runningRow comment above for the emoji-width rationale).
         eraseLast();
         const content =
-          `${TRAIL_PIPE} ${glyph} ${padVerb(verb)} ${detail}  retry ${n}/${m} …`;
+          `${TRAIL_PIPE} ${glyph}  ${padVerb(verb)} ${detail}  retry ${n}/${m} …`;
         out.write(sk.applyColors(content, 'warn') + '\n');
         printed = true;
       },

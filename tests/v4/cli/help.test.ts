@@ -123,13 +123,14 @@ describe('cli/v4/commands/help — Phase 22 Task 2', () => {
     // Slice 4 (commit 1545e590): /help adopts framedPanel chrome —
     // sections render as panel titles inside the orange-bar frame,
     // not the legacy `── Section ──` rule.
-    expect(out).toMatch(/▎\s*Session\b/);
-    expect(out).toMatch(/▎\s*Configuration\b/);
-    expect(out).toMatch(/▎\s*Identity\b/);
-    expect(out).toMatch(/▎\s*System\b/);
-    expect(out).toMatch(/▎\s*Authentication\b/);
-    expect(out).toMatch(/▎\s*Help\b/);
-    expect(out).toMatch(/▎\s*Skills\b/);
+    // v4.8.0 Slice 11c — panel bar swapped ▎ → │ (universal-font glyph).
+    expect(out).toMatch(/│\s*Session\b/);
+    expect(out).toMatch(/│\s*Configuration\b/);
+    expect(out).toMatch(/│\s*Identity\b/);
+    expect(out).toMatch(/│\s*System\b/);
+    expect(out).toMatch(/│\s*Authentication\b/);
+    expect(out).toMatch(/│\s*Help\b/);
+    expect(out).toMatch(/│\s*Skills\b/);
   });
 
   it('omits headers for empty buckets', async () => {
@@ -149,12 +150,13 @@ describe('cli/v4/commands/help — Phase 22 Task 2', () => {
 
     // Slice 4 framed-panel chrome — panel title appears (or doesn't)
     // by section presence; the legacy `── Section ──` rule is gone.
-    expect(out).toMatch(/▎\s*Session\b/);
-    expect(out).toMatch(/▎\s*Authentication\b/);
-    expect(out).not.toMatch(/▎\s*Configuration\b/);
-    expect(out).not.toMatch(/▎\s*Identity\b/);
-    expect(out).not.toMatch(/▎\s*System\b/);
-    expect(out).not.toMatch(/▎\s*Help\b/);
-    expect(out).not.toMatch(/▎\s*Skills\b/);
+    // v4.8.0 Slice 11c — panel bar swapped ▎ → │ (universal-font glyph).
+    expect(out).toMatch(/│\s*Session\b/);
+    expect(out).toMatch(/│\s*Authentication\b/);
+    expect(out).not.toMatch(/│\s*Configuration\b/);
+    expect(out).not.toMatch(/│\s*Identity\b/);
+    expect(out).not.toMatch(/│\s*System\b/);
+    expect(out).not.toMatch(/│\s*Help\b/);
+    expect(out).not.toMatch(/│\s*Skills\b/);
   });
 });

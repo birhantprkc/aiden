@@ -100,8 +100,9 @@ describe('/help', () => {
     const out = output();
     // Slice 4 (commit 1545e590): /help adopts framedPanel chrome.
     // Sections render as orange-bar panel titles, not `── Section ──` rules.
-    expect(out).toMatch(/▎\s*Help\b/);
-    expect(out).toMatch(/▎\s*System\b/);
+    // v4.8.0 Slice 11c — panel bar swapped ▎ → │ (universal-font glyph).
+    expect(out).toMatch(/│\s*Help\b/);
+    expect(out).toMatch(/│\s*System\b/);
     expect(out).toMatch(/\/help/);
     expect(out).toMatch(/\/quit/);
   });

@@ -20,9 +20,10 @@ describe('framedPanel — v4.8.0 Slice 4 Aiden-native chrome', () => {
     // Slice 4 hotfix — bar lands at col 2 (after 2-space indent), not
     // col 0. Don't `.trim()` the output before splitting because that
     // strips the first line's leading whitespace.
+    // v4.8.0 Slice 11c — panel bar swapped ▎ → │ (universal-font glyph).
     const physicalLines = out.split('\n').filter(l => l.length > 0);
     for (const line of physicalLines) {
-      expect(line.startsWith('  ▎')).toBe(true);
+      expect(line.startsWith('  │')).toBe(true);
     }
   });
 
@@ -98,7 +99,8 @@ describe('framedPanel — v4.8.0 Slice 4 Aiden-native chrome', () => {
     expect(out).not.toContain('…');
     // Should produce at least 2 wrapped continuation lines (so the
     // row body occupies ≥ 3 panel lines: 2 wrap + the cmd-leading line).
-    const bodyLines = out.split('\n').filter(l => l.includes('▎  '));
+    // v4.8.0 Slice 11c — panel bar swapped ▎ → │ (universal-font glyph).
+    const bodyLines = out.split('\n').filter(l => l.includes('│  '));
     expect(bodyLines.length).toBeGreaterThan(2);
   });
 

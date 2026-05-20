@@ -183,13 +183,14 @@ describe('renderApprovalBox (Phase 22 Task 5B)', () => {
     reason: 'destructive operation',
   };
 
-  it('Slice 6 hotfix: every content line carries the 2-space indent + ▎ accent bar', () => {
+  it('Slice 6 hotfix: every content line carries the 2-space indent + │ accent bar', () => {
     const display = makeDisplay({ mono: true });
     const out = renderApprovalBox(SAMPLE_REQ as any, display);
     // Output leads + trails with a blank line for breathing room;
     // every non-blank line carries the indented bar.
+    // v4.8.0 Slice 11c — panel bar swapped ▎ → │ (universal-font glyph).
     for (const line of out.split('\n').filter(l => l.length > 0)) {
-      expect(line.startsWith('  ▎')).toBe(true);
+      expect(line.startsWith('  │')).toBe(true);
     }
     // The ASCII-box corners are gone.
     expect(out).not.toContain('┌');
