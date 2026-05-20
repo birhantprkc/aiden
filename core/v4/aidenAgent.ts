@@ -707,6 +707,13 @@ export class AidenAgent {
     );
 
     // 9. Honesty post-loop scan (only if loop ended with a normal stop).
+    //
+    // v4.7.0 Phase 2.3 — the verifier now records deterministic
+    // outcome events from `toolCallTrace` (not regex over the
+    // assistant's text). When `findings.length > 0` AND mode is
+    // `enforce`, it returns an append-only `footer` we concatenate
+    // to `finalContent`. The model's text is NEVER rewritten —
+    // that was the v4.6.x failure mode this verifier replaces.
     let honestyFindings: HonestyFinding[] | undefined;
     let finalContent = loopResult.finalContent;
     if (this.honestyEnforcement && loopResult.finishReason === 'stop') {
@@ -716,8 +723,9 @@ export class AidenAgent {
           loopResult.messages,
           loopResult.toolCallTrace,
         );
-        if (!scan.passed) {
-          honestyFindings = scan.findings;
+        honestyFindings = scan.findings;
+        if (scan.footer) {
+          finalContent = `${finalContent}\n\n${scan.footer}`;
         }
       } catch {
         /* honesty failures must not break the turn */
@@ -1338,6 +1346,15 @@ export class AidenAgent {
           result:   result.result,
           error:    result.error,
           verified: this.resolveVerifiedFlag?.(result),
+          // v4.7.0 Phase 2.3 — stamp the handler's `mutates` flag
+          // at dispatch time so the post-loop honesty verifier can
+          // distinguish mutating vs read-only failures without
+          // needing a registry handle. Defaults to `false` for
+          // unknown tools (the resolver returns undefined) — read-
+          // only tools that error are surfaced via the tool-trail
+          // row already; the verifier deliberately stays quiet
+          // about them.
+          handlerMutates: this.resolveMutates?.(call.name) ?? false,
           // v4.2 Phase 1 — verification surfaces alongside the trace
           // entry for downstream callers (chatSession, loopTrace,
           // future RecoveryReport). Undefined when TCE is off.

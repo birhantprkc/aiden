@@ -5,26 +5,41 @@
  * Aiden — local-first agent.
  */
 /**
- * moat/honestyEnforcement.ts — Aiden v4.7.0 (transitional stub)
+ * moat/honestyEnforcement.ts — Aiden v4.7.0 (Phase 2.3 — outcome-based verifier)
  *
- * The regex-based claim scanner that previously inspected assistant
- * text against the tool trace has been removed in v4.7.0 Phase 2.2.
- * The outcome-based recorder that replaces it lands in Phase 2.3.
+ * The regex-based natural-language claim scanner (deleted in Phase 2.2)
+ * has been replaced with a deterministic outcome recorder that consumes
+ * `toolCallTrace` structurally. Two failure modes are recorded:
  *
- * Final shape (wired in Phase 2.3):
- *   off      — bypass.
- *   detect   — DEFAULT. Record events from toolCallTrace structurally;
- *              no user-visible output.
- *   enforce  — Record events + append a footer to the assistant reply
- *              summarising unverified outcomes. Never rewrites.
+ *   1. mutation_errored  — a tool tagged `mutates: true` (in the
+ *      registry, stamped onto trace entries at dispatch time via
+ *      `handlerMutates`) returned an `error` envelope. Path is
+ *      extracted from `result.path` when present.
  *
- * Critical invariant for memory (carries over to Phase 2.3):
- *   Every memory_add / memory_replace / memory_remove tool result
- *   carries a `verified` flag (per Phase 9 MemoryGuard). The new
- *   recorder MUST treat verified=false as an unverified-outcome event.
- *   This was the v3 C20/C21 lying surface.
+ *   2. memory_unverified — a memory_* tool's result carries
+ *      `verified === false` (per Phase 9 MemoryGuard). This was
+ *      the v3 C20/C21 lying surface and remains the only memory-
+ *      specific check the verifier performs.
  *
- * Status: PHASE 2.2 (delete stage). check() is a no-op until 2.3.
+ * Modes:
+ *   off      — bypass entirely. No events recorded.
+ *   detect   — Record events; never user-visible. `findings` populated;
+ *              no `footer`.
+ *   enforce  — DEFAULT. Record events + append a short footer to the
+ *              assistant reply summarising the unverified outcomes.
+ *              The footer is APPEND-ONLY — the assistant's text is
+ *              never rewritten. (This is the key behaviour change vs
+ *              v4.6.x — append-only, never an in-place edit.)
+ *
+ * What the verifier intentionally does NOT do (delta vs the deleted
+ * scanner):
+ *   - It does not look at the assistant's natural-language text at all.
+ *     There's no regex matching of English verbs to tool names.
+ *   - It does not emit `no_tool_call` findings. The previous "model
+ *     claimed X but no tool fired" failure mode is gone — that was
+ *     the false-refusal class. We only record OUTCOMES that ran.
+ *   - It does not mutate `loopResult.messages`. The caller appends
+ *     the footer to its own `finalContent` string variable.
  */
 
 import type { ProviderAdapter, Message } from '../providers/v4/types';
@@ -54,12 +69,40 @@ export interface HonestyResult {
   confidence: number;
   originalResponse: string;
   /**
-   * Phase 2.3 replaces this with `footer?: string` (append-only).
-   * Kept in this transitional commit so the existing call site in
-   * core/v4/aidenAgent.ts compiles. Always undefined here.
+   * v4.7.0 Phase 2.3 — append-only footer summarising unverified
+   * outcomes. Populated only when `mode === 'enforce'` AND
+   * `findings.length > 0`. The caller is expected to concatenate
+   * this to `finalContent` (NOT to rewrite the assistant's text).
+   * Replaces the prior `correctedResponse` field that triggered
+   * in-place rewrites — the failure mode this verifier was built
+   * to eliminate.
    */
-  correctedResponse?: string;
+  footer?: string;
 }
+
+/**
+ * v4.7.0 Phase 2.3 — structured event recorded for each unverified
+ * tool outcome. Translated to a `HonestyFinding` for back-compat
+ * with the existing call site.
+ *
+ * `path` (when present) is extracted from `result.path` for any
+ * tool whose result envelope carries it (file_write, file_patch,
+ * file_delete, file_move, file_copy, etc.).
+ */
+export type HonestyEvent =
+  | { kind: 'mutation_errored'; tool: string; reason: string; path?: string }
+  | { kind: 'memory_unverified'; tool: string; reason: string };
+
+/**
+ * Memory tools whose results carry the `verified` flag set by
+ * MemoryGuard. The list is closed — adding a new memory_* tool
+ * means extending this set.
+ */
+const MEMORY_TOOLS: ReadonlySet<string> = new Set([
+  'memory_add',
+  'memory_replace',
+  'memory_remove',
+]);
 
 /** Shape of a single tool-call entry in the trace inspected by Honesty. */
 export interface HonestyTraceEntry {
@@ -70,6 +113,15 @@ export interface HonestyTraceEntry {
   verified?: boolean;
   /** Set when the tool errored (would never satisfy a positive claim). */
   error?: string;
+  /**
+   * v4.7.0 Phase 2.3 — `handler.mutates` flag, stamped at dispatch
+   * time so the verifier doesn't need a registry handle. Drives the
+   * `mutation_errored` event: only mutating tools that errored produce
+   * an unverified-outcome finding. Read-only tools that error are
+   * surfaced to the user via the tool-trail row already; the
+   * verifier deliberately stays quiet about them.
+   */
+  handlerMutates?: boolean;
   /**
    * v4.2 Phase 1 — per-tool verifier classification of this result.
    * Populated only when TCE is enabled (default ON as of v4.2
@@ -130,6 +182,45 @@ export interface HonestyTraceEntry {
   };
 }
 
+/**
+ * Read `result.path` when present (file_* tools' result envelopes
+ * carry it). Returns undefined otherwise. Used only for cosmetic
+ * footer detail — never affects pass/fail outcome.
+ */
+function extractPath(result: unknown): string | undefined {
+  if (result && typeof result === 'object' && 'path' in result) {
+    const p = (result as { path?: unknown }).path;
+    if (typeof p === 'string') return p;
+  }
+  return undefined;
+}
+
+/**
+ * Translate a `HonestyEvent` to the legacy `HonestyFinding` shape so
+ * existing downstream consumers (chatSession, telemetry) keep working.
+ * The fine-grained kind is preserved via `reason`.
+ */
+function toFinding(event: HonestyEvent): HonestyFinding {
+  switch (event.kind) {
+    case 'mutation_errored':
+      return {
+        claim:        event.tool,
+        expectedTool: event.tool,
+        found:        false,
+        confidence:   1,
+        reason:       'tool_errored',
+      };
+    case 'memory_unverified':
+      return {
+        claim:        event.tool,
+        expectedTool: event.tool,
+        found:        false,
+        confidence:   1,
+        reason:       'memory_verified_false',
+      };
+  }
+}
+
 export class HonestyEnforcement {
   private mode: HonestyMode;
 
@@ -153,24 +244,94 @@ export class HonestyEnforcement {
   }
 
   /**
-   * Transitional no-op. Phase 2.3 implements the outcome-based
-   * recorder that consumes `toolCallTrace` structurally (using the
-   * tool registry's `mutates` flag) and produces append-only events.
+   * v4.7.0 Phase 2.3 — record deterministic unverified outcomes from
+   * the per-turn tool trace. Pure function; no I/O, no side effects.
+   */
+  recordOutcomes(trace: HonestyTraceEntry[]): HonestyEvent[] {
+    const events: HonestyEvent[] = [];
+    for (const t of trace) {
+      if (t.error && t.handlerMutates === true) {
+        events.push({
+          kind:   'mutation_errored',
+          tool:   t.name,
+          reason: t.error,
+          path:   extractPath(t.result),
+        });
+        continue;
+      }
+      if (MEMORY_TOOLS.has(t.name) && t.verified === false) {
+        events.push({
+          kind:   'memory_unverified',
+          tool:   t.name,
+          reason: 'verification failed',
+        });
+      }
+    }
+    return events;
+  }
+
+  /**
+   * v4.7.0 Phase 2.3 — render the append-only footer used in enforce
+   * mode. Caller concatenates with a blank line; we own the lines
+   * inside. Format: one summary line + one row per event.
+   */
+  buildFooter(events: HonestyEvent[]): string {
+    const lines: string[] = [];
+    lines.push(`⚠️ Verifier: ${events.length} tool outcome(s) not verified this turn.`);
+    for (const e of events) {
+      if (e.kind === 'mutation_errored') {
+        const where = e.path ? ` (path: ${e.path})` : '';
+        lines.push(`- ${e.tool}${where}: errored — ${e.reason}`);
+      } else {
+        lines.push(`- ${e.tool}: not verified`);
+      }
+    }
+    return lines.join('\n');
+  }
+
+  /**
+   * v4.7.0 Phase 2.3 — entry point. Records outcome events from the
+   * trace, converts to legacy `HonestyFinding[]` for downstream
+   * consumers, and renders an append-only footer in enforce mode.
    *
-   * Returns a passing result with empty findings so the existing
-   * call site at core/v4/aidenAgent.ts can still resolve a
-   * `HonestyResult` shape during the inter-phase build.
+   * NEVER rewrites `response`. The returned `footer` is what the
+   * caller appends; the original text is preserved verbatim.
+   *
+   * Off mode short-circuits without touching the trace — minimal cost
+   * for users who opt out.
    */
   async check(
     response: string,
     _messages: Message[],
-    _toolCallTrace: HonestyTraceEntry[],
+    trace: HonestyTraceEntry[],
   ): Promise<HonestyResult> {
+    if (this.mode === 'off') {
+      return {
+        passed:           true,
+        findings:         [],
+        confidence:       1,
+        originalResponse: response,
+      };
+    }
+    const events = this.recordOutcomes(trace);
+    const findings = events.map(toFinding);
+    const passed = findings.length === 0;
+    let footer: string | undefined;
+    if (this.mode === 'enforce' && !passed) {
+      footer = this.buildFooter(events);
+    }
+    if (!passed) {
+      this.logger?.(
+        'info',
+        `honesty: ${events.length} unverified outcome(s) this turn`,
+      );
+    }
     return {
-      passed: true,
-      findings: [],
-      confidence: 1,
+      passed,
+      findings,
+      confidence:       1,
       originalResponse: response,
+      footer,
     };
   }
 }
