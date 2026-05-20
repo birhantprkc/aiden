@@ -1,3 +1,40 @@
+## v4.7.0 — 2026-05-20
+
+### Honesty verifier — outcome-based, no more false refusals
+
+The post-loop honesty verifier no longer scans natural-language text against a hardcoded English-verb table. It now records deterministic outcomes from the tool trace: mutating tools that errored, and memory_* tools that came back with `verified: false`. Everything else is silence.
+
+What this fixes:
+- The "I should not claim actions" false-refusal class is gone. If the model says "I checked the docs" and the trace shows a `web_search` call, the verifier is silent — no rewriting, no rebuttal.
+- Tool aliases / phantom names that never matched a real tool (`open_browser`, `run_python`, `run_node`, `memory_upsert`, `memory_forget`, `model_switch`, `web_fetch`) are gone — they were unmatched anyway.
+- Assistant message history is never rewritten. The previous `correctedResponse` rewrite path that mutated `loopResult.messages` in place is removed.
+
+What the verifier still catches:
+- `mutation_errored` — a tool tagged `mutates: true` returned an `error`. Path is extracted from `result.path` when present.
+- `memory_unverified` — a memory_add / memory_replace / memory_remove tool returned with `verified: false`. This was the v3 C20/C21 lying surface and the only remaining memory-specific check.
+
+Enforce mode appends a one-paragraph footer summarising unverified outcomes (one summary line + one row per event). The assistant's text is left intact above the footer. Detect mode records events without user-visible output. Off mode bypasses entirely.
+
+### Scope
+
+- New: `HonestyEnforcement` runs in subagents (mode `detect`) and daemon agents (mode mirrors REPL config, default `enforce`). Previously REPL-only because regex false-refusals would have broken autonomous contexts; the new verifier is cheap enough to run everywhere.
+- New: `HonestyTraceEntry.handlerMutates` flag, stamped at dispatch time from `resolveMutates`.
+- New: `HonestyEvent` union (`mutation_errored | memory_unverified`) returned from `recordOutcomes` for external consumers.
+- Changed: `HonestyResult.correctedResponse` removed, replaced by `HonestyResult.footer` (append-only).
+- Changed: `HonestyEnforcement.check` is a thin orchestrator over `recordOutcomes` + `buildFooter`; both are exposed as callable surfaces for telemetry / external use.
+
+### Tests
+
+- 22 regex-asserting tests deleted, 27 behavioural tests added across `tests/v4/moat/honestyEnforcement.test.ts` and `tests/v4/aidenAgent.moat.test.ts`. Zero remaining honesty-related skips.
+- Coverage: all 3 modes; mutation and memory event paths; legacy trace compatibility; footer aggregation; `originalResponse` preservation; `loopResult.messages` history untouched; regression guard against the "no_tool_call" false-refusal class.
+
+### Known issues (deferred to v4.7.x)
+
+- Integration tests under `tests/v4/integration/` (`aidenAgent.honesty.test.ts`, `aidenAgent.moat.repl.test.ts`) use loose filter patterns that mostly survive the new event shape, but any assertion expecting `no_tool_call` findings will need rebase. Both are gated by `AIDEN_LIVE_*` env vars and excluded from CI.
+- CI still surfaces ~29 pre-existing sandbox-default-list mismatches on Linux/macOS runners (`tests/v4/tools/files.test.ts`, `sandboxFsIntegration.test.ts`, `dryRunIntegration.test.ts`, two cases in `core/sandboxFs.test.ts`, plus two XDG path tests). These predate v4.7.0 and were uncovered when the smoke gate was unblocked in v4.6.2. Not blocking ship.
+
+---
+
 ## v4.6.2 — 2026-05-20
 
 ### Security
