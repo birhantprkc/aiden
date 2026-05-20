@@ -1097,15 +1097,16 @@ export class Display {
     // (Ns) counter hasn't ticked. Slow enough not to flicker on SSH
     // / slow ConPTY refresh.
     const TICK_MS = 250;
-    // ▲ glyph in brand orange — the user's primary motif. Dots and
-    // elapsed counter paint muted to keep visual weight on the verb.
-    //
-    // v4.1.4 Phase 3b' (Issue F): the inline "▸▸ Ctrl+C cancel" hint
-    // shipped with Phase 3a was visually noisy on the activity line
-    // and collided with planner-debug dim writes. Dropped per user
-    // feedback; a separate bottom-of-screen footer can be added in
-    // v4.1.5 if wanted, but it must NOT be glued to the indicator.
-    const glyph = sk.applyColors('▲', 'brand');
+    // v4.8.0 Slice 10 — leading glyph swapped from the brand triangle
+    // (▲) to the hourglass (⌛, glyphs.status.timer) to read as a
+    // wait/timing affordance rather than a generic identity marker.
+    // The dots pulse + wave bar still provide motion; the hourglass
+    // is intentionally static so users can read "this is loading"
+    // without animation flicker on slow terminals. The ▲ triangle
+    // stays as the user-prompt prefix elsewhere (display.promptPrefix)
+    // and the status footer identity marker, preserving its role as
+    // the Aiden brand glyph in non-wait contexts.
+    const glyph = sk.applyColors(glyphs.status.timer, 'brand');
 
     // v4.1.5 Issue K — wave-bar state. Snake-scroll: a 3-cell `▰`
     // block slides across 10 cells, wrapping at the right edge. Same

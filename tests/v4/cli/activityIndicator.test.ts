@@ -107,11 +107,15 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     vi.useRealTimers();
   });
 
-  it('TTY: initial paint contains ▲ + verb (NO inline Ctrl+C hint, Phase 3b\' Issue F)', () => {
+  it('TTY: initial paint contains ⌛ + verb (Slice 10 — hourglass replaces ▲)', () => {
     const { d, chunks } = makeDisplay({ tty: true });
     const handle = d.activityIndicator('thinking');
     const out = stripAnsi(chunks.join(''));
-    expect(out).toContain('▲');
+    // v4.8.0 Slice 10 — activity indicator's leading glyph is the
+    // hourglass (⌛), not the brand triangle (▲). Reads as a wait/timing
+    // affordance. The triangle stays as the user-prompt + status-footer
+    // identity glyph.
+    expect(out).toContain('⌛');
     expect(out).toContain('thinking');
     // Issue F: the Ctrl+C cancel hint was visually noisy on the
     // activity line and collided with planner-debug dim writes.
@@ -400,11 +404,11 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     handle.stop();
   });
 
-  it('initial paint includes brand-paint ▲ glyph (skin-aware)', () => {
-    // v4.1.4 Phase 3b' Issue F: the muted "▸▸ Ctrl+C cancel" hint
-    // was dropped from the line, so the ONLY skin paint on initial
-    // render (elapsed < 1s) is the brand-orange ▲. This test
-    // replaces the prior muted-hint sentinel.
+  it('initial paint includes brand-paint ⌛ glyph (Slice 10 — hourglass)', () => {
+    // v4.1.4 Phase 3b' Issue F: the muted "▸▸ Ctrl+C cancel" hint was
+    // dropped from the line, so the ONLY skin paint on initial render
+    // (elapsed < 1s) is the brand-orange leading glyph. v4.8.0 Slice 10
+    // swapped that glyph from ▲ → ⌛ to read as wait/timing.
     const chunks: string[] = [];
     const out = new Writable({
       write(c, _e, cb) { chunks.push(c.toString()); cb(); },
@@ -417,7 +421,7 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     const initial = chunks.join('');
     // Brand orange = #FF6B35 = rgb 255,107,53.
     expect(initial).toContain('\x1b[38;2;255;107;53m');
-    expect(initial).toContain('▲');
+    expect(initial).toContain('⌛');
     handle.stop();
   });
 });
