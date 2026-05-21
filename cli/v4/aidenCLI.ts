@@ -575,11 +575,13 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     });
 
   program
-    .command('mcp <action>')
+    .command('mcp <action> [target] [extraArgs...]')
     .description(
-      'MCP server mode (Phase v4.1-mcp). Actions: serve, status, tools.',
+      'MCP server mode. Actions: serve | status | tools | init <client> | doctor <client> | repair <client>. ' +
+      'Clients (v4.9 Slice 2a): claude, cursor.',
     )
-    .action(async (action: string) => {
+    .allowUnknownOption()
+    .action(async (action: string, target: string | undefined, extraArgs: string[] = []) => {
       if (opts.runMcpHook) {
         await opts.runMcpHook(action);
         return;
@@ -590,6 +592,8 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const code = await runMcpSubcommand(action, {
         writeOut: opts.writeOut,
         writeErr: (t: string) => process.stderr.write(t),
+        args:   extraArgs,
+        target,
       });
       if (code !== 0) process.exit(code);
     });

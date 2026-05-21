@@ -392,13 +392,39 @@ async function wireSubagentFanout(opts: WireOptions): Promise<void> {
 
 export async function runMcpSubcommand(
   action: string,
-  opts: RunMcpOptions = {},
+  opts: RunMcpOptions & { args?: string[]; target?: string } = {},
 ): Promise<number> {
   const writeOut = opts.writeOut ?? ((t: string) => process.stdout.write(t));
   const writeErr = opts.writeErr ?? ((t: string) => process.stderr.write(t));
+  const extraArgs = opts.args ?? [];
+  const target    = opts.target;
 
   switch (action) {
     case 'serve': {
+      // v4.9.0 Slice 2a — `--health-check` flag: spawn the runtime,
+      // emit a single JSON status line on stdout, exit. Used by
+      // `aiden mcp init <client>` to confirm the wired entry actually
+      // launches successfully on the user's machine.
+      if (extraArgs.includes('--health-check') || target === '--health-check') {
+        try {
+          const { registry, skillLoader } = await buildMcpRuntime(opts);
+          const diag = await collectMcpDiagnostics(registry, skillLoader);
+          writeOut(JSON.stringify({
+            status:  'ok',
+            tools:   diag.toolsExposed,
+            skills:  diag.skillsTotal,
+            version: diag.build,
+          }) + '\n');
+          return 0;
+        } catch (err) {
+          writeOut(JSON.stringify({
+            status: 'error',
+            error:  (err as Error).message,
+          }) + '\n');
+          return 1;
+        }
+      }
+
       const { registry, skillLoader, toolContext, logger } =
         await buildMcpRuntime(opts);
 
@@ -464,9 +490,17 @@ export async function runMcpSubcommand(
       return 0;
     }
 
+    case 'init':
+    case 'doctor':
+    case 'repair': {
+      // v4.9.0 Slice 2a — client-config install / diagnose / fix.
+      const { runClientCommand } = await import('./mcpClientInstall');
+      return runClientCommand(action, target, extraArgs, { writeOut, writeErr });
+    }
+
     default: {
       writeErr(`Unknown 'aiden mcp' action: ${action}\n`);
-      writeErr(`Actions: serve | status | tools\n`);
+      writeErr(`Actions: serve | status | tools | init <client> | doctor <client> | repair <client>\n`);
       return 1;
     }
   }
