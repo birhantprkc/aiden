@@ -73,6 +73,13 @@ const NPM_GLOBAL_HINTS = [
   /[/\\]npm-global[/\\]/,
   /[/\\]\.nvm[/\\]versions[/\\]node[/\\][^/\\]+[/\\]lib[/\\]node_modules\b/,
   /Program Files[/\\]nodejs[/\\]node_modules[/\\]aiden-runtime\b/i,
+  // v4.8.1 Slice 2 — Windows user-mode `npm install -g` lands in
+  // `C:\Users\<u>\AppData\Roaming\npm\node_modules\aiden-runtime\`.
+  // The leading `[/\\]npm[/\\]node_modules` hint above usually catches
+  // it, but tests on a non-default `npm config prefix` setup
+  // (Cmder, Scoop, etc.) can land outside the canonical path. The
+  // extra hint here is a belt-and-suspenders explicit AppData match.
+  /[/\\]AppData[/\\]Roaming[/\\]npm[/\\]/i,
 ];
 
 function inferDirs(input: DetectInstallMethodInput): {

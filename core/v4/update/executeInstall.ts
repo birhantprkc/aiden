@@ -111,18 +111,22 @@ export async function executeInstall(
 
   return new Promise<InstallResult>((resolve) => {
     const args: string[] = ['install', '-g', packageSpec];
-    // shell: true on Windows so npm.cmd is found via PATHEXT; on
-    // POSIX we spawn npm directly. Either way the args are validated
-    // (only npm + install + a hardcoded spec by default) — no user
-    // input flows into argv.
+    // v4.8.1 Slice 2 — drop `shell: true`. Node 20+ emits
+    // `DeprecationWarning: Passing args to a child process with shell
+    // option true can lead to security vulnerabilities` whenever
+    // shell:true is paired with an args array. We don't need the
+    // shell either — on Windows we spawn `npm.cmd` explicitly (the
+    // shim that PATHEXT would otherwise resolve to); on POSIX we
+    // spawn `npm` directly. No user input flows into argv on either
+    // path so the prior shell-resolution wasn't load-bearing.
+    const cmd = platform === 'win32' ? 'npm.cmd' : 'npm';
     const spawnOpts: SpawnOptions = {
-      shell: platform === 'win32',
       stdio: ['ignore', 'pipe', 'pipe'],
     };
 
     let child;
     try {
-      child = spawn('npm', args, spawnOpts);
+      child = spawn(cmd, args, spawnOpts);
     } catch (err) {
       resolve({
         success: false,

@@ -35,6 +35,7 @@ import { glyphs } from './design/tokens';
 // callsites in this file with `getBodyWidth()` and adds soft-wrap for
 // code-block lines that previously overflowed the viewport.
 import { getBodyWidth, getIndent, wrap as frameWrap, GUTTER } from './display/frame';
+import { visibleLength } from './box';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const TerminalRenderer = require('marked-terminal').default ?? require('marked-terminal');
@@ -663,6 +664,119 @@ export function getReplyRenderer(): { render: (text: string) => string } {
     // they nest cleanly inside their parent item.
     const out = lines.join('\n');
     return proto._listDepth === 0 ? out + '\n' : out + '\n';
+  };
+
+  // ── v4.8.1 Slice 2 — markdown table override ──────────────────────────
+  //
+  // Why: marked-terminal's default table renderer (cli-table3) auto-
+  // wraps cells but doesn't keep wrap-continuation lines aligned to
+  // the original row — wide tables with 5+ columns fragment into
+  // vertical pipe rails that don't read as rows. The narrow 2-col
+  // tables that smoke-tested fine were within the no-wrap budget.
+  //
+  // Strategy: own the entire render from the marked v15 token object.
+  // Use `parser.parseInline(cell.tokens)` to get ANSI-painted cell
+  // text, then proportionally distribute the terminal-width budget
+  // across columns (clamping to natural max width), wrap each cell
+  // to its column width, and render the box with the same row
+  // height for every cell in the row so visual rows stay tight.
+  //
+  // Token-source the box chars from `glyphs.chrome.*` so a single
+  // glyph swap propagates here automatically (consistent with the
+  // rest of v4.8.x chrome).
+  renderer.table = function (header: unknown, body?: unknown): string {
+    // marked v15 token: { header: [cellTok], rows: [[cellTok]] }.
+    // Older string-based API: (headerHtml, bodyHtml) — we fall back
+    // to a naive concatenation so the reply isn't lost entirely.
+    if (typeof header !== 'object' || header === null) {
+      return String(header ?? '') + (body !== undefined ? String(body) : '') + '\n';
+    }
+    const tok = header as {
+      header?: Array<{ text?: string; tokens?: unknown[] }>;
+      rows?:   Array<Array<{ text?: string; tokens?: unknown[] }>>;
+    };
+    const parser = (this as { parser?: { parseInline?: (t: unknown[]) => string } }).parser;
+    const renderCell = (c: { text?: string; tokens?: unknown[] }): string => {
+      if (c.tokens && parser?.parseInline) {
+        try { return parser.parseInline(c.tokens).trim(); }
+        catch { return (c.text ?? '').trim(); }
+      }
+      return (c.text ?? '').trim();
+    };
+    const headers = (tok.header ?? []).map(renderCell);
+    const rows    = (tok.rows ?? []).map((r) => r.map(renderCell));
+    const cols    = headers.length;
+    if (cols === 0) return '';
+
+    // Layout budget. Reply chrome family lives at col 2.
+    const indent = '  ';
+    const termCols = process.stdout.columns ?? 100;
+    const innerBudget = Math.max(40, Math.min(termCols, 110) - indent.length);
+    // Chrome per row = `│ ` (2) per col + trailing `│` (1) + 1 trailing
+    // space per cell already absorbed in the budget below.
+    const chromeCost  = 3 * cols + 1;
+    const contentBudget = Math.max(cols * 4, innerBudget - chromeCost);
+
+    // Natural width = max(header, body) visible width per column.
+    const naturalW: number[] = headers.map((h, i) => {
+      const hw = visibleLength(h);
+      const cw = rows.reduce((m, r) => Math.max(m, visibleLength(r[i] ?? '')), 0);
+      return Math.max(hw, cw, 1);
+    });
+    // Initial pass: cap each column at the per-column slice of budget.
+    const baseColW = Math.max(4, Math.floor(contentBudget / cols));
+    const colWidths = naturalW.map((w) => Math.min(w, baseColW));
+    // Redistribute leftover (clamped-narrow columns) to wider ones
+    // that still need width. Stop when no column can grow.
+    let leftover = contentBudget - colWidths.reduce((a, b) => a + b, 0);
+    while (leftover > 0) {
+      let grew = false;
+      for (let i = 0; i < cols && leftover > 0; i += 1) {
+        if (colWidths[i] < naturalW[i]) {
+          colWidths[i] += 1;
+          leftover -= 1;
+          grew = true;
+        }
+      }
+      if (!grew) break;
+    }
+
+    // ANSI-aware cell wrap. frameWrap handles colour-code-aware width.
+    const wrapCell = (text: string, w: number): string[] =>
+      w <= 0 ? [''] : frameWrap(text, w, { trim: false, hard: true }).split('\n');
+
+    const sk = getSkinEngine();
+    const ch = glyphs.chrome;
+    const rule = (l: string, m: string, r: string): string =>
+      indent + sk.applyColors(
+        l + colWidths.map((w) => ch.hLine.repeat(w + 2)).join(m) + r,
+        'muted',
+      );
+    const vBar = sk.applyColors(ch.vLine, 'muted');
+    const renderRow = (cells: string[][]): string => {
+      const height = Math.max(...cells.map((c) => c.length), 1);
+      const out: string[] = [];
+      for (let line = 0; line < height; line += 1) {
+        const cellLines = cells.map((cellLines2, ci) => {
+          const cellLine = cellLines2[line] ?? '';
+          const pad = Math.max(0, colWidths[ci] - visibleLength(cellLine));
+          return ' ' + cellLine + ' '.repeat(pad) + ' ';
+        });
+        out.push(indent + vBar + cellLines.join(vBar) + vBar);
+      }
+      return out.join('\n');
+    };
+
+    const wrappedHeader = headers.map((h, i) => wrapCell(h, colWidths[i]));
+    const wrappedRows   = rows.map((r) => r.map((c, i) => wrapCell(c, colWidths[i])));
+    const lines: string[] = [rule(ch.topLeft, ch.teeDown, ch.topRight)];
+    if (headers.length > 0) {
+      lines.push(renderRow(wrappedHeader));
+      lines.push(rule(ch.teeRight, ch.cross, ch.teeLeft));
+    }
+    for (const row of wrappedRows) lines.push(renderRow(row));
+    lines.push(rule(ch.botLeft, ch.teeUp, ch.botRight));
+    return lines.join('\n') + '\n';
   };
 
   cachedRenderer = {

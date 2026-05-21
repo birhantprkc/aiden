@@ -87,7 +87,19 @@ async function runInstall(ctx: SlashCommandContext): Promise<void> {
   ctx.display.write(
     `Installing aiden-runtime v${status.latest} (current: v${status.installed})…\n`,
   );
-  const result = await executeInstall();
+
+  // v4.8.1 Slice 2 — reuse the v4.8.0 sliding-block shimmer indicator
+  // so the user sees motion while npm install runs (typically 5–15s
+  // on a warm cache, longer on cold). The indicator paints to a TTY
+  // only — non-TTY callers (CI, pipes) see the static "Installing…"
+  // line above and the result row below, no shimmer.
+  const indicator = ctx.display.activityIndicator('updating');
+  let result;
+  try {
+    result = await executeInstall();
+  } finally {
+    indicator.stop();
+  }
 
   if (result.success) {
     const v = result.installedVersion ?? status.latest;
@@ -96,7 +108,7 @@ async function runInstall(ctx: SlashCommandContext): Promise<void> {
     return;
   }
 
-  ctx.display.warn(result.error ?? 'Install failed (no error message).');
+  ctx.display.write(`\n  ✗ Update failed: ${result.error ?? 'no error message'}\n`);
 }
 
 // ── v4.5 update system — skip + auto subcommands ───────────────────────────

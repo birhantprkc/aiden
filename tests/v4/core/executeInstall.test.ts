@@ -80,42 +80,53 @@ describe('executeInstall — happy path', () => {
   });
 
   it('passes the canonical `install -g aiden-runtime@latest` args', async () => {
+    // v4.8.1 Slice 2 — platform defaults to the host platform; on
+    // Windows the spawn target is `npm.cmd`, elsewhere `npm`. Default
+    // path here mirrors the host so we don't pin platform.
+    const expectedCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
     const spawnImpl = fakeSpawn({ stdout: '+ aiden-runtime@4.1.3', exitCode: 0 });
     await executeInstall({ spawnImpl: spawnImpl as unknown as Parameters<typeof executeInstall>[0]['spawnImpl'] });
     expect(spawnImpl).toHaveBeenCalledWith(
-      'npm',
+      expectedCmd,
       ['install', '-g', 'aiden-runtime@latest'],
       expect.objectContaining({ stdio: ['ignore', 'pipe', 'pipe'] }),
     );
   });
 
   it('honors a custom packageSpec override (test seam)', async () => {
+    const expectedCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
     const spawnImpl = fakeSpawn({ stdout: '+ aiden-runtime@4.1.4', exitCode: 0 });
     await executeInstall({
       spawnImpl: spawnImpl as unknown as Parameters<typeof executeInstall>[0]['spawnImpl'],
       packageSpec: 'aiden-runtime@beta',
     });
     expect(spawnImpl).toHaveBeenCalledWith(
-      'npm',
+      expectedCmd,
       ['install', '-g', 'aiden-runtime@beta'],
       expect.any(Object),
     );
   });
 
-  it('uses shell:true on win32 (npm.cmd via PATHEXT) and shell:false elsewhere', async () => {
+  it('spawns npm.cmd on win32, npm elsewhere, never with shell:true (v4.8.1 Slice 2)', async () => {
+    // v4.8.1 Slice 2 — `shell: true` paired with an args array
+    // triggers Node 20+ DeprecationWarning. We now spawn `npm.cmd`
+    // explicitly on Windows (no PATHEXT lookup needed) and `npm`
+    // elsewhere. Neither path sets shell:true.
     const winSpawn = fakeSpawn({ stdout: '+ aiden-runtime@4.1.3', exitCode: 0 });
     await executeInstall({
       spawnImpl: winSpawn as unknown as Parameters<typeof executeInstall>[0]['spawnImpl'],
       platform: 'win32',
     });
-    expect(winSpawn.mock.calls[0]?.[2]).toMatchObject({ shell: true });
+    expect(winSpawn.mock.calls[0]?.[0]).toBe('npm.cmd');
+    expect(winSpawn.mock.calls[0]?.[2]?.shell).toBeFalsy();
 
     const linuxSpawn = fakeSpawn({ stdout: '+ aiden-runtime@4.1.3', exitCode: 0 });
     await executeInstall({
       spawnImpl: linuxSpawn as unknown as Parameters<typeof executeInstall>[0]['spawnImpl'],
       platform: 'linux',
     });
-    expect(linuxSpawn.mock.calls[0]?.[2]).toMatchObject({ shell: false });
+    expect(linuxSpawn.mock.calls[0]?.[0]).toBe('npm');
+    expect(linuxSpawn.mock.calls[0]?.[2]?.shell).toBeFalsy();
   });
 });
 
