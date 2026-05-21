@@ -1144,11 +1144,15 @@ export class ChatSession implements ChatSessionLike {
     this.setStatusState({ kind: 'generating', sinceMs: Date.now() });
     // Tier-3.1a: dim full-width rule between the user input echo and
     // the agent reply for clean visual rhythm.
+    //
+    // v4.8.1 Slice 2 hotfix — dropped the prior Phase 26.2.3 trailing
+    // blank `\n`. With Slice 11's activityIndicator leading `\n` and
+    // the indicator's erase-emits-`\n` cursor handoff to `agentHeader`,
+    // that extra blank stacked on top of those gaps and produced 4–5
+    // visible blanks between the user prompt and `▎ Aiden`. The rule
+    // line + indicator+erase handoff alone gives the one-blank-between-
+    // beats rhythm Shiva flagged in smoke.
     this.opts.display.write(`  ${this.opts.display.rule()}\n`);
-    // Phase 26.2.3 — blank line between the user-input echo and the
-    // spinner / response so the eye sees user → agent as separate
-    // beats instead of butting together.
-    this.opts.display.write('\n');
     const turnStartedAt = Date.now();
     const userMsg: Message = { role: 'user', content: userInput };
 

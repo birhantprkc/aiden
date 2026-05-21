@@ -850,9 +850,15 @@ export class Display {
     if (cols >= 120 && stateDot && turnSeg && sessionSeg) {
       segments = [provModel, ctxSegFull, turnSeg, sessionSeg, stateDot];
     } else if (cols >= 100 && turnSeg) {
-      segments = [provModel, ctxSegFull, turnSeg, elapsed];
+      // v4.8.1 Slice 2 hotfix — was `elapsed` (bare); now uses
+      // `sessionSeg` which includes the ⌛ timer glyph. The previous
+      // mid-tier dropped the glyph for "denser" packing, but Shiva's
+      // smoke at 80–110 cols showed only ` 5.1s` (leading space, no
+      // glyph). The glyph is single-cell, cheap, and load-bearing as
+      // the timer's identity affordance.
+      segments = [provModel, ctxSegFull, turnSeg, sessionSeg || elapsed];
     } else {
-      segments = [provModel, ctxSegCompact, elapsed];
+      segments = [provModel, ctxSegCompact, sessionSeg || elapsed];
     }
     return `  ${segments.join(SEP)}`;
   }
