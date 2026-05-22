@@ -99,6 +99,13 @@ import {
   type LogLevel,
 } from '../logger';
 import { reclaimStuckRuns } from './runs/reclaim';
+// v4.9.0 Slice 4 — identity substrate + incarnations table.
+import {
+  loadOrCreateDaemonId,
+  newIncarnationId,
+  currentContext,
+} from '../identity';
+import { insertIncarnation, markEnded } from './incarnationStore';
 
 export interface DaemonBootstrapHandle {
   /** True when the foundation actually initialized (AIDEN_DAEMON=1). */
@@ -166,6 +173,22 @@ const NOOP_HANDLE: DaemonBootstrapHandle = Object.freeze({
 let _singleton: DaemonBootstrapHandle | null = null;
 
 /**
+ * v4.9.0 Slice 4 — module-level holders for the persistent daemon
+ * identity (`dmn_...`) and the per-process incarnation (`inc_...`).
+ * Populated by `bootstrapDaemon()`. Readable by other modules (e.g.
+ * the logger sink) via `getCurrentDaemonId()` / `getCurrentIncarnationId()`
+ * so they can stamp every record with the identity pair without
+ * requiring an ambient ExecutionContext.
+ */
+let _currentDaemonId:      string | null = null;
+let _currentIncarnationId: string | null = null;
+
+/** v4.9.0 Slice 4 — read the persistent daemon id (`dmn_...`) or null. */
+export function getCurrentDaemonId():      string | null { return _currentDaemonId; }
+/** v4.9.0 Slice 4 — read this boot's incarnation id (`inc_...`) or null. */
+export function getCurrentIncarnationId(): string | null { return _currentIncarnationId; }
+
+/**
  * v4.9.0 Slice 3 — track whether the process-wide crash handlers
  * already wrapped this process. Reset by the test helper. The guard
  * prevents duplicate handler chains when bootstrap runs twice (which
@@ -194,6 +217,29 @@ function buildDaemonLogger(logsDir: string): Logger {
       new RedactingSink(new StderrSink({ minLevel: 'warn' })),
       new RedactingSink(new FileSink({ dir: logsDir, name: 'daemon', format: 'ndjson' })),
     ],
+    // v4.9.0 Slice 4 — every daemon log line gets stamped with the
+    // identity pair (daemonId, incarnationId) plus any ambient
+    // ExecutionContext fields (runId, traceId, spanId, ...). Caller
+    // ctx wins on key collision. Provider is guarded against init-time
+    // calls (before the identity holders are populated) — returning
+    // `undefined` then is fine; the merge step skips it.
+    getContext: () => {
+      const out: Record<string, unknown> = {};
+      if (_currentDaemonId)      out.daemonId      = _currentDaemonId;
+      if (_currentIncarnationId) out.incarnationId = _currentIncarnationId;
+      const ctx = currentContext();
+      if (ctx) {
+        out.runId    = ctx.runId;
+        out.traceId  = ctx.traceId;
+        out.spanId   = ctx.spanId;
+        if (ctx.parentSpanId) out.parentSpanId = ctx.parentSpanId;
+        if (ctx.sessionId)    out.sessionId    = ctx.sessionId;
+        if (ctx.triggerId)    out.triggerId    = ctx.triggerId;
+        out.source   = ctx.source;
+        out.attempt  = ctx.attempt;
+      }
+      return Object.keys(out).length > 0 ? out : undefined;
+    },
   });
 }
 
@@ -350,6 +396,36 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
       log('warn', '[daemon] crash recovery: prior instance crashed; affected runs marked resume_pending=1');
     }
 
+    // v4.9.0 Slice 4 — establish persistent daemon identity + per-process
+    // incarnation. The daemon_id file is created on first boot at
+    // <aidenRoot>/daemon/daemon_id; subsequent boots load it. The
+    // incarnation row in daemon_incarnations gives every process a
+    // first-class lineage row so `aiden doctor`-style tooling can show
+    // "this daemon has booted N times across M crashes".
+    //
+    // Distinct from `tracker.instanceId`: the latter is a random UUID
+    // for the v1-era `daemon_instances` table that Slice 3's crash
+    // recovery still uses. We keep both alive; Slice 4 ADDS identity,
+    // doesn't replace.
+    try {
+      _currentDaemonId      = loadOrCreateDaemonId(aidenRoot);
+      _currentIncarnationId = newIncarnationId();
+      insertIncarnation(db, {
+        incarnationId: _currentIncarnationId,
+        daemonId:      _currentDaemonId,
+        pid:           process.pid,
+        aidenVersion:  VERSION,
+        nodeVersion:   process.version,
+      });
+      log('info',
+        `[daemon] identity established daemon_id=${_currentDaemonId} ` +
+        `incarnation_id=${_currentIncarnationId}`);
+    } catch (e) {
+      log('warn', `[daemon] identity init failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+      _currentDaemonId      = null;
+      _currentIncarnationId = null;
+    }
+
     // v4.9.0 Slice 3 — defence-in-depth: sweep any `running` rows owned
     // by a non-current instance. `evaluateBootState` already covers the
     // common case, but a row racing the crash window could slip past it.
@@ -400,6 +476,17 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
             } catch { /* noop */ }
           }
         } catch { /* never block exit on reclaim failure */ }
+        // v4.9.0 Slice 4 — flag the incarnation row as crashed before
+        // we exit. Best-effort; never blocks the exit path.
+        try {
+          if (_currentIncarnationId) {
+            markEnded(db, {
+              incarnationId: _currentIncarnationId,
+              exitReason:    'crash',
+              exitCode:      1,
+            });
+          }
+        } catch { /* noop */ }
         // 100ms grace for the file sink to flush before we tear down.
         setTimeout(() => { try { process.exit(1); } catch { /* noop */ } }, 100);
       };
@@ -509,6 +596,29 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
     }, 24 * 60 * 60 * 1000);
     if (typeof retentionTimer.unref === 'function') retentionTimer.unref();
 
+    // v4.9.0 Slice 4 — wire the missing `triggerBus.reclaimExpired()`
+    // ticker. The function existed since v4.5 Phase 5a but had no call
+    // site; crashed-mid-claim trigger events were stuck in `'claimed'`
+    // because the claim picker only matches `status='pending'`. 30s
+    // cadence matches what the original `triggerBus.ts` header
+    // comment promised. Boot-time call covers the gap where a daemon
+    // crashed *after* a claim and a new daemon starts before any lease
+    // expires naturally.
+    try {
+      const swept = triggerBus.reclaimExpired();
+      if (swept.reclaimed > 0) {
+        log('warn',
+          `[trigger-bus] boot reclaim returned ${swept.reclaimed} expired claim(s) to 'pending'`);
+      }
+    } catch (e) {
+      log('warn', `[trigger-bus] boot reclaim failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+    }
+    const reclaimTimer = setInterval(() => {
+      try { triggerBus.reclaimExpired(); }
+      catch { /* never let the sweep crash the daemon */ }
+    }, 30_000);
+    if (typeof reclaimTimer.unref === 'function') reclaimTimer.unref();
+
     // Drain context — same shape api/server.ts wires.
     const getDrainCtx = () => ({
       drainTimeoutMs:    cfg.drainTimeoutMs,
@@ -543,8 +653,27 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
           try { httpServer.close(); } catch { /* noop */ }
         }
       },
-      markShutdown: (reason: 'sigterm' | 'sigint' | 'sigusr1_restart' | 'crash' | 'replaced', exitCode: number) =>
-        tracker.markShutdown(reason, exitCode),
+      markShutdown: (reason: 'sigterm' | 'sigint' | 'sigusr1_restart' | 'crash' | 'replaced', exitCode: number) => {
+        tracker.markShutdown(reason, exitCode);
+        // v4.9.0 Slice 4 — patch the incarnation row alongside the
+        // legacy daemon_instances row. Map sigusr1_restart/replaced
+        // → 'clean' (graceful drain), keep sigterm/sigint/crash
+        // verbatim. Best-effort; never throws into the drain path.
+        try {
+          if (_currentIncarnationId) {
+            const incReason =
+              reason === 'sigterm' ? 'sigterm' :
+              reason === 'sigint'  ? 'sigint'  :
+              reason === 'crash'   ? 'crash'   :
+              'clean';
+            markEnded(db, {
+              incarnationId: _currentIncarnationId,
+              exitReason:    incReason,
+              exitCode,
+            });
+          }
+        } catch { /* drain path must never throw */ }
+      },
     });
 
     installDaemonSignalHandlers({ getDrainContext: getDrainCtx });
@@ -786,6 +915,9 @@ export function _resetDaemonBootstrapForTests(): void {
   // so a fresh bootstrap in the same test process can install its
   // own handlers without tripping the once-per-process check.
   _crashHandlersInstalled = false;
+  // v4.9.0 Slice 4 — clear identity holders too.
+  _currentDaemonId      = null;
+  _currentIncarnationId = null;
 }
 
 /** Diagnostic — returns the current handle (or null if not yet bootstrapped). */

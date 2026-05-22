@@ -328,6 +328,28 @@ CREATE INDEX IF NOT EXISTS idx_recovery_reports_run
   ON recovery_reports(run_id);
 `;
 
+// v4.9.0 Slice 4 — daemon_incarnations table. Source of truth lives at
+// `core/v4/daemon/db/schema/v8.sql`; kept in sync via the migrations
+// test snapshot check. Distinct from the v1 `daemon_instances` table
+// (which keeps its random-UUID instance_id intact for existing
+// `evaluateBootState` / `reclaimStuckRuns` consumers); v8 introduces
+// the persistent daemon identity + per-boot incarnation correlation.
+const V8_SQL = `
+CREATE TABLE IF NOT EXISTS daemon_incarnations (
+  incarnation_id  TEXT    PRIMARY KEY,
+  daemon_id       TEXT    NOT NULL,
+  pid             INTEGER NOT NULL,
+  started_at      TEXT    NOT NULL,
+  ended_at        TEXT,
+  exit_reason     TEXT,
+  exit_code       INTEGER,
+  aiden_version   TEXT,
+  node_version    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_incarnations_daemon
+  ON daemon_incarnations(daemon_id, started_at DESC);
+`;
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -336,6 +358,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 5, name: 'phase 5b — scheduled workflows',               sql: V5_SQL },
   { version: 6, name: 'v4.6 phase 1 — sub-agent lineage',             sql: V6_SQL },
   { version: 7, name: 'v4.6 phase 3b — self-improvement loop',        sql: V7_SQL },
+  { version: 8, name: 'v4.9 slice 4 — daemon identity + incarnations', sql: V8_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

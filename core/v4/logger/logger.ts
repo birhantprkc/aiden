@@ -139,10 +139,20 @@ interface SinkCounter {
   lastError?:  { message: string; at: Date };
 }
 
+/**
+ * v4.9.0 Slice 4 — optional callback that returns ambient context
+ * fields to merge into every log record's `ctx`. Used by the daemon
+ * boot-logger to stamp `daemonId` / `incarnationId` / `runId` /
+ * `traceId` / `spanId` automatically. MUST NOT throw — the Hermes
+ * "no log formatter throws because context is missing" rule applies.
+ */
+export type LogContextProvider = () => Record<string, unknown> | undefined;
+
 export class CoreLogger implements Logger {
   private level: LogLevel;
   private readonly sinks: LoggerSink[];
   private readonly scope: string;
+  private readonly getContext: LogContextProvider | undefined;
   /** `null` means "use my parent's sinks" — the root holds the array. */
   private readonly sinksOwner: {
     sinks:    LoggerSink[];
@@ -154,11 +164,23 @@ export class CoreLogger implements Logger {
   /**
    * Construct a root logger. Use `child(segment)` for sub-loggers.
    * `sinks` may be empty — useful for tests; writes silently drop.
+   *
+   * v4.9.0 Slice 4 — `getContext` (optional) returns ambient fields
+   * (e.g. ExecutionContext + identity holders) merged into every
+   * record's `ctx`. Defaults to no-op. The Logger NEVER throws when
+   * the provider returns undefined or throws — that would defeat the
+   * point of an always-on diagnostic channel.
    */
-  constructor(opts: { sinks: LoggerSink[]; level?: LogLevel; scope?: string }) {
+  constructor(opts: {
+    sinks:        LoggerSink[];
+    level?:       LogLevel;
+    scope?:       string;
+    getContext?:  LogContextProvider;
+  }) {
     this.scope      = opts.scope ?? '';
     this.sinks      = opts.sinks;
     this.level      = opts.level ?? 'debug';
+    this.getContext = opts.getContext;
     this.sinksOwner = {
       sinks:    this.sinks,
       level:    this.level,
@@ -178,6 +200,11 @@ export class CoreLogger implements Logger {
       sinks: parent.sinksOwner.sinks,
       level: parent.sinksOwner.level,
       sinksOwner: parent.sinksOwner,
+      // v4.9.0 Slice 4 — children inherit the parent's context provider
+      // so child-loggers stamped via `parent.child('foo')` carry the
+      // same identity fields without each sub-logger needing its own
+      // wiring.
+      getContext: parent.getContext,
     });
     return c;
   }
@@ -221,12 +248,26 @@ export class CoreLogger implements Logger {
 
   private write(level: LogLevel, msg: string, ctx?: Record<string, unknown>): void {
     if (LOG_LEVEL_ORDER[level] < LOG_LEVEL_ORDER[this.sinksOwner.level]) return;
+    // v4.9.0 Slice 4 — merge ambient context fields. Caller-supplied
+    // `ctx` wins on key collision (callers stamp run-specific data with
+    // intent; identity fields are the default backdrop). The provider
+    // is wrapped in try/catch — Hermes rule "no log formatter throws
+    // because context is missing".
+    let merged: Record<string, unknown> | undefined = ctx;
+    if (this.getContext) {
+      try {
+        const ambient = this.getContext();
+        if (ambient && Object.keys(ambient).length > 0) {
+          merged = { ...ambient, ...(ctx ?? {}) };
+        }
+      } catch { /* never let a context provider break logging */ }
+    }
     const record: LogRecord = {
       ts: new Date(),
       level,
       scope: this.scope,
       msg,
-      ctx,
+      ctx: merged,
     };
     // Sinks must not throw — the helpers in ./sinks/* all wrap their
     // I/O in try/catch. Be defensive anyway. Phase v4.1.2-slice3:
