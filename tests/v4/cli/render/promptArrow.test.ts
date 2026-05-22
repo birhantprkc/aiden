@@ -47,13 +47,13 @@ describe('statusFooter — no leading ▲ duplication', () => {
     });
     expect((footer.match(/▲/g) ?? []).length).toBe(0);
   });
-  it('contains exactly one turn-counter icon ↻ when turnCount supplied', () => {
+  it('contains zero turn-counter icons ↻ (retired in v4.9.0 pre-ship)', () => {
     const d = makeDisplay();
     const footer = d.statusFooter({
       provider: 'openai', model: 'gpt-5.5', ctxUsed: 13100, ctxMax: 272000,
       elapsedMs: 8000, turnCount: 4, sessionMs: 8000, state: 'ok',
     });
-    expect((footer.match(/↻/g) ?? []).length).toBe(1);
+    expect((footer.match(/↻/g) ?? []).length).toBe(0);
   });
   it('renders at least one filled circle at 5% context (regression vs always-empty bar)', () => {
     const d = makeDisplay();

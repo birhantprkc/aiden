@@ -710,6 +710,12 @@ export class ChatSession implements ChatSessionLike {
           continue;
         }
 
+        // v4.9.0 pre-ship UI: BOTTOM rule of the prompt zone. The TOP
+        // rule fires at `printTurnSeparator()` above (iter > 1). This
+        // bottom rule fires only when actual content goes to the LLM —
+        // slash commands + empty input + /quit all `continue` above and
+        // never reach this line, matching the task's edge-case spec.
+        this.opts.display.write(`  ${this.opts.display.rule()}\n`);
         await this.runAgentTurn(input);
       }
     } finally {

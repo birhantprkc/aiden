@@ -1506,24 +1506,24 @@ describe('Display v4.8.0 Slice 7 statusFooter — packed info density', () => {
     });
   });
 
-  it('medium (≥100, <120 cols): 3 separators (adds turn counter)', () => {
+  it('medium (≥100, <120 cols): 2 separators (turn counter retired)', () => {
     withCols(110, () => {
       const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
       const out = stripAnsi(d.statusFooter(BASE));
-      // v4.9.0 pre-ship UI: turn glyph (`↻`) restored before the number.
-      expect(out).toMatch(/│ ↻ 4 │/);
-      expect(sepCount(out)).toBe(3);
+      // v4.9.0 pre-ship UI: turn counter removed (value-to-pixel too low).
+      expect(out).not.toMatch(/↻/);
+      expect(sepCount(out)).toBe(2);
     });
   });
 
-  it('wide (≥120 cols): 4 separators (full density)', () => {
+  it('wide (≥120 cols): 3 separators (full density minus turn counter)', () => {
     withCols(140, () => {
       const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
       const out = stripAnsi(d.statusFooter(BASE));
-      // v4.9.0 pre-ship UI: ↻ turn icon + ⌛ hourglass timer.
-      expect(out).toMatch(/│ ↻ 4 │/);
+      // v4.9.0 pre-ship UI: turn counter retired; ⌛ hourglass remains.
+      expect(out).not.toMatch(/↻/);
       expect(out).toContain('⌛');
-      expect(sepCount(out)).toBe(4);
+      expect(sepCount(out)).toBe(3);
     });
   });
 

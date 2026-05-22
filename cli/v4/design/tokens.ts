@@ -134,12 +134,10 @@ export const glyphs = {
     dotOpen:  '○',
     /** Status footer column separator. */
     sep:      '│',
-    /** Slice 7 — turn counter prefix. v4.9.0 pre-ship UI: glyph
-     *  restored after smoke feedback. `↻` (U+21BB CLOCKWISE OPEN
-     *  CIRCLE ARROW) reads as "turn" / "iteration" and renders
-     *  reliably across Consolas, Cascadia, SF Mono, JetBrains Mono
-     *  — same font support tier as the ▲/●/○ already in the bar. */
-    turn:     '↻',
+    /** Turn counter retired per v4.9.0 pre-ship UX feedback —
+     *  value-to-pixel ratio too low. Field kept (empty) so the
+     *  token-table shape stays stable for downstream consumers. */
+    turn:     '',
     /** Slice 7 — session timer prefix. Slice 9 hotfix: `⌛` (U+231B
      *  HOURGLASS WITH FLOWING SAND) restored. The font set Shiva
      *  confirmed renders ●/○/▲ also renders this widely-supported

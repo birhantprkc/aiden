@@ -20,7 +20,8 @@ import { BASELINE_GLYPHS, glyphs } from '../../../../cli/v4/design/tokens';
 describe('design tokens — load-bearing glyphs must be non-empty', () => {
   const required: Array<{ path: string; get: (g: typeof glyphs) => string }> = [
     { path: 'status.triangle',       get: (g) => g.status.triangle },
-    { path: 'status.turn',           get: (g) => g.status.turn },
+    // status.turn intentionally empty per v4.9.0 pre-ship UX feedback
+    // (turn counter retired) — field kept on the token table.
     { path: 'status.timer',          get: (g) => g.status.timer },
     { path: 'status.sep',            get: (g) => g.status.sep },
     { path: 'bar.filled (context_circle_full)',  get: (g) => g.bar.filled },

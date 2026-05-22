@@ -845,11 +845,10 @@ export class Display {
     const stateDot = args.state
       ? sk.applyColors(glyphs.status.dot, this.stateKind(args.state))
       : '';
-    // v4.9.0 pre-ship UI hotfix — turn glyph (`↻`) restored;
-    // matches the leading-icon-then-number pattern of `⌛ Ns`.
-    const turnSeg = args.turnCount !== undefined
-      ? `${sk.applyColors(glyphs.status.turn, 'metric_turn')} ${sk.applyColors(String(args.turnCount), 'metric_turn')}`
-      : '';
+    // v4.9.0 pre-ship UI: turn counter retired entirely — value-to-pixel
+    // ratio too low. `args.turnCount` stays in the signature for caller
+    // back-compat; ignored here.
+    void args.turnCount;
     // v4.8.0 Slice 9 hotfix — ⌛ restored ahead of the bare elapsed
     // string. Wider font support than the retired ⏱. `sessionMs` arg
     // stays plumbed-but-unused for backward compat with the field name.
@@ -861,16 +860,13 @@ export class Display {
     const ctxSegCompact = `${bar} ${ctxPctText}`;
 
     let segments: string[];
-    if (cols >= 120 && stateDot && turnSeg && sessionSeg) {
-      segments = [provModel, ctxSegFull, turnSeg, sessionSeg, stateDot];
-    } else if (cols >= 100 && turnSeg) {
-      // v4.8.1 Slice 2 hotfix — was `elapsed` (bare); now uses
-      // `sessionSeg` which includes the ⌛ timer glyph. The previous
-      // mid-tier dropped the glyph for "denser" packing, but Shiva's
-      // smoke at 80–110 cols showed only ` 5.1s` (leading space, no
-      // glyph). The glyph is single-cell, cheap, and load-bearing as
-      // the timer's identity affordance.
-      segments = [provModel, ctxSegFull, turnSeg, sessionSeg || elapsed];
+    if (cols >= 120 && stateDot && sessionSeg) {
+      segments = [provModel, ctxSegFull, sessionSeg, stateDot];
+    } else if (cols >= 100) {
+      // v4.8.1 Slice 2 hotfix — sessionSeg keeps the ⌛ identity glyph
+      // (single-cell, cheap) even at this tier. v4.9.0 pre-ship UI:
+      // turn counter retired; mid tier collapses to 2 separators.
+      segments = [provModel, ctxSegFull, sessionSeg || elapsed];
     } else {
       segments = [provModel, ctxSegCompact, sessionSeg || elapsed];
     }
