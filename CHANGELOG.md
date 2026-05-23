@@ -1,3 +1,25 @@
+## v4.9.1 — 2026-05-23
+
+Same-day hotfix for the Windows update flow + install UX polish.
+
+### Fixed
+- **Windows update permission denied** — `/update install` now shows correct PowerShell instructions (not bash `export` syntax)
+- **Update modal overlap** — update prompt no longer stacks on welcome banner
+- **NPM deprecation noise** — DEP0190 warnings filtered from displayed output (logged to `~/.aiden/logs/update.log`)
+- **Stale npm prefix detection** — warns users with risky prefix paths (Program Files on Windows, /usr/local without write access on Mac/Linux)
+
+### Added
+- **Install progress animation** — `/update install` shows live progress bar with phase indicators (spawning → resolving → downloading → extracting → verifying → installed). Reusable component ready for future long-running commands.
+
+### Cross-platform
+All fixes are platform-aware. Windows / Mac / Linux each get correct shell syntax in instructions. Progress bar works identically across platforms.
+
+### For existing users
+- Mac/Linux v4.9.0: unaffected, no need to update
+- Windows v4.9.0: update via Admin PowerShell — `npm install -g aiden-runtime@latest`
+
+---
+
 ## v4.9.0 — 2026-05-23
 
 The biggest Aiden release yet. Three new feature families on a fully rebuilt observability substrate.

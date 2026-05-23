@@ -94,7 +94,7 @@ Windows · Linux · WSL · macOS (API Mode)
 ![Built solo](https://img.shields.io/badge/Built-solo-B8A893?style=flat-square)
 ![By Taracod](https://img.shields.io/badge/By-Taracod-FF6B35?style=flat-square)
 ![White Lotus](https://img.shields.io/badge/Brand-White_Lotus-FFB088?style=flat-square)
-![v4.9.0](https://img.shields.io/badge/Latest-v4.9.0-4ADE80?style=flat-square)
+![v4.9.1](https://img.shields.io/badge/Latest-v4.9.1-4ADE80?style=flat-square)
 
 </div>
 
