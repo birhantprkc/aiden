@@ -1,0 +1,196 @@
+/**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
+ * v4.9.3 SLICE 1a — renderGreeter end-to-end coverage.
+ *
+ * Real fs against tmpdir. Display is a write-capture fake — we assert
+ * the EXACT strings the orchestrator emits, not return values. This is
+ * the explicit fix for the Slice 2 mock-blindness pattern (snapshot of
+ * a closure's return value insufficient — assert what reaches the
+ * caller). Slice 1b adds the real-subprocess test on top to also
+ * verify the bytes actually reach a real terminal.
+ */
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+
+import { renderGreeter, type GreeterDisplay } from '../../../../cli/v4/greeter';
+import { historyPath, readHistory, writeHistory } from '../../../../cli/v4/greeter/history';
+import type { AidenPaths, GreeterHistory } from '../../../../cli/v4/greeter/types';
+
+let root: string;
+let paths: AidenPaths;
+let writes: string[];
+let display: GreeterDisplay;
+
+beforeEach(async () => {
+  root = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-greeter-int-'));
+  paths = { root } as unknown as AidenPaths;
+  writes = [];
+  display = {
+    write: (t: string) => { writes.push(t); },
+    paint: (t: string, _kind) => t,   // identity paint so assertions stay readable
+  };
+});
+
+afterEach(async () => {
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+const NOW = new Date(2026, 4, 25, 19, 30, 0);   // local 7:30pm
+const VERSION = '4.9.3';
+
+function mkHistory(over: Partial<GreeterHistory> = {}): GreeterHistory {
+  return {
+    v: 1,
+    firstLaunchAt:  '2026-05-23T16:30:00.000Z',
+    lastGreetingAt: '2026-05-24T09:14:00.000Z',
+    offers: [], disabled: false,
+    ...over,
+  };
+}
+
+describe('renderGreeter — silence on first-ever launch', () => {
+  it('writes ZERO bytes when history file is missing, and initializes the file', async () => {
+    // No prior history → first launch.
+    expect(await readHistory(paths)).toBeNull();
+
+    await renderGreeter({ paths, version: VERSION, display, now: NOW });
+
+    // Nothing rendered.
+    expect(writes).toEqual([]);
+    // History file now exists.
+    const h = await readHistory(paths);
+    expect(h).not.toBeNull();
+    expect(h!.firstLaunchAt).toBe(NOW.toISOString());
+    expect(h!.offers).toEqual([]);
+    expect(h!.disabled).toBe(false);
+  });
+});
+
+describe('renderGreeter — silence when disabled', () => {
+  it('writes ZERO bytes when history.disabled === true', async () => {
+    await writeHistory(paths, mkHistory({ disabled: true }));
+    await renderGreeter({ paths, version: VERSION, display, now: NOW });
+    expect(writes).toEqual([]);
+  });
+
+  it('the disabled flag persists across the silent run', async () => {
+    await writeHistory(paths, mkHistory({ disabled: true }));
+    await renderGreeter({ paths, version: VERSION, display, now: NOW });
+    const h = await readHistory(paths);
+    expect(h!.disabled).toBe(true);
+  });
+});
+
+describe('renderGreeter — silence when nothing observable', () => {
+  it('writes ZERO bytes when no offer wins', async () => {
+    // Morning, no update cache, no distillations → silence.
+    const NOON = new Date(2026, 4, 25, 12, 0, 0);
+    await writeHistory(paths, mkHistory({ lastCwd: process.cwd() }));
+    await renderGreeter({ paths, version: VERSION, display, now: NOON });
+    expect(writes).toEqual([]);
+  });
+});
+
+describe('renderGreeter — speaks when an offer wins', () => {
+  it('emits the offer speech with 2-space indent and trailing blank line', async () => {
+    // Seed an update cache → tier-4 fires (no tier-2/3 available because
+    // hour is 9am and no continuity, no distillations).
+    const MORN = new Date(2026, 4, 25, 9, 0, 0);
+    await fs.writeFile(
+      path.join(root, '.update_check.json'),
+      JSON.stringify({ latest: '4.9.4' }), 'utf8',
+    );
+    await writeHistory(paths, mkHistory({ lastCwd: process.cwd() }));
+    await renderGreeter({ paths, version: VERSION, display, now: MORN });
+
+    // One write call, with the canonical layout.
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toBe(
+      '  aiden-runtime 4.9.3 → 4.9.4 available. /update install to ship.\n\n',
+    );
+  });
+
+  it('persists the offered offer with no response (pending) so next boot can reconcile', async () => {
+    const MORN = new Date(2026, 4, 25, 9, 0, 0);
+    await fs.writeFile(
+      path.join(root, '.update_check.json'),
+      JSON.stringify({ latest: '4.9.4' }), 'utf8',
+    );
+    await writeHistory(paths, mkHistory({ lastCwd: process.cwd() }));
+    await renderGreeter({ paths, version: VERSION, display, now: MORN });
+    const h = await readHistory(paths);
+    expect(h!.offers).toHaveLength(1);
+    expect(h!.offers[0].id).toBe('update-available-4.9.4');
+    expect(h!.offers[0].expectedAction).toBe('/update install');
+    expect(h!.offers[0].response).toBeUndefined();   // pending
+  });
+});
+
+describe('renderGreeter — continuity from distillation', () => {
+  it('reads newest distillation and emits continuity-open-item when open_items[0] exists', async () => {
+    // Seed a distillation.
+    const distDir = path.join(root, 'distillations');
+    await fs.mkdir(distDir, { recursive: true });
+    await fs.writeFile(
+      path.join(distDir, 'session-2026-05-24.json'),
+      JSON.stringify({
+        open_items: ['decide redis vs postgres for session store'],
+        decisions:  ['shipped v4.9.2'],
+      }),
+      'utf8',
+    );
+    await writeHistory(paths, mkHistory({ lastCwd: process.cwd() }));
+    await renderGreeter({ paths, version: VERSION, display, now: NOW });
+
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toBe(
+      '  Last session left this open: "decide redis vs postgres for session store".\n\n',
+    );
+  });
+});
+
+describe('renderGreeter — reconciliation closes pending offers from prior boots', () => {
+  it('marks a prior update-available-4.9.3 as accepted when running version is now >= 4.9.3', async () => {
+    await writeHistory(paths, mkHistory({
+      offers: [{
+        id:             'update-available-4.9.3',
+        offeredAt:      '2026-05-20T08:00:00.000Z',
+        expectedAction: '/update install',
+        // response: undefined — pending
+      }],
+    }));
+    // Running 4.9.3 now → should reconcile as accepted.
+    const MORN = new Date(2026, 4, 25, 9, 0, 0);
+    await renderGreeter({ paths, version: '4.9.3', display, now: MORN });
+    const h = await readHistory(paths);
+    expect(h!.offers).toHaveLength(1);
+    expect(h!.offers[0].response).toBe('accepted');
+  });
+});
+
+describe('renderGreeter — never throws', () => {
+  it('returns cleanly when the paths root is read-only / inaccessible (does not crash REPL)', async () => {
+    // Construct a paths object pointing at a definitely-nonexistent root
+    // under an unreachable parent. writeHistory's mkdir will fail; the
+    // outer try/catch in renderGreeter must swallow.
+    const badRoot = path.join(root, 'definitely', 'does', 'not', 'exist');
+    // To make writeHistory itself fail, place a FILE where the root should
+    // be a directory.
+    const blocker = path.join(root, 'blocker');
+    await fs.writeFile(blocker, 'i am a file, not a dir');
+    const blockedPaths = { root: path.join(blocker, 'inside') } as unknown as AidenPaths;
+
+    // Must resolve, not throw. No writes either.
+    await expect(renderGreeter({ paths: blockedPaths, version: VERSION, display, now: NOW }))
+      .resolves.toBeUndefined();
+    expect(writes).toEqual([]);
+    void badRoot;
+  });
+});
