@@ -241,6 +241,17 @@ export interface MainOptions {
   pathsOverride?: AidenPaths;
   /** Stub stdout writer (defaults to process.stdout.write). */
   writeOut?: (text: string) => void;
+  /**
+   * v4.9.5 Slice 1.6 — when true, `buildAgentRuntime` treats
+   * `wizardNeeded` as true regardless of detection AND passes
+   * `force: true` to the inner `runSetupWizard` call. Set by
+   * `runSetupSubcommand` so `aiden setup` re-runs the full
+   * disclaimer → loading → wizard flow even on a configured install,
+   * then drops into the REPL (via the existing handoff inside
+   * `runInteractiveChat`). Default undefined → no behaviour change
+   * for any other entry point.
+   */
+  forceSetup?: boolean;
 }
 
 /**
@@ -883,6 +894,7 @@ export async function buildAgentRuntime(
     !!detection.configProvider &&
     !detection.configuredProviderHasCredentials;
   const wizardNeeded =
+    !!opts.forceSetup ||
     !detection.hasAnyProvider ||
     configuredProviderBroken ||
     (await isFreshInstall(paths));
@@ -960,7 +972,12 @@ export async function buildAgentRuntime(
 
     process.stdout.write('\n');
 
-    const result = await runSetupWizard({ paths });
+    // v4.9.5 Slice 1.6 — pass force when invoked via `aiden setup`
+    // subcommand so the wizard fires even when config.yaml is already
+    // populated. On true fresh installs `opts.forceSetup` is undefined
+    // (force=false) and isFreshInstall already gates inside the
+    // wizard; behavior unchanged for that path.
+    const result = await runSetupWizard({ paths, force: !!opts.forceSetup });
 
     // Phase 30.2.1: three exit states.
     if (result.status === 'exited') {
@@ -2315,9 +2332,49 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
 
 // ─── setup ─────────────────────────────────────────────────────────────
 
+/**
+ * v4.9.5 Slice 1.6 — test injection seam. `runSetupSubcommand`
+ * delegates to `runInteractiveChat` so the subcommand boots through
+ * the exact same disclaimer → loading → wizard → REPL handoff that
+ * fresh-install boot uses. Tests swap this for a counting stub to
+ * verify the delegation is intact (regression layer for
+ * "subcommand silently skipped onboarding screens" bug class).
+ *
+ * Pass null to restore the production implementation.
+ */
+let _runInteractiveChatImpl: typeof runInteractiveChat = runInteractiveChat;
+export function setRunInteractiveChatForTest(
+  fn: typeof runInteractiveChat | null,
+): void {
+  _runInteractiveChatImpl = fn ?? runInteractiveChat;
+}
+
 async function runSetupSubcommand(opts: MainOptions): Promise<void> {
-  const paths = opts.pathsOverride ?? resolveAidenPaths();
-  await runSetupWizard({ paths, force: true });
+  // v4.9.5 Slice 1.6 — `aiden setup` now goes through the full
+  // fresh-install boot path: disclaimer → animated loading → wizard
+  // (Steps 1–4, including curated skills) → success screen → REPL
+  // handoff. Identical to typing `aiden` on a true fresh install.
+  // `forceSetup: true` bypasses the wizardNeeded detection inside
+  // buildAgentRuntime so the wizard fires even when an existing
+  // config is present.
+  //
+  // Daemon foundation bootstrap mirrors the default REPL action
+  // (L334–343) so users with AIDEN_DAEMON=1 don't lose background
+  // rails just because they entered via `aiden setup`. The gate is
+  // env-checked, so it's a no-op for the common case.
+  try {
+    if (process.env.AIDEN_DAEMON === '1') {
+      const { bootstrapDaemonFoundation } = await import('../../core/v4/daemon/bootstrap');
+      bootstrapDaemonFoundation();
+    }
+  } catch (e) {
+    console.error('[daemon] foundation bootstrap failed: ' + (e instanceof Error ? e.message : String(e)));
+  }
+
+  // cliOpts={} — `aiden setup` accepts no command-level flags today.
+  // runInteractiveChat reads cliOpts.yolo / .skin with default-undefined
+  // semantics, so an empty bag is safe.
+  await _runInteractiveChatImpl({}, { ...opts, forceSetup: true });
 }
 
 // ─── model ─────────────────────────────────────────────────────────────
