@@ -235,7 +235,7 @@ Full v4.5 internals: [`docs/v4.5/`](docs/v4.5/) (overview, triggers, architectur
 
 
 
-https://github.com/user-attachments/assets/a76bf4a5-28ca-43b5-8975-5ef0a66ee90d
+
 
 
 
