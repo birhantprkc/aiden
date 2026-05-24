@@ -1,3 +1,17 @@
+## v4.9.4 — 2026-05-24
+
+Hotfix for tool-call protocol orphans.
+
+### Fixed
+- **Provider 400 "No tool output found for function call <id>"** — When the tool-loop surface decision or abort signal interrupted a multi-call batch, the assistant message's tool_call_ids could be left without matching tool result messages. The next provider call (this turn or a resumed history) returned 400. Both guards now fill synthetic blocked-tool-result messages with a uniform shape (`{ ok: false, blocked: true, reason, message }`) so the LLM sees a consistent signal regardless of which guard fired.
+- New `assertNoUnansweredToolCalls()` preflight at the single provider call boundary (`AidenAgent.callProvider`). Throws loud if any future guard leaves orphans. Safety net for upcoming v4.10 work.
+
+### Known follow-ups for v4.10
+- Hooks subprocess runner + MCP install healthCheck still use the pre-v4.9.2 spawn pattern.
+- Typing-suggestion cursor misalignment in REPL input area (carried from v4.9.0).
+
+---
+
 ## v4.9.3 — 2026-05-24
 
 The boot greeter.
