@@ -73,6 +73,13 @@ import type { PromptCaching } from './promptCaching';
 // AIDEN_TCE=0 to disable. Zero
 // behavioral change when unset. See core/v4/turnState.ts.
 import { TurnState, type RecoveryDecision } from './turnState';
+// v4.9.4 Slice 1 — tool-call/result protocol invariant + synthetic
+// blocked-result helpers used at the surface + abort fill sites.
+import {
+  assertNoUnansweredToolCalls,
+  fillRemainingAsBlocked,
+  synthesizeBlockedToolResult,
+} from './toolCallInvariant';
 // v4.2 Phase 1 — per-tool result verifier. Same TCE gate as
 // TurnState (default ON, opt-out via AIDEN_TCE=0); classification
 // feeds the recovery controller.
@@ -154,6 +161,14 @@ export interface AidenAgentOptions {
   provider:                ProviderAdapter;
   toolExecutor:            ToolExecutor;
   tools:                   ToolSchema[];
+  /**
+   * v4.9.4 Slice 1 — test seam. Override TurnState construction so
+   * regression tests can drive deterministic surface / cooldown /
+   * rollback decisions without depending on TurnState's loop-detection
+   * thresholds. Undefined in production → real `new TurnState()` is
+   * used as before (zero behavioural change).
+   */
+  turnStateFactory?:       () => TurnState;
   /**
    * v4.5 Phase 7 — explicit per-instance session id. When set, the
    * agent reads it via the existing `this.sessionId` access path
@@ -393,6 +408,8 @@ export class AidenAgent {
 
   private readonly toolExecutor:                ToolExecutor;
   private readonly tools:                       ToolSchema[];
+  // v4.9.4 Slice 1 — TurnState test seam (undefined in production).
+  private readonly turnStateFactory?:           () => TurnState;
   private readonly maxTurns:                    number;
   private readonly fallback?:                   FallbackStrategy;
   private readonly onToolCall?:                 AidenAgentOptions['onToolCall'];
@@ -475,6 +492,7 @@ export class AidenAgent {
     this.provider                 = opts.provider;
     this.toolExecutor             = opts.toolExecutor;
     this.tools                    = opts.tools;
+    this.turnStateFactory         = opts.turnStateFactory;
     this.maxTurns                 = opts.maxTurns ?? DEFAULT_MAX_TURNS;
     this.fallback                 = opts.fallback;
     this.onToolCall               = opts.onToolCall;
@@ -1029,7 +1047,9 @@ export class AidenAgent {
     // When disabled, TurnState.recordToolCall short-circuits with
     // `{kind: 'allow'}` and the entire v4.2 recovery surface stays
     // dormant (zero behavioural change vs v4.1.6).
-    const turnState = new TurnState();
+    // v4.9.4 Slice 1 — honor optional test-seam factory. Production
+    // paths never pass turnStateFactory → falls through to real ctor.
+    const turnState = this.turnStateFactory?.() ?? new TurnState();
     // v4.2 Phase 1 — per-tool verifier registry. Constructed
     // unconditionally (cheap, no side effects) but only used to
     // classify tool outcomes when TCE is enabled; verification args
@@ -1254,13 +1274,27 @@ export class AidenAgent {
       // TurnState internals + pushes a corrective system message,
       // then continues the outer iteration loop from a clean baseline.
       let rollbackDecision: RecoveryDecision | null = null;
-      for (const call of output.toolCalls) {
+      // v4.9.4 Slice 1 — `.entries()` so the surface + abort fill sites
+      // can slice from `callIndex + 1` to compute the un-dispatched tail.
+      for (const [callIndex, call] of output.toolCalls.entries()) {
         // v4.6 prep — pre-tool-call cooperative-cancellation check.
         // If the caller aborted between the model emitting tool calls
         // and us dispatching them, skip the remaining calls in this
         // batch. We set finishReason here; the outer-while break is
         // handled after the for-of exits.
         if (runOptions.signal?.aborted) {
+          // v4.9.4 Slice 1 — fill synthetic results so the assistant's
+          // toolCalls[] is balanced before we break. `call` (the one we
+          // were ABOUT to dispatch) gets variant='interrupted'; every
+          // remaining call gets variant='skipped'. Both with reason
+          // 'cancelled'. CRITICAL: also push turnToolMessages into the
+          // history NOW — the outer `if (finishReason === 'interrupted')`
+          // break (post-for-of) exits before reaching the line 1599
+          // bulk-push. Without this explicit push the synthetic results
+          // we just collected get discarded.
+          turnToolMessages.push(synthesizeBlockedToolResult(call, 'cancelled', { variant: 'interrupted' }));
+          fillRemainingAsBlocked(turnToolMessages, output.toolCalls, callIndex + 1, 'cancelled', 'skipped');
+          messages.push(...turnToolMessages);
           finishReason = 'interrupted';
           finalContent = '';
           break;
@@ -1482,9 +1516,22 @@ export class AidenAgent {
           });
         } else if (recovery.kind === 'surface' && recovery.surfaceCard) {
           // Stage 3: structured failure. Stop dispatching the rest of
-          // the batch — anything else is throwing good budget after
-          // bad. The outer loop reads `surfaceDecision` below and
-          // exits cleanly.
+          // the batch — anything else is throwing good budget after bad.
+          // The outer loop reads `surfaceDecision` below and exits cleanly.
+          //
+          // v4.9.4 Slice 1 — BEFORE breaking, fill synthetic blocked-
+          // tool-result messages for every un-dispatched call in this
+          // batch (slice from callIndex+1; the current call already had
+          // its real result pushed at line ~1440 just above). Without
+          // this fill, the assistant message at line ~1170 carries
+          // tool_call_ids whose matching tool results never land in
+          // history. The outer surfaceDecision branch (line ~1573)
+          // pushes turnToolMessages into `messages` and breaks the
+          // outer while loop, ending the turn — but the persisted
+          // history carries the orphans. A resumed conversation (or
+          // any second provider call in the same turn) then returns
+          // 400 "No tool output found for function call <id>".
+          fillRemainingAsBlocked(turnToolMessages, output.toolCalls, callIndex + 1, 'tool_loop_surface');
           surfaceDecision = recovery;
           break;
         }
@@ -1620,6 +1667,16 @@ export class AidenAgent {
     tools:       ToolSchema[],
     runOptions:  RunConversationOptions,
   ): Promise<ProviderCallOutput> {
+    // v4.9.4 Slice 1 — tool-call protocol preflight. Every assistant
+    // toolCalls[] entry must have a matching {role:'tool', toolCallId}
+    // BEFORE shipping to any provider. If this throws, a guard in
+    // runTurnLoop is leaking orphan tool_call_ids — find the culprit,
+    // don't catch this. The surface + abort fill sites above already
+    // satisfy the invariant; preflight is the audit-loud safety net
+    // for new guards added later (v4.10 rate-limit / cost-budget /
+    // hook-deny). See core/v4/toolCallInvariant.ts.
+    assertNoUnansweredToolCalls(messages);
+
     const wantStream = runOptions.stream === true && typeof this.provider.callStream === 'function';
     // v4.1.5 Issue K — fire just before the HTTP request opens, so the
     // display layer can transition the activity verb from local-prep
