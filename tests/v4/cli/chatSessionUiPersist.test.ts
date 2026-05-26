@@ -372,6 +372,100 @@ describe('chatSession onUiEvent — production routes through createOnUiEventHan
     expect(JSON.parse(r2End.payload).error).toBe('EACCES');
   });
 
+  it('Slice 10.6 — REPL + daemon onDecision wires SYMMETRICALLY emit approval.decided', async () => {
+    // Source-contract symmetric-coverage guard for approval decisions.
+    // The pre-Slice-10.6 gap: daemon path emitted approval.decided to
+    // run_events via daemonApproval.ts:onDecision (wired Slice 10.2b).
+    // REPL path had `promptUser`, `riskAssess`, `onUiEvent`,
+    // `persistAllow` — but NO `onDecision`. So /trace recent could
+    // surface "permission asked" for REPL turns but never
+    // "permission granted/denied". Direct mirror of the Slice 10.2d
+    // audit-blindspot lesson: grep-based audits can't catch "site
+    // that should emit but doesn't."
+    //
+    // Both code paths must wire onDecision through categorizeEvent
+    // ('approval_decision') + emitEventRich. If a future refactor
+    // removes either wire, symmetry breaks and this test fails.
+    const replSrc = await fs.readFile(
+      path.resolve(__dirname, '../../../cli/v4/aidenCLI.ts'),
+      'utf8',
+    );
+    const daemonSrc = await fs.readFile(
+      path.resolve(__dirname, '../../../core/v4/daemon/dispatcher/daemonApproval.ts'),
+      'utf8',
+    );
+
+    // Both paths MUST categorize approval_decision and emit rich rows.
+    expect(replSrc).toMatch(/categorizeEvent\('approval_decision'\)/);
+    expect(daemonSrc).toMatch(/categorizeEvent\('approval_decision'\)/);
+    expect(replSrc).toMatch(/emitEventRich\(/);
+    expect(daemonSrc).toMatch(/emitEventRich\(/);
+
+    // The REPL approvalEngine.callbacks block must declare onDecision
+    // (pre-10.6 had only promptUser/riskAssess/onUiEvent/persistAllow).
+    // Anchor on the surrounding shape so a future refactor that
+    // reorders fields still passes, but a regression that DROPS
+    // onDecision fails.
+    expect(replSrc).toMatch(/onDecision:\s*\(req,\s*decision\)\s*=>/);
+  });
+
+  it('Slice 10.6 — REPL onDecision integration: writes approval.decided with correct status', () => {
+    // Drive the production onDecision closure pattern in isolation
+    // against a real RunStore + DB. Asserts the row shape lands with
+    // category='approval', kind='approval.decided', name='approval_decision',
+    // status reflects the decision verb, source='repl'.
+    const runId = runStore.create({
+      sessionId:  'sess-approval-int',
+      instanceId: 'test-inst',
+      status:     'running',
+    });
+
+    // Mirror the aidenCLI onDecision closure shape.
+    function emitDecision(toolName: string, decision: 'allow' | 'deny' | 'allow_session' | 'allow_always'): void {
+      const tags = categorizeEvent('approval_decision');
+      runStore.emitEventRich({
+        runId,
+        category:  tags.category,
+        kind:      tags.kind,
+        name:      'approval_decision',
+        sessionId: 'sess-approval-int',
+        status:    decision === 'deny' ? 'denied' : 'allowed',
+        summary:   `${toolName} → ${decision} (caution)`,
+        payload: {
+          toolName,
+          category: 'execute',
+          riskTier: 'caution',
+          reason:   null,
+          decision,
+        },
+        visibility: 'system',
+        source:     'repl',
+      });
+    }
+
+    emitDecision('shell_exec', 'allow');
+    emitDecision('file_write', 'deny');
+    emitDecision('shell_exec', 'allow_session');
+    emitDecision('shell_exec', 'allow_always');
+
+    const rows = runStore.listEventsScoped({ scope: 'current_run', runId });
+    expect(rows.length).toBe(4);
+
+    // Every row landed in the approval category with the right kind.
+    for (const r of rows) {
+      expect(r.category).toBe('approval');
+      expect(r.kind).toBe('approval.decided');
+      expect(r.name).toBe('approval_decision');
+      expect(r.source).toBe('repl');
+    }
+
+    // Denial maps to status='denied'; everything else maps to 'allowed'.
+    const denied = rows.find((r) => JSON.parse(r.payload).decision === 'deny')!;
+    expect(denied.status).toBe('denied');
+    const allowAlways = rows.find((r) => JSON.parse(r.payload).decision === 'allow_always')!;
+    expect(allowAlways.status).toBe('allowed');
+  });
+
   it('Slice 10.2c — /trace recent + trace_query read chatSessionId, NOT the turn-scoped sessionId', async () => {
     // Source-level guard. The pre-10.2c bug: both read surfaces
     // consumed `replParentRunRef.sessionId` (turn-scoped, cleared

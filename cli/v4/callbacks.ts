@@ -783,6 +783,22 @@ export function renderApprovalBox(req: ApprovalRequest, display: Display): strin
   ];
   if (req.reason) lines.push(line(kv('reason', req.reason)));
   lines.push(line(kv('args', argsPreview)));
+  // v4.10 Slice 10.6 — surface fine-grained effects when the tool
+  // declared them. Renders as a comma-separated list of flag names
+  // (only the truthy ones). Tools without effects keep the pre-10.6
+  // four-row layout — no visual regression for un-tagged tools.
+  if (req.effects) {
+    const e = req.effects;
+    const flags: string[] = [];
+    if (e.readsFiles)    flags.push('reads-files');
+    if (e.writesFiles)   flags.push('writes-files');
+    if (e.network)       flags.push('network');
+    if (e.externalSpend) flags.push('external-spend');
+    if (e.irreversible)  flags.push('irreversible');
+    if (flags.length > 0) {
+      lines.push(line(kv('effects', flags.join(', '))));
+    }
+  }
   lines.push(line(divider));
   lines.push(line(display.muted('↑↓ navigate · enter select · esc cancel')));
 

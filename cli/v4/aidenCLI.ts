@@ -1289,24 +1289,89 @@ export async function buildAgentRuntime(
     config.getValue<'manual' | 'smart' | 'off'>('agent.approval_mode', 'smart'),
   );
   if (cliOpts.yolo) approvalEngine.setMode('off');
-  // Phase 16f: hydrate persistent allowlist from disk so "Allow always"
-  // choices survive across REPL restarts.
-  try {
-    const raw = require('node:fs').readFileSync(paths.approvalsJson, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      approvalEngine.loadPersistentAllowlist(
-        parsed.filter(
-          (e: any) =>
-            e &&
-            typeof e.tool === 'string' &&
-            typeof e.signature === 'string',
-        ),
-      );
+  // Phase 16f / v4.10 Slice 10.6: hydrate persistent allowlist from
+  // BOTH sources so "Allow always" choices survive across REPL
+  // restarts AND project-specific permissions don't bleed across
+  // unrelated projects.
+  //
+  //   1. Global: <AIDEN_HOME>/approvals.json (existing Phase-16f path).
+  //   2. Project: <cwd>/.aiden/approvals.json (new Slice 10.6 path).
+  //
+  // Project entries load AFTER global, so a project-scoped grant
+  // shadows a global one for the same tool::signature (Map last-write-
+  // wins inside loadPersistentAllowlist). Each entry carries a
+  // `scope` marker so the future `aiden approvals list` surface
+  // can group by origin.
+  //
+  // Entry shape supports BOTH pre-10.6 `{tool, signature}` and the
+  // new `{tool, signature, createdAt, lastUsedAt}`. Legacy entries
+  // get Date.now() defaults at load; the next persistAllow write
+  // bakes timestamps into the file.
+  const fsForLoad = require('node:fs');
+  type LegacyOrNewEntry = {
+    tool:        string;
+    signature:   string;
+    createdAt?:  number;
+    lastUsedAt?: number;
+  };
+  function loadEntries(filePath: string, scope: 'global' | 'project'): Array<LegacyOrNewEntry & { scope: 'global' | 'project' }> {
+    try {
+      const raw = fsForLoad.readFileSync(filePath, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .filter((e: any) => e && typeof e.tool === 'string' && typeof e.signature === 'string')
+        .map((e: any) => ({
+          tool:       e.tool,
+          signature:  e.signature,
+          createdAt:  typeof e.createdAt  === 'number' ? e.createdAt  : undefined,
+          lastUsedAt: typeof e.lastUsedAt === 'number' ? e.lastUsedAt : undefined,
+          scope,
+        }));
+    } catch {
+      // Missing or unreadable file is fine — no allowlist at that scope.
+      return [];
     }
-  } catch {
-    // Missing or unreadable file is fine — no permanent allowlist yet.
   }
+  const projectApprovalsJson = require('node:path').join(process.cwd(), '.aiden', 'approvals.json');
+  const allEntries = [
+    ...loadEntries(paths.approvalsJson, 'global'),
+    ...loadEntries(projectApprovalsJson, 'project'),
+  ];
+  if (allEntries.length > 0) approvalEngine.loadPersistentAllowlist(allEntries);
+
+  // v4.10 Slice 10.6 — refresh sink. When a permanent-allow entry
+  // short-circuits a prompt during a turn, the engine bumps its
+  // in-memory lastUsedAt. We persist the refreshed entry back to
+  // disk (best-effort) so the on-disk file remains an accurate
+  // audit trail of "what permissions actually got used recently."
+  // Throttling: a single hot tool could fire this many times per
+  // session; the rewrite cost is small (file is tiny) and atomic
+  // (tmp-rename pattern below).
+  approvalEngine.setRefreshSink((entry) => {
+    const targetPath = entry.scope === 'project' ? projectApprovalsJson : paths.approvalsJson;
+    try {
+      const fs = require('node:fs');
+      let cur: Array<Record<string, unknown>> = [];
+      try {
+        const raw = fs.readFileSync(targetPath, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) cur = parsed;
+      } catch { /* fresh file */ }
+      let touched = false;
+      for (const e of cur) {
+        if (e.tool === entry.tool && e.signature === entry.signature) {
+          e.lastUsedAt = entry.lastUsedAt;
+          touched = true;
+          break;
+        }
+      }
+      if (!touched) return;       // entry isn't in this file — refresh is a no-op here
+      const tmp = `${targetPath}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(cur, null, 2), 'utf8');
+      fs.renameSync(tmp, targetPath);
+    } catch { /* refresh is best-effort; never crash a turn */ }
+  });
 
   // Auxiliary client (compression / risk-assessment / session-summary
   // / skill-describe). v4.8.0 Slice 11 — route through Groq's cheap
@@ -1380,11 +1445,62 @@ export async function buildAgentRuntime(
         } catch { /* persistence faults must never break dispatch */ }
       }
     },
-    // Phase 16f: append-on-disk for "Allow always" choices. Single-process
-    // REPL — atomic write via tmp-then-rename.
+    // v4.10 Slice 10.6 — REPL approval-decision audit. Symmetric to
+    // the daemon path (daemonApproval.ts:onDecision, wired Slice 10.2b).
+    // Without this wire, REPL approval REQUESTS landed in run_events
+    // (via onUiEvent above) but the actual DECISIONS did not — so
+    // /trace recent could surface "permission asked" but never
+    // "permission granted/denied" for REPL turns. The audit gap was
+    // the direct mirror of the Slice 10.2d tool_call coverage gap:
+    // grep-based emit-site audits don't catch "site that should emit
+    // but doesn't." Best-effort try/catch so a persistence fault
+    // never crashes a decision in flight.
+    onDecision: (req, decision) => {
+      const rid = replParentRunRef.runId;
+      if (rid === null) return;
+      try {
+        const tags = categorizeEvent('approval_decision');
+        replRunStore.emitEventRich({
+          runId:     rid,
+          category:  tags.category,
+          kind:      tags.kind,
+          name:      'approval_decision',
+          sessionId: replParentRunRef.sessionId ?? null,
+          status:    decision === 'deny' ? 'denied' : 'allowed',
+          summary:   `${req.toolName} → ${decision} (${req.riskTier ?? 'caution'})`,
+          payload: {
+            toolName: req.toolName,
+            category: req.category,
+            riskTier: req.riskTier ?? 'caution',
+            reason:   req.reason ?? null,
+            decision,
+          },
+          visibility: 'system',
+          source:     'repl',
+        });
+      } catch { /* observability must never break a decision */ }
+    },
+    // Phase 16f / v4.10 Slice 10.6: append-on-disk for "Allow always"
+    // choices. Single-process REPL — atomic write via tmp-then-rename.
+    //
+    // Slice 10.6 — entries now carry `createdAt` + `lastUsedAt`
+    // timestamps so listing surfaces can flag stale grants and audit
+    // trails record when each permission was first granted. New
+    // entries land at the GLOBAL scope (~/.aiden/approvals.json) by
+    // default — a future slice may add a "save to project" choice in
+    // the prompt for explicit project-scoped grants.
+    //
+    // De-dupe: if the same tool::signature already exists, refresh
+    // its `lastUsedAt` so re-granting a permission updates the
+    // audit trail rather than silently no-op'ing.
     persistAllow: (tool: string, signature: string) => {
       const fs = require('node:fs');
-      let entries: Array<{ tool: string; signature: string }> = [];
+      let entries: Array<{
+        tool:        string;
+        signature:   string;
+        createdAt?:  number;
+        lastUsedAt?: number;
+      }> = [];
       try {
         const cur = fs.readFileSync(paths.approvalsJson, 'utf8');
         const parsed = JSON.parse(cur);
@@ -1392,15 +1508,18 @@ export async function buildAgentRuntime(
       } catch {
         /* fresh file */
       }
-      // De-dupe: same tool+signature shouldn't appear twice.
-      if (
-        !entries.some((e) => e.tool === tool && e.signature === signature)
-      ) {
-        entries.push({ tool, signature });
-        const tmp = `${paths.approvalsJson}.tmp`;
-        fs.writeFileSync(tmp, JSON.stringify(entries, null, 2), 'utf8');
-        fs.renameSync(tmp, paths.approvalsJson);
+      const now = Date.now();
+      const existing = entries.find((e) => e.tool === tool && e.signature === signature);
+      if (existing) {
+        // Already persisted — refresh lastUsedAt, keep original createdAt.
+        existing.lastUsedAt = now;
+        if (typeof existing.createdAt !== 'number') existing.createdAt = now;
+      } else {
+        entries.push({ tool, signature, createdAt: now, lastUsedAt: now });
       }
+      const tmp = `${paths.approvalsJson}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(entries, null, 2), 'utf8');
+      fs.renameSync(tmp, paths.approvalsJson);
     },
   } as any;
 
