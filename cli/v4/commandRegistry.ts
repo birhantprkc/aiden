@@ -122,6 +122,15 @@ export interface SlashCommandContext {
    * the prompt API uses for free-form input.
    */
   prompt?: (question: string) => Promise<string>;
+  /**
+   * v4.12 — change Aiden's working directory. Wired by the REPL boot
+   * (aidenCLI): does `process.chdir()`, patches the live tool-executor
+   * `ToolContext.cwd` (snapshotted at boot), and invalidates the sandbox
+   * config so the fs allow-list rebuilds against the new cwd. Used by
+   * `/home <path>`. Absent in contexts where cwd cannot change (the command
+   * degrades honestly rather than pretending).
+   */
+  setWorkingDir?: (absPath: string) => void;
 }
 
 /** Result produced by a command handler. */

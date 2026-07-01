@@ -40,6 +40,7 @@ import type { ActionResult } from '../../../core/v4/browserState';
 import { createBrowserState } from '../../../core/v4/browserState';
 import { detectBlocker, type BlockerSurface } from './browserBlocker';
 import { pwSnapshot } from '../../../core/playwrightBridge';
+import { reResolveAndRetry } from './reResolve';
 
 /**
  * Shared observer — one instance per server process. The HOC closes
@@ -241,19 +242,35 @@ export function withBrowserState(
           // common case the retry catches.
           const between = await state.captureState();
           const state_delta = state.computeStateDelta(pre, between);
-          const retryResult = await handler.execute(args, ctx);
-          const retryOk = isSuccessResult(retryResult);
-          staleRefRetry = {
-            attempted: true,
-            succeeded: retryOk,
-            reason:    staleReason,
-            state_delta,
-          };
-          // If retry succeeded, the retry result becomes canonical.
-          // If retry failed, keep the original failure — its error
-          // context is what the model needs to see, and a same-error
-          // retry would just look like duplicated chrome.
-          if (retryOk) result = retryResult;
+
+          // v4.12 B2.1 — ref-based single-target actions (browser_click /
+          // browser_type) get SEMANTIC re-resolution: outcome-already-happened
+          // check → destructive guard → re-snapshot + signature match → retry
+          // once. CSS/text actions (and multi-ref browser_fill) keep the
+          // existing same-args replay below.
+          const argRecord = (args ?? {}) as Record<string, unknown>;
+          const ref = typeof argRecord.ref === 'string' ? argRecord.ref.trim() : '';
+          const name = handler.schema.name;
+          const singleRef = ref !== '' && (name === 'browser_click' || name === 'browser_type');
+
+          if (singleRef) {
+            const rr = await reResolveAndRetry({
+              ref,
+              actionKind: name === 'browser_click' ? 'click' : 'fill',
+              text: name === 'browser_type' ? String(argRecord.text ?? '') : undefined,
+              staleReason,
+              state_delta,
+            });
+            staleRefRetry = rr.sidecar;
+            if (rr.result !== null) result = rr.result;
+          } else {
+            // Existing same-args retry — safe by the "error fires before the DOM
+            // event" invariant (no element identity shift to double-act on).
+            const retryResult = await handler.execute(args, ctx);
+            const retryOk = isSuccessResult(retryResult);
+            staleRefRetry = { attempted: true, succeeded: retryOk, reason: staleReason, state_delta };
+            if (retryOk) result = retryResult;
+          }
         }
       }
 

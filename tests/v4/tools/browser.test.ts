@@ -92,7 +92,9 @@ describe('browser tools', () => {
       text: string;
     };
     expect(result.success).toBe(true);
-    expect(result.text).toBe('page body');
+    // B5.1 — extracted text is redacted + fenced as untrusted before the model.
+    expect(result.text).toContain('page body');
+    expect(result.text).toMatch(/untrusted page content/i);
   });
 
   it('5. browser_extract returns empty string when bridge gives no text', async () => {
@@ -104,7 +106,8 @@ describe('browser tools', () => {
       text: string;
     };
     expect(result.success).toBe(true);
-    expect(result.text).toBe('');
+    // B5.1 — empty page text still comes back fenced (no raw content to leak).
+    expect(result.text).toMatch(/untrusted page content/i);
   });
 
   it('6. browser_get_url returns the current URL', async () => {

@@ -22,15 +22,28 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { killProcessTree, getProcessCreationTime } from './util/spawnCommand';
 
 export interface ProcessHandle {
   id: string;
   command: string;
   pid: number;
+  /** Wall-clock ms when spawn() ran (for display/ordering). */
   startedAt: number;
   status: 'running' | 'exited' | 'killed';
   exitCode?: number;
   exitedAt?: number;
+  /**
+   * v4.12 PM.1 — the identity foundation. OS/kernel process creation-time
+   * (epoch ms), best-effort; undefined when the query failed. PID + createdAt
+   * is the practical process identity (PID alone is reused — the Firefox
+   * lesson). PM.3 verifies this before signalling a recovered pid.
+   */
+  createdAt?: number;
+  /** v4.12 PM.1 — resolved working directory the process was spawned in. */
+  cwd?: string;
+  /** v4.12 PM.1 — owning session/task id (best-effort from ctx.sessionId). */
+  ownerSessionId?: string;
 }
 
 interface Slot {
@@ -38,9 +51,16 @@ interface Slot {
   child: ChildProcess;
   log: string[];
   waiters: Array<(h: ProcessHandle) => void>;
+  /** v4.12 PM.1 — idempotency guard for move-to-finished (exit+error race). */
+  finished: boolean;
+  /** v4.12 PM.1 — pending graceful→force escalation timer, if any. */
+  forceTimer?: ReturnType<typeof setTimeout>;
 }
 
 const MAX_LOG_LINES = 1000;
+
+/** v4.12 PM.1 — grace window between a graceful tree-kill and the force tree-kill. */
+const KILL_GRACE_MS = 2000;
 
 export interface SpawnOpts {
   cwd?: string;
@@ -50,25 +70,48 @@ export interface SpawnOpts {
    *  whitespace-separated token is the executable; the rest are
    *  argv. */
   shell?: boolean;
+  /** v4.12 PM.1 — owning session/task id, stored on the handle. */
+  sessionId?: string;
+  /** v4.12 PM.1 — creation-time provider (test seam). Defaults to the
+   *  OS query in util/spawnCommand. Best-effort; undefined is fine. */
+  getCreationTime?: (pid: number) => number | null;
+  /** v4.12 PM.1 — override `child_process.spawn` (test seam) so idempotency /
+   *  kill-routing can be driven with a fake child. Defaults to the real spawn. */
+  spawnImpl?: typeof spawn;
+}
+
+export interface ProcessRegistryOptions {
+  /** Override the tree-kill impl (test seam). Defaults to killProcessTree. */
+  killTree?: (child: ChildProcess, signal: NodeJS.Signals) => void;
+  /** Override platform (test seam). Defaults to process.platform. */
+  platform?: NodeJS.Platform;
 }
 
 export class ProcessRegistry {
   private readonly slots = new Map<string, Slot>();
+  private readonly killTree: (child: ChildProcess, signal: NodeJS.Signals) => void;
+  private readonly platform: NodeJS.Platform;
+
+  constructor(opts: ProcessRegistryOptions = {}) {
+    this.killTree = opts.killTree ?? killProcessTree;
+    this.platform = opts.platform ?? process.platform;
+  }
 
   spawn(command: string, opts: SpawnOpts = {}): ProcessHandle {
     const id = randomUUID();
     const useShell = opts.shell !== false;
     const isWin = process.platform === 'win32';
+    const spawnFn = opts.spawnImpl ?? spawn;
 
     let child: ChildProcess;
     if (useShell) {
       if (isWin) {
-        child = spawn('powershell.exe', ['-NoProfile', '-Command', command], {
+        child = spawnFn('powershell.exe', ['-NoProfile', '-Command', command], {
           cwd: opts.cwd,
           env: { ...process.env, ...(opts.env ?? {}) },
         });
       } else {
-        child = spawn('bash', ['-lc', command], {
+        child = spawnFn('bash', ['-lc', command], {
           cwd: opts.cwd,
           env: { ...process.env, ...(opts.env ?? {}) },
         });
@@ -76,21 +119,46 @@ export class ProcessRegistry {
     } else {
       const parts = command.split(/\s+/).filter(Boolean);
       const [exe, ...args] = parts;
-      child = spawn(exe, args, {
+      child = spawnFn(exe, args, {
         cwd: opts.cwd,
         env: { ...process.env, ...(opts.env ?? {}) },
       });
     }
 
+    const resolvedCwd = opts.cwd ?? process.cwd();
+    const pid = child.pid ?? -1;
+    // ★ PM.1 — capture the OS creation-time NOW (the PID-identity foundation).
+    // Best-effort: undefined when the process is too short-lived or the query
+    // fails. `startedAt` (wall-clock) is kept separately for display/ordering.
+    const getCreationTime = opts.getCreationTime ?? ((p: number) => getProcessCreationTime(p));
+    const createdAt = pid > 0 ? (getCreationTime(pid) ?? undefined) : undefined;
+
     const handle: ProcessHandle = {
       id,
       command,
-      pid: child.pid ?? -1,
+      pid,
       startedAt: Date.now(),
       status: 'running',
+      createdAt,
+      cwd: resolvedCwd,
+      ownerSessionId: opts.sessionId,
     };
-    const slot: Slot = { handle, child, log: [], waiters: [] };
+    const slot: Slot = { handle, child, log: [], waiters: [], finished: false };
     this.slots.set(id, slot);
+
+    // ★ PM.1 — idempotent move-to-finished. `exit` and `error` can BOTH fire
+    // (e.g. spawn error then exit), and a kill races the natural exit; guard so
+    // completion is recorded — and waiters notified — exactly once.
+    const finish = (status: 'exited' | 'killed', exitCode: number | undefined) => {
+      if (slot.finished) return;
+      slot.finished = true;
+      if (slot.forceTimer) { clearTimeout(slot.forceTimer); slot.forceTimer = undefined; }
+      handle.exitedAt = Date.now();
+      handle.exitCode = exitCode;
+      handle.status = status;
+      const waiters = slot.waiters.splice(0);
+      for (const w of waiters) w(handle);
+    };
 
     const onData = (chunk: Buffer) => {
       const text = chunk.toString();
@@ -104,22 +172,13 @@ export class ProcessRegistry {
     child.stderr?.on('data', onData);
 
     child.on('exit', (code, signal) => {
-      handle.exitedAt = Date.now();
-      handle.exitCode = typeof code === 'number' ? code : undefined;
-      handle.status = signal === 'SIGKILL' || signal === 'SIGTERM'
-        ? 'killed'
-        : 'exited';
-      const waiters = slot.waiters.splice(0);
-      for (const w of waiters) w(handle);
+      const status = signal === 'SIGKILL' || signal === 'SIGTERM' ? 'killed' : 'exited';
+      finish(status, typeof code === 'number' ? code : undefined);
     });
 
     child.on('error', (err) => {
       slot.log.push(`[spawn-error] ${err.message}`);
-      handle.exitedAt = Date.now();
-      handle.exitCode = -1;
-      handle.status = 'exited';
-      const waiters = slot.waiters.splice(0);
-      for (const w of waiters) w(handle);
+      finish('exited', -1);
     });
 
     return handle;
@@ -141,15 +200,43 @@ export class ProcessRegistry {
     return slot.log.slice(-lines);
   }
 
+  /**
+   * ★ PM.1 — TREE-kill (not parent-only), via the shared test-seamed
+   * `killProcessTree` so the `powershell → node` (or `npx → node`) subtree dies
+   * too — `child.kill()` alone orphans grandchildren (the Firefox lesson).
+   *
+   * Platform-honest escalation:
+   *   - POSIX: graceful group SIGTERM → grace window → force group SIGKILL.
+   *   - Windows: a SINGLE atomic force `taskkill /t /f` while the root is alive.
+   *     Graceful-then-force CANNOT work for Windows console trees — a graceful
+   *     `taskkill /t` (no `/f`) kills the root without reaping its console
+   *     descendants, which then orphan (proven live). True Windows graceful
+   *     signalling needs CREATE_NEW_PROCESS_GROUP + Ctrl+C (deferred to PM.4
+   *     alongside Job Objects); until then, atomic force is the correct reap.
+   * Returns true when a kill was dispatched (the exit handler flips status).
+   */
   kill(id: string, signal: NodeJS.Signals = 'SIGTERM'): boolean {
     const slot = this.slots.get(id);
     if (!slot) return false;
     if (slot.handle.status !== 'running') return false;
-    try {
-      return slot.child.kill(signal);
-    } catch {
-      return false;
+
+    if (this.platform === 'win32') {
+      try { this.killTree(slot.child, 'SIGKILL'); } catch { return false; }
+      return true;
     }
+
+    // POSIX: graceful → grace window → force.
+    try { this.killTree(slot.child, signal); } catch { return false; }
+    if (signal !== 'SIGKILL' && !slot.forceTimer) {
+      slot.forceTimer = setTimeout(() => {
+        slot.forceTimer = undefined;
+        if (slot.handle.status === 'running') {
+          try { this.killTree(slot.child, 'SIGKILL'); } catch { /* already gone */ }
+        }
+      }, KILL_GRACE_MS);
+      slot.forceTimer.unref?.();
+    }
+    return true;
   }
 
   waitFor(id: string, timeoutMs?: number): Promise<ProcessHandle> {
@@ -177,12 +264,23 @@ export class ProcessRegistry {
     });
   }
 
+  /**
+   * ★ PM.1 — reap all tracked running processes (wired into REPL shutdown /
+   * session-end so spawns aren't orphaned). Force TREE-kill each so no
+   * grandchild survives; mark finished synchronously (idempotent) so a racing
+   * exit handler doesn't double-report. PM.2 refines this to owner-scoped
+   * reaping with a durable-daemon exemption; PM.1 reaps all (the app is exiting).
+   */
   cleanup(): void {
     for (const slot of this.slots.values()) {
+      if (slot.forceTimer) { clearTimeout(slot.forceTimer); slot.forceTimer = undefined; }
       if (slot.handle.status === 'running') {
-        try { slot.child.kill('SIGKILL'); } catch { /* ignore */ }
-        slot.handle.status = 'killed';
-        slot.handle.exitedAt = Date.now();
+        try { this.killTree(slot.child, 'SIGKILL'); } catch { /* ignore */ }
+        if (!slot.finished) {
+          slot.finished = true;
+          slot.handle.status = 'killed';
+          slot.handle.exitedAt = Date.now();
+        }
       }
     }
   }

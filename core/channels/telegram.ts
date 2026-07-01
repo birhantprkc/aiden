@@ -34,6 +34,7 @@ import { randomUUID } from 'node:crypto'
 
 import { gateway } from '../gateway'
 import type { ChannelAdapter } from './adapter'
+import type { DeliveryBinding, DeliveryCapabilities } from '../deliveryContext'
 import { noopLogger, type Logger } from '../v4/logger'
 import { TelegramRateLimiter } from './telegram-rate-limit'
 import { TelegramGroupStore } from './telegram-groups'
@@ -62,6 +63,26 @@ const POLLING_INTERVAL_MS = 300        // surfaced as a constant so the
                                        // liveness log can publish it.
 const DEFAULT_PARSE_MODE = 'Markdown'  // Aiden agent answers are markdown-friendly
 const CONFLICT_THRESHOLD = 3           // consecutive 409s before we surrender
+
+// v4.12 DC.2 — Telegram's declared delivery capabilities, the shared home for
+// its delivery quirks. Declared HONESTLY per what the seam actually routes
+// today (SH.1 discipline): the 'final' text path is wired and chunks via the
+// UTF-16-aware chunkAtBoundary, so `chunkLongMessages: true`. Edit / outbound
+// media / voice-bubble / reactions are NOT yet routed through ctx.send, so they
+// stay false/[] until a future slice wires them (flip them on then, not now).
+const TELEGRAM_DELIVERY_CAPABILITIES: DeliveryCapabilities = {
+  edit:              false,
+  chunkLongMessages: true,   // deliverToChat → chunkAtBoundary(text, 4096), UTF-16 length
+  media:             [],
+  voiceBubble:       false,
+  reactions:         false,
+}
+
+// v4.12 DC.2 — the per-platform first-message hint (was a hardcoded
+// `channel === 'telegram'` branch in the generic gateway; DC.1 moved it here).
+// Byte-identical text to the pre-migration tip.
+const TELEGRAM_FIRST_MESSAGE_HINT =
+  '_Tip: Continue this conversation on your desktop dashboard with full context._'
 
 /**
  * Phase v4.1-3.2 — build fingerprint.
@@ -1850,10 +1871,42 @@ export class TelegramAdapter implements ChannelAdapter {
     } catch {
       /* non-fatal — proceed with the answer */
     }
-    const reply = await this.processMessage(chatId, userId, text)
-    await this.deliverToChat(chatId, reply).catch((e: Error) =>
-      this.logError(`Reply delivery failed: ${this.scrubToken(e.message)}`),
-    )
+    // v4.12 DC.2 — the agent reply is now delivered THROUGH the DeliveryContext
+    // seam: processMessage passes a delivery binding to gateway.routeMessage,
+    // which constructs the immutable per-turn ctx and calls ctx.send('final',…).
+    // ctx.send routes to the driver below → the UNCHANGED deliverToChat, so
+    // chunking/parse_mode/429-retry are byte-identical. The old direct
+    // deliverToChat call here is removed (the seam owns delivery; keeping it
+    // would double-send).
+    await this.processMessage(chatId, userId, text, this.buildDeliveryBinding(chatId))
+  }
+
+  /**
+   * v4.12 DC.2 — the Telegram DeliveryDriver + declared capabilities for a
+   * given chat. `deliver('final' | 'status')` routes plain text through the
+   * UNCHANGED `deliverToChat` (chunkAtBoundary + parse_mode + 429/parse retry),
+   * guaranteeing byte-identical behaviour. Media/voice/edit/progress kinds are
+   * not wired through the seam yet — they return an honest not-supported
+   * receipt rather than silently dropping (nothing calls them in DC.2).
+   */
+  private buildDeliveryBinding(chatId: string): DeliveryBinding {
+    return {
+      capabilities:     TELEGRAM_DELIVERY_CAPABILITIES,
+      firstMessageHint: TELEGRAM_FIRST_MESSAGE_HINT,
+      driver: {
+        deliver: async (kind, payload) => {
+          if (kind === 'final' || kind === 'status') {
+            const ok = await this.deliverToChat(chatId, payload.text ?? '')
+            return { ok, kind }
+          }
+          return {
+            ok:    false,
+            kind,
+            error: `Telegram DC.2 does not yet route '${kind}' delivery through the seam`,
+          }
+        },
+      },
+    }
   }
 
   /**
@@ -1986,10 +2039,16 @@ export class TelegramAdapter implements ChannelAdapter {
     )
   }
 
+  // v4.12 DC.2 — optional `delivery` binding. When present (the agent-reply
+  // path via deliverAgentReply), gateway.routeMessage constructs the immutable
+  // per-turn ctx and delivers the final through the seam. When absent (internal
+  // forwards like the /clear command), behaviour is exactly as before: the
+  // string is returned and the caller decides what to send.
   private async processMessage(
     chatId: string,
     userId: string,
     text: string,
+    delivery?: DeliveryBinding,
   ): Promise<string> {
     try {
       return await gateway.routeMessage({
@@ -1998,7 +2057,7 @@ export class TelegramAdapter implements ChannelAdapter {
         userId,
         text,
         timestamp: Date.now(),
-      })
+      }, delivery)
     } catch (e: any) {
       this.logError(`routeMessage error: ${this.scrubToken(e?.message)}`)
       return '❌ Something went wrong. Try again.'

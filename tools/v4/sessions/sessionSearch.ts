@@ -34,11 +34,20 @@ export const sessionSearchTool: ToolHandler = {
       properties: {
         query: {
           type: 'string',
-          description: 'Keywords or phrase to search for.',
+          description: 'Keywords or phrase to search for. Also matches tool calls (tool name / command / target), not just prose.',
         },
         limit: {
           type: 'number',
           description: `Maximum number of matches to return. Default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}.`,
+        },
+        include_tool_output: {
+          type: 'boolean',
+          description: 'Include noisy tool-OUTPUT messages too. Default false (searches user + assistant messages, plus tool CALLS).',
+        },
+        order: {
+          type: 'string',
+          enum: ['relevance', 'newest', 'oldest'],
+          description: 'Result ordering. Default "relevance" (BM25).',
         },
       },
       required: ['query'],
@@ -59,7 +68,12 @@ export const sessionSearchTool: ToolHandler = {
     }
     const requested = typeof args.limit === 'number' ? args.limit : DEFAULT_LIMIT;
     const limit = Math.max(1, Math.min(MAX_LIMIT, Math.floor(requested)));
-    const results = ctx.sessions.search(query, limit);
+    const order = args.order === 'newest' || args.order === 'oldest' ? args.order : 'relevance';
+    const results = ctx.sessions.search(query, {
+      limit,
+      includeToolOutput: args.include_tool_output === true,
+      order,
+    });
     return {
       success: true,
       query,

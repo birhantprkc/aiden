@@ -72,8 +72,10 @@ const SECRET_PATTERNS: readonly SecretPattern[] = [
     replacement: '$1$2[REDACTED]' },
 ];
 
-/** Apply every pattern to a single string. Cheap; called per record. */
-function scrubString(s: string): string {
+/** Apply every pattern to a single string. Cheap; called per record.
+ *  Exported (v4.12 B5.1) so the browser-content redactor can reuse these
+ *  patterns instead of hand-rolling its own. */
+export function scrubString(s: string): string {
   let out = s;
   for (const p of SECRET_PATTERNS) {
     out = out.replace(p.regex, p.replacement);

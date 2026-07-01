@@ -15,21 +15,22 @@
  */
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
-import { pwType } from '../../../core/playwrightBridge';
+import { pwType, pwActByLease } from '../../../core/playwrightBridge';
+import { getLeaseStore } from '../../../core/v4/browserState';
 import { withBrowserState } from './_observer';
 
 const _browserFillTool: ToolHandler = {
   schema: {
     name: 'browser_fill',
     description:
-      'Fill multiple form fields. Pass `fields` as an object mapping CSS selectors to text values.',
+      'Fill multiple form fields. Pass `fields` as an object mapping each field to its text — keys may be "@eN" refs (from browser_snapshot, preferred) or CSS selectors.',
     inputSchema: {
       type: 'object',
       properties: {
         fields: {
           type: 'object',
           description:
-            'Object mapping CSS selectors to the text to enter in each.',
+            'Object mapping "@eN" refs (preferred) or CSS selectors to the text to enter in each.',
         },
       },
       required: ['fields'],
@@ -57,18 +58,21 @@ const _browserFillTool: ToolHandler = {
       return { success: false, error: 'fields must be an object' };
     }
     const filled: string[] = [];
-    for (const [selector, value] of Object.entries(fields)) {
+    for (const [key, value] of Object.entries(fields)) {
       const text = value == null ? '' : String(value);
-      const r = await pwType(selector, text);
-      if (!r.ok) {
-        return {
-          success: false,
-          error: r.error,
-          selector,
-          filled,
-        };
+      // B1.2 — "@eN" keys resolve via the lease store; CSS keys use the old path.
+      if (key.startsWith('@e')) {
+        const lease = getLeaseStore().get(key);
+        if (!lease) {
+          return { success: false, error: `Element ref ${key} is not in the current snapshot. Run browser_snapshot to refresh element refs, then retry.`, selector: key, filled };
+        }
+        const r = await pwActByLease(lease, { kind: 'fill', text });
+        if (!r.ok) return { success: false, error: r.error, selector: key, filled };
+      } else {
+        const r = await pwType(key, text);
+        if (!r.ok) return { success: false, error: r.error, selector: key, filled };
       }
-      filled.push(selector);
+      filled.push(key);
     }
     return { success: true, filled, count: filled.length };
   },

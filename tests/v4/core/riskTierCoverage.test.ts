@@ -100,8 +100,9 @@ describe('Tier distribution', () => {
     counts[effectiveTier(name, reg)] += 1;
   }
 
-  it('dangerous tier has exactly 5 tools (the canonical set)', () => {
-    expect(counts.dangerous).toBe(5);
+  it('dangerous tier has exactly 6 tools (the canonical set)', () => {
+    // v4.12 B4.2a — browser_upload (sends local files to the page) joins the set.
+    expect(counts.dangerous).toBe(6);
   });
 
   it('safe tier has at least 15 tools (read-only majority)', () => {

@@ -23,6 +23,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 
 import type { ToolHandler } from '../../core/v4/toolRegistry';
+import { capToolOutput, shellOutputHandle } from '../../core/v4/toolOutputCap';
 
 const DEFAULT_TIMEOUT = 30_000;
 
@@ -129,12 +130,18 @@ export const executeCodeTool: ToolHandler = {
       child.on('close', (code) => {
         clearTimeout(timer);
         const exitCode = typeof code === 'number' ? code : -1;
+        // v4.12 TOC.1 — cap output at the boundary (same helper as shell_exec).
+        const outCap = capToolOutput(stdout);
+        const errCap = capToolOutput(stderr);
         resolve({
           success: exitCode === 0 && !timedOut,
-          stdout,
-          stderr,
+          stdout: outCap.text,
+          stderr: errCap.text,
           exitCode,
           timedOut,
+          ...(outCap.truncated || errCap.truncated
+            ? shellOutputHandle(outCap.omittedChars + errCap.omittedChars)
+            : {}),
         });
       });
     });

@@ -17,6 +17,7 @@
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { pwSnapshot } from '../../../core/playwrightBridge';
+import { sanitizeExtracted } from './redactContent';
 import { withBrowserState } from './_observer';
 
 const _browserExtractTool: ToolHandler = {
@@ -35,7 +36,8 @@ const _browserExtractTool: ToolHandler = {
   riskTier: 'safe',   // v4.4 Phase 1
   async execute() {
     const r = await pwSnapshot();
-    if (r.ok) return { success: true, text: r.text ?? '' };
+    // B5.1 — secrets redacted + fenced as untrusted before reaching the model.
+    if (r.ok) return { success: true, text: sanitizeExtracted(r.text ?? '') };
     return { success: false, error: r.error };
   },
 };

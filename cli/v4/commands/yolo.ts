@@ -30,11 +30,13 @@ export const yolo: SlashCommand = {
     const current = engine.getMode();
     if (current === 'off') {
       const restore = previousMode.get(engine) ?? 'manual';
-      engine.setMode(restore);
+      // ★ SH.1 — /yolo is the controlled user-driven path, so it flips the mode
+      // even after the engine is frozen at boot.
+      engine.setMode(restore, { userInitiated: true });
       ctx.display.success(`YOLO disabled — back to ${restore} approval mode.`);
     } else {
       previousMode.set(engine, current);
-      engine.setMode('off');
+      engine.setMode('off', { userInitiated: true });
       ctx.display.warn(
         'YOLO enabled — every tool auto-allows. /yolo again to disable.',
       );

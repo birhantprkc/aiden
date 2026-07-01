@@ -117,6 +117,12 @@ export interface ElementLease {
   bbox:              { x: number; y: number; w: number; h: number };
   /** sha256 of element.textContent at lease time. */
   visible_text_hash: string;
+  /**
+   * v4.12 B2.1 — submit/commit-like element (input[type=submit|image],
+   * button[type=submit], or a typeless <button> inside a <form>). Feeds the
+   * destructive-action guard so a stale submit is never blind-retried.
+   */
+  submit:            boolean;
 }
 
 /**
@@ -179,12 +185,23 @@ export interface ActionResult {
    *     (e.g. "Permission denied" — clearly not a transient race)
    */
   staleRefRetry?: {
-    attempted:    true;
+    /** False when a re-resolve+retry was deliberately NOT attempted (see `suppressed`). */
+    attempted:    boolean;
     succeeded:    boolean;
     /** The first stale-ref pattern that matched (short string). */
     reason:       string;
     /** Evidence between pre and resnapshot — same shape as `evidence`. */
     state_delta:  string[];
+    /**
+     * v4.12 B2.1 — why a re-resolve+retry was suppressed (when `attempted:false`):
+     *   'already-done'  the expected outcome already happened (no retry needed)
+     *   'destructive'   committing action whose target is gone — never blind-retried
+     *   'ambiguous'     re-snapshot found >1 signature match (escalate to vision, B2.2)
+     *   'gone'          no confident signature match after re-snapshot
+     */
+    suppressed?:  'already-done' | 'destructive' | 'ambiguous' | 'gone';
+    /** v4.12 B2.1 — true when the retry used semantic re-resolution (not same-args replay). */
+    reResolved?:  boolean;
   };
   /**
    * v4.3 Phase 3 — present when the observer detected a manual
@@ -669,4 +686,309 @@ export function createBrowserState(): BrowserState {
   const bs = new BrowserState();
   bs.setBridgeLoader(() => import('../playwrightBridge'));
   return bs;
+}
+
+// ── v4.12 B1.1 — a11y snapshot → ElementLease store ─────────────────────────
+//
+// The ElementLease lifecycle the type was designed for ("Phase 2"). The in-page
+// DOM walk (playwrightBridge.pwAxSnapshot) extracts RAW per-element data; the
+// SEMANTICS below (role mapping, accessible-name precedence, @eN assignment)
+// live here so they're unit-testable — page.evaluate code can't import helpers.
+
+/** Raw per-element data extracted in-page by pwAxSnapshot (no semantics applied). */
+export interface AxRawDescriptor {
+  tag:            string;
+  roleAttr:       string;
+  inputType:      string;
+  ariaLabel:      string;
+  labelledByText: string;
+  textContent:    string;
+  placeholder:    string;
+  alt:            string;
+  title:          string;
+  css_path:       string;
+  bbox:           { x: number; y: number; w: number; h: number };
+  frame_id:       string;
+  /** v4.12 B2.1 — submit/commit-like (set by the in-page walk). */
+  submit:         boolean;
+}
+
+const AX_NAME_CAP = 200;
+
+/** ARIA role for a descriptor: an explicit role attr wins, else map by tag/type. */
+export function axRoleFor(d: Pick<AxRawDescriptor, 'tag' | 'roleAttr' | 'inputType'>): string {
+  if (d.roleAttr) return d.roleAttr;
+  switch (d.tag) {
+    case 'a':        return 'link';
+    case 'button':   return 'button';
+    case 'select':   return 'combobox';
+    case 'textarea': return 'textbox';
+    case 'input':
+      if (d.inputType === 'checkbox') return 'checkbox';
+      if (d.inputType === 'radio')    return 'radio';
+      if (['button', 'submit', 'reset', 'image'].includes(d.inputType)) return 'button';
+      return 'textbox';
+    default:         return d.tag === 'a' ? 'link' : 'generic';
+  }
+}
+
+/**
+ * Accessible name via the pragmatic precedence chain:
+ * aria-label → aria-labelledby text → textContent → placeholder → alt → title.
+ * Whitespace-collapsed and capped (the full ACCNAME algorithm is deferred).
+ */
+export function accessibleName(
+  d: Pick<AxRawDescriptor, 'ariaLabel' | 'labelledByText' | 'textContent' | 'placeholder' | 'alt' | 'title'>,
+): string {
+  const pick = d.ariaLabel || d.labelledByText || d.textContent || d.placeholder || d.alt || d.title || '';
+  return pick.trim().replace(/\s+/g, ' ').slice(0, AX_NAME_CAP);
+}
+
+/**
+ * Per-process store of the most recent snapshot's leases, keyed by `@eN`.
+ * Refreshed on every browser_snapshot — refs are stable within a snapshot; a
+ * fresh snapshot reassigns. Reuses the existing ElementLease type + sha256Hex.
+ */
+export class LeaseStore {
+  private leases = new Map<string, ElementLease>();
+  private snapshotId = 0;
+
+  /** Replace the store from a fresh snapshot's descriptors (document order → @e1…@eN). */
+  refresh(snapshotId: number, url: string, descriptors: AxRawDescriptor[]): ElementLease[] {
+    this.leases.clear();
+    this.snapshotId = snapshotId;
+    const out: ElementLease[] = [];
+    descriptors.forEach((d, i) => {
+      const lease: ElementLease = {
+        ref:               `@e${i + 1}`,
+        snapshot_id:       snapshotId,
+        url,
+        frame_id:          d.frame_id,
+        role:              axRoleFor(d),
+        name:              accessibleName(d),
+        css_path:          d.css_path,
+        bbox:              d.bbox,
+        visible_text_hash: sha256Hex(d.textContent.slice(0, SHORT_TEXT_HASH_CAP)),
+        submit:            d.submit === true,
+      };
+      this.leases.set(lease.ref, lease);
+      out.push(lease);
+    });
+    return out;
+  }
+
+  get(ref: string): ElementLease | undefined { return this.leases.get(ref); }
+  all(): ElementLease[] { return [...this.leases.values()]; }
+  get currentSnapshotId(): number { return this.snapshotId; }
+}
+
+// ── v4.12 B2.1 — semantic re-resolution + destructive guard ─────────────────
+
+/**
+ * Curated destructive/committing verbs (whole-word, case-insensitive). Err
+ * INCLUSIVE: a false positive only costs a surfaced staleness (safe); a false
+ * negative risks a double-submit (the danger). Used by isDestructiveAction.
+ */
+const DESTRUCTIVE_VERBS: readonly string[] = [
+  'buy', 'purchase', 'pay', 'checkout', 'order', 'place order', 'submit', 'send',
+  'post', 'publish', 'confirm', 'delete', 'remove', 'transfer', 'withdraw',
+  'subscribe', 'accept', 'agree', 'continue to payment', 'complete order', 'sign up',
+];
+
+/**
+ * v4.12 B2.1 — would this action COMMIT something? Drives the guard that forbids
+ * blind re-resolve+retry of a stale destructive action (a vanished commit button
+ * may mean the action already succeeded → retrying risks a double-submit).
+ *
+ *   - `type`/`fill` are NEVER destructive (editing a field doesn't commit).
+ *   - `click` is destructive when the element is submit-like OR its accessible
+ *     name contains a destructive verb (whole-word).
+ */
+export function isDestructiveAction(
+  lease: Pick<ElementLease, 'name' | 'submit'>,
+  actionKind: 'click' | 'fill',
+): boolean {
+  if (actionKind !== 'click') return false;
+  if (lease.submit) return true;
+  const name = (lease.name || '').toLowerCase();
+  if (!name) return false;
+  return DESTRUCTIVE_VERBS.some((verb) =>
+    new RegExp(`\\b${verb.replace(/\s+/g, '\\s+')}\\b`).test(name),
+  );
+}
+
+/**
+ * v4.12 B5.2 — pre-classify a browser action for the approval engine (mirrors
+ * shell_exec's classifyCommand). Destructive click → 'dangerous' tier so the
+ * existing approval gate confirms (manual) / denies (smart) it before it runs.
+ * Returns undefined for non-destructive actions (default caution applies).
+ *
+ * Target resolution: ref → the stored lease (role/name/submit); CSS/text click
+ * → treat the target string as the element name for verb matching. type/fill
+ * are never destructive (editing a field doesn't commit), so they're skipped.
+ */
+/**
+ * v4.12 B5.3 — local-first: localhost / loopback / LAN / .local / file: are
+ * LEGITIMATE (the user develops locally). NOT blocked — used only to exempt
+ * local navigation from the secret-URL exfil flag.
+ */
+export function isLocalUrl(url: string): boolean {
+  let u: URL;
+  try { u = new URL(url); } catch { return false; }
+  if (u.protocol === 'file:') return true;
+  const h = u.hostname.toLowerCase().replace(/^\[|\]$/g, ''); // strip IPv6 brackets
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.test')) return true;
+  if (h === '::1' || h.startsWith('127.')) return true;
+  if (/^10\./.test(h)) return true;                       // private A
+  if (/^192\.168\./.test(h)) return true;                 // private C
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;  // private B
+  if (/^169\.254\./.test(h)) return true;                 // link-local
+  return false;
+}
+
+/** Query keys that signal an embedded credential/token (drops the over-broad bare `key`). */
+const SECRET_QUERY_KEY = /^(?:access[_-]?token|auth|api[_-]?key|apikey|token|password|passwd|secret|sig|signature|session|credential|accesskey)$/i;
+
+/** v4.12 B5.3 — does this URL embed a credential/token (userinfo, cred query param, or sk-/Bearer)? */
+export function isSecretBearingUrl(url: string): boolean {
+  let u: URL;
+  try { u = new URL(url); } catch { return false; }
+  if (u.username || u.password) return true; // userinfo creds
+  for (const [k] of u.searchParams) { if (SECRET_QUERY_KEY.test(k)) return true; }
+  return /sk-[A-Za-z0-9_-]{20,}|bearer\s+[A-Za-z0-9._-]{20,}/i.test(url);
+}
+
+export function classifyBrowserAction(
+  toolName: string,
+  args: Record<string, unknown>,
+  opts: { attached?: boolean } = {},
+): { tier: 'dangerous'; reason: string } | undefined {
+  // B5.3 — navigating an EXTERNAL secret-bearing URL is possible credential
+  // exfiltration → confirm. Local URLs (dev) are never flagged or blocked.
+  if (toolName === 'browser_navigate') {
+    const url = typeof args.url === 'string' ? args.url.trim() : '';
+    if (!url) return undefined;
+    if (!isLocalUrl(url) && isSecretBearingUrl(url)) {
+      return {
+        tier: 'dangerous',
+        reason: 'Navigating to an external URL that embeds a credential/token — possible secret exfiltration. Confirm before the browser sends it.',
+      };
+    }
+    // B3.2a — attached to the user's REAL browser: be conservative. Confirm ANY
+    // external navigation (not just secret-bearing), since it's a live
+    // authenticated session. Local URLs (dev) are still never flagged.
+    if (opts.attached && !isLocalUrl(url)) {
+      return {
+        tier: 'dangerous',
+        reason: 'Navigating your REAL browser to an external URL. Confirm before it leaves the local/known origin in your live session.',
+      };
+    }
+    return undefined;
+  }
+
+  if (toolName !== 'browser_click') return undefined; // type/fill never commit
+
+  const ref = typeof args.ref === 'string' ? args.ref.trim() : '';
+  let lease: Pick<ElementLease, 'name' | 'submit'> | undefined;
+  if (ref) {
+    lease = getLeaseStore().get(ref);
+  } else {
+    const target = typeof args.target === 'string'
+      ? args.target
+      : typeof args.selector === 'string' ? args.selector : '';
+    if (target) lease = { name: target, submit: false }; // verb-match the visible target text
+  }
+
+  if (lease && isDestructiveAction(lease, 'click')) {
+    return {
+      tier: 'dangerous',
+      reason: `Destructive browser action — "${lease.name || 'submit'}" looks like a committing action (submit / purchase / delete / send / pay). Confirm before it runs on the live page.`,
+    };
+  }
+  return undefined;
+}
+
+/**
+ * v4.12 B4.2a — classify a JS dialog for the approval path. NOT classifyBrowserAction
+ * (a dialog isn't a tool call) — but reuses the RiskTier shape + the DESTRUCTIVE_VERBS set so a
+ * "Delete?" confirm is gated like a destructive click.
+ *
+ *   - beforeunload          → dangerous (accepting discards unsaved page state).
+ *   - confirm/prompt whose message hits a destructive verb → dangerous.
+ *   - everything else        → caution.
+ */
+export function classifyDialog(
+  type: string,
+  message: string,
+): { tier: 'safe' | 'caution' | 'dangerous'; reason: string } {
+  if (type === 'beforeunload') {
+    return { tier: 'dangerous', reason: 'Leaving the page may discard unsaved changes.' };
+  }
+  const msg = (message || '').toLowerCase();
+  if ((type === 'confirm' || type === 'prompt') && msg) {
+    const hit = DESTRUCTIVE_VERBS.some((verb) =>
+      new RegExp(`\\b${verb.replace(/\s+/g, '\\s+')}\\b`).test(msg),
+    );
+    if (hit) return { tier: 'dangerous', reason: `Dialog looks destructive: "${message.slice(0, 80)}".` };
+  }
+  return { tier: 'caution', reason: `${type} dialog: "${(message || '').slice(0, 80)}".` };
+}
+
+export type SignatureMatch =
+  | { status: 'unique'; match: ElementLease }
+  | { status: 'gone' }
+  | { status: 'ambiguous'; count: number };
+
+/**
+ * v4.12 B2.1 — re-resolve a stale lease against fresh snapshot candidates by its
+ * SEMANTIC SIGNATURE. Confident match = exactly one candidate with the same
+ * role + accessible name + frame_id. visible_text_hash is a confidence filter
+ * (when several share role+name+frame, prefer the text-hash match); bbox is the
+ * final tiebreak (nearest). 0 → gone; >1 unresolved → ambiguous.
+ */
+export function matchLeaseBySignature(old: ElementLease, candidates: ElementLease[]): SignatureMatch {
+  const sameSig = candidates.filter(
+    (c) => c.frame_id === old.frame_id && c.role === old.role && c.name === old.name,
+  );
+  if (sameSig.length === 0) return { status: 'gone' };
+  if (sameSig.length === 1) return { status: 'unique', match: sameSig[0] };
+
+  // Tie-break 1: identical visible_text_hash.
+  const byHash = sameSig.filter((c) => c.visible_text_hash === old.visible_text_hash);
+  if (byHash.length === 1) return { status: 'unique', match: byHash[0] };
+  const pool = byHash.length > 1 ? byHash : sameSig;
+
+  // Tie-break 2: nearest bbox (centre distance), but only if it's unambiguously closest.
+  const dist = (c: ElementLease) => {
+    const dx = (c.bbox.x + c.bbox.w / 2) - (old.bbox.x + old.bbox.w / 2);
+    const dy = (c.bbox.y + c.bbox.h / 2) - (old.bbox.y + old.bbox.h / 2);
+    return dx * dx + dy * dy;
+  };
+  const sorted = [...pool].sort((a, b) => dist(a) - dist(b));
+  if (sorted.length >= 2 && dist(sorted[0]) === dist(sorted[1])) return { status: 'ambiguous', count: pool.length };
+  return { status: 'unique', match: sorted[0] };
+}
+
+let _leaseStore: LeaseStore | null = null;
+/** Process-wide lease store (lifecycle matches the persistent browser context). */
+export function getLeaseStore(): LeaseStore {
+  if (!_leaseStore) _leaseStore = new LeaseStore();
+  return _leaseStore;
+}
+
+/** Model-facing snapshot listing, grouped by frame: `@e1 button "Sign in"`. */
+export function formatAxSnapshot(leases: ElementLease[]): string {
+  if (leases.length === 0) return 'No interactive elements found on the current page.';
+  const byFrame = new Map<string, ElementLease[]>();
+  for (const l of leases) {
+    const g = byFrame.get(l.frame_id) ?? [];
+    g.push(l);
+    byFrame.set(l.frame_id, g);
+  }
+  const lines: string[] = [];
+  for (const [frame, group] of byFrame) {
+    lines.push(`${frame}:`);
+    for (const l of group) lines.push(`  ${l.ref} ${l.role} ${l.name ? `"${l.name}"` : '(no name)'}`);
+  }
+  return lines.join('\n');
 }

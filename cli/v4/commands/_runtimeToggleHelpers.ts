@@ -28,7 +28,8 @@ import {
 } from '../../../core/v4/runtimeToggles';
 
 const LABEL: Record<ToggleKey, string> = {
-  sandbox:       'Sandbox',
+  // ★ v4.12 SH.1 — honest label: file_* guardrails, NOT shell containment.
+  sandbox:       'File guardrails',
   tce:           'TCE',
   browser_depth: 'Browser depth',
   suggestions:   'Suggestions',
@@ -76,7 +77,7 @@ export async function flip(
  * Print the current state of one toggle. One-line output per
  * Q-P8a-2(a):
  *
- *   `Sandbox: ON   (source: config)`
+ *   `File guardrails: ON   (source: config)`
  *
  * `source` reveals which precedence layer provided the value —
  * critical for debugging "why is it ON when my .env says 0".

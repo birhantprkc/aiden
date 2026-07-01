@@ -15,9 +15,10 @@
  * Design choices:
  * - WAL journal mode for one-writer / many-reader concurrency.
  * - foreign_keys=ON so deleting a session cascades to its messages.
- * - FTS5 contentless triggers keep `messages_fts` in sync with `messages`.
- *   We index *only* `messages.content` here — tool_calls are stored as
- *   JSON but not indexed, since the agent rarely searches for tool names.
+ * - FTS5 triggers keep `messages_fts` in sync with `messages`. v4.12 CS.1:
+ *   the indexed cell is `content` + serialized `tool_calls`, so a session is
+ *   findable by a tool name / command / target in a tool call (intent recall),
+ *   not just prose. Schema changes go through the user_version migrate() path.
  * - WAL checkpoint on close() so the file doesn't grow unbounded across
  *   short-lived CLI runs.
  *
@@ -86,6 +87,15 @@ export interface SessionSearchResult {
   score: number;
 }
 
+/** v4.12 CS.1 — session_search options. */
+export interface SearchOptions {
+  limit?: number;
+  /** Include noisy `tool`-role output in results. Default false (user+assistant only). */
+  includeToolOutput?: boolean;
+  /** 'relevance' = BM25 (default); 'newest'/'oldest' = by message time. */
+  order?: 'relevance' | 'newest' | 'oldest';
+}
+
 export interface SessionUpdate {
   title?: string | null;
   providerId?: string | null;
@@ -128,20 +138,32 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
   session_id UNINDEXED,
   message_id UNINDEXED
 );
+`;
 
-CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+// v4.12 CS.1 — the FTS index cell is content + serialized tool_calls (so a
+// session is findable by a tool name / command / target in a tool call, not
+// just prose). The triggers are OWNED BY THE MIGRATION (not SCHEMA_SQL) so the
+// definition can evolve via the user_version rebuild path below — CREATE TRIGGER
+// IF NOT EXISTS can't update an already-created trigger on an existing DB.
+const FTS_SYNC_TRIGGERS_SQL = `
+DROP TRIGGER IF EXISTS messages_ai;
+DROP TRIGGER IF EXISTS messages_ad;
+DROP TRIGGER IF EXISTS messages_au;
+CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
   INSERT INTO messages_fts(rowid, content, session_id, message_id)
-  VALUES (new.id, new.content, new.session_id, new.id);
+  VALUES (new.id, new.content || ' ' || COALESCE(new.tool_calls, ''), new.session_id, new.id);
 END;
-
-CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
   DELETE FROM messages_fts WHERE rowid = old.id;
 END;
-
-CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-  UPDATE messages_fts SET content = new.content WHERE rowid = old.id;
+CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
+  UPDATE messages_fts SET content = new.content || ' ' || COALESCE(new.tool_calls, '')
+  WHERE rowid = old.id;
 END;
 `;
+
+/** Bump when the FTS index definition or schema changes; drives migrate(). */
+const SCHEMA_VERSION = 1;
 
 interface SessionRow {
   id: string;
@@ -207,6 +229,7 @@ export class SessionStore {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.db.exec(SCHEMA_SQL);
+    this.migrate(); // installs FTS triggers + reindexes when the schema version lags
 
     this.insertSessionStmt = this.db.prepare(`
       INSERT INTO sessions (
@@ -231,6 +254,33 @@ export class SessionStore {
     this.listMessagesStmt = this.db.prepare(
       `SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC`,
     );
+  }
+
+  // ── Migrations ───────────────────────────────────────────────────────
+
+  /**
+   * v4.12 CS.1 — user_version-driven migration. Idempotent: guarded by
+   * PRAGMA user_version, so re-running on an up-to-date DB is a no-op (no
+   * double-indexing). v1 installs the content+tool_calls FTS triggers AND
+   * rebuilds messages_fts from the existing corpus, so already-stored sessions
+   * become findable by their tool_calls — not just newly-appended messages.
+   */
+  private migrate(): void {
+    const current = (this.db.pragma('user_version', { simple: true }) as number) ?? 0;
+    if (current >= SCHEMA_VERSION) return;
+    this.db.transaction(() => {
+      if (current < 1) {
+        this.db.exec(FTS_SYNC_TRIGGERS_SQL);
+        // Full reindex: drop the (content-only) FTS rows and rebuild every row
+        // as content + tool_calls so pre-existing history is reindexed too.
+        this.db.exec('DELETE FROM messages_fts;');
+        this.db.exec(
+          `INSERT INTO messages_fts(rowid, content, session_id, message_id)
+           SELECT id, content || ' ' || COALESCE(tool_calls, ''), session_id, id FROM messages;`,
+        );
+      }
+      this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
+    })();
   }
 
   // ── Session lifecycle ────────────────────────────────────────────────
@@ -366,10 +416,21 @@ export class SessionStore {
 
   // ── Search ───────────────────────────────────────────────────────────
 
-  search(query: string, limit = 20): SessionSearchResult[] {
+  search(query: string, opts: SearchOptions | number = {}): SessionSearchResult[] {
+    // Back-compat: search(query, 20) still works (legacy numeric limit).
+    const o: SearchOptions = typeof opts === 'number' ? { limit: opts } : opts;
+    const limit = o.limit ?? 20;
     if (!query || !query.trim()) return [];
     const sanitized = sanitizeFtsQuery(query);
     if (!sanitized) return [];
+
+    // Role filter: default user+assistant; tool output is noisy → opt-in only.
+    const roles = o.includeToolOutput ? ['user', 'assistant', 'tool'] : ['user', 'assistant'];
+    const rolePlaceholders = roles.map(() => '?').join(',');
+    // Ordering: BM25 relevance (default), or by message time.
+    const orderBy = o.order === 'newest' ? 'm.created_at DESC'
+      : o.order === 'oldest' ? 'm.created_at ASC'
+      : 'rank';
 
     const sql = `
       SELECT
@@ -381,13 +442,13 @@ export class SessionStore {
       FROM messages_fts
       JOIN messages m ON m.id = messages_fts.rowid
       JOIN sessions s ON s.id = m.session_id
-      WHERE messages_fts MATCH ?
-      ORDER BY rank
+      WHERE messages_fts MATCH ? AND m.role IN (${rolePlaceholders})
+      ORDER BY ${orderBy}
       LIMIT ?
     `;
     let rows: SearchRow[];
     try {
-      rows = this.db.prepare(sql).all(sanitized, limit) as SearchRow[];
+      rows = this.db.prepare(sql).all(sanitized, ...roles, limit) as SearchRow[];
     } catch {
       // Malformed query that survived sanitization — return empty rather
       // than surfacing the SQLITE_ERROR. Tests cover the edge case.

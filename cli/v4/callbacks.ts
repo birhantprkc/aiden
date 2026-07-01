@@ -699,14 +699,18 @@ Reply with ONE word: safe, caution, or dangerous.`;
   /** Budget warning sink. Caution = dim line, warning = visible warn. */
   onBudgetWarning = (
     level: 'caution' | 'warning',
-    turn: number,
+    current: number,
     max: number,
+    kind: 'iterations' | 'tokens' = 'iterations',
   ): void => {
-    const msg = `Turn ${turn}/${max}`;
+    // v4.12 BE.1 — token budget reports token counts; iterations report turns.
+    const msg = kind === 'tokens'
+      ? `Tokens ${current.toLocaleString()}/${max.toLocaleString()}`
+      : `Turn ${current}/${max}`;
     if (level === 'warning') {
       this.display.warn(`Budget: ${msg} — approaching the cap.`);
     } else if (isVerbose()) {
-      // v4.8.0 Slice 5 — caution-level per-turn dim line is verbose-only;
+      // v4.8.0 Slice 5 — caution-level dim line is verbose-only;
       // the actionable 'warning' tier above continues to fire unchanged.
       this.display.dim(`[budget] ${msg}`);
     }

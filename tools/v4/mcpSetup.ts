@@ -28,6 +28,8 @@ import {
 } from '../../core/v4/mcpClient';
 import type { ConfigManager } from '../../core/v4/config';
 import type { ToolRegistry } from '../../core/v4/toolRegistry';
+import type { AidenPaths } from '../../core/v4/paths';
+import { createMcpAuthProvider } from '../../core/v4/mcp/mcpAuth';
 
 interface RawConfigEntry {
   type?: 'stdio' | 'http';
@@ -38,9 +40,73 @@ interface RawConfigEntry {
   callTimeoutMs?: number;
 }
 
+/**
+ * Shape of the `mcp` config block (servers + tunable knobs). `breaker` and
+ * `reconnect` are read loosely and validated — jitter/now are code-only seams,
+ * not config-exposable.
+ */
+interface RawMcpTuning {
+  servers?: Record<string, RawConfigEntry>;
+  breaker?: unknown;
+  reconnect?: unknown;
+}
+
+function positive(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined;
+}
+function intAtLeast(v: unknown, min: number): number | undefined {
+  return typeof v === 'number' && Number.isInteger(v) && v >= min ? v : undefined;
+}
+
+function pickBreaker(raw: unknown): NonNullable<McpClientOptions['breaker']> {
+  const out: NonNullable<McpClientOptions['breaker']> = {};
+  if (!raw || typeof raw !== 'object') return out;
+  const r = raw as Record<string, unknown>;
+  const threshold = intAtLeast(r.threshold, 1); // positive integer
+  const cooldownMs = positive(r.cooldownMs);     // positive ms
+  if (threshold !== undefined) out.threshold = threshold;
+  if (cooldownMs !== undefined) out.cooldownMs = cooldownMs;
+  return out;
+}
+
+function pickReconnect(raw: unknown): NonNullable<McpClientOptions['reconnect']> {
+  const out: NonNullable<McpClientOptions['reconnect']> = {};
+  if (!raw || typeof raw !== 'object') return out;
+  const r = raw as Record<string, unknown>;
+  const maxPostReadyAttempts = intAtLeast(r.maxPostReadyAttempts, 0); // 0 = no retry
+  const maxStartupAttempts = intAtLeast(r.maxStartupAttempts, 0);
+  const baseDelayMs = positive(r.baseDelayMs);
+  const maxDelayMs = positive(r.maxDelayMs);
+  if (maxPostReadyAttempts !== undefined) out.maxPostReadyAttempts = maxPostReadyAttempts;
+  if (maxStartupAttempts !== undefined) out.maxStartupAttempts = maxStartupAttempts;
+  if (baseDelayMs !== undefined) out.baseDelayMs = baseDelayMs;
+  if (maxDelayMs !== undefined) out.maxDelayMs = maxDelayMs;
+  return out;
+}
+
+/**
+ * Merge config-file MCP tuning (`mcp.breaker` / `mcp.reconnect`) into the
+ * client options. Explicit `clientOpts` win over config (code/tests override);
+ * invalid config values (non-positive, wrong type) are dropped and fall back to
+ * the client's code defaults (threshold 3, cooldown 60s, etc.).
+ */
+export function resolveMcpClientOptions(
+  mcpConfig: { breaker?: unknown; reconnect?: unknown } | undefined,
+  clientOpts: McpClientOptions,
+): McpClientOptions {
+  return {
+    ...clientOpts,
+    breaker: { ...pickBreaker(mcpConfig?.breaker), ...clientOpts.breaker },
+    reconnect: { ...pickReconnect(mcpConfig?.reconnect), ...clientOpts.reconnect },
+  };
+}
+
 export interface SetupMcpFromConfigOptions extends McpClientOptions {
   /** Override the config key. Defaults to `'mcp'`. */
   configKey?: string;
+  /** v4.12 Slice 3a.3 — when set, build the default tokenStore-backed MCP auth
+   *  provider (bearer hooks + needs-auth) unless an explicit `authProvider` is given. */
+  paths?: AidenPaths;
 }
 
 export interface SetupMcpFromConfigResult {
@@ -56,10 +122,16 @@ export async function setupMcpFromConfig(
   registry: ToolRegistry,
   opts: SetupMcpFromConfigOptions = {},
 ): Promise<SetupMcpFromConfigResult> {
-  const { configKey = 'mcp', ...clientOpts } = opts;
-  const client = createMcpClient(registry, clientOpts);
+  const { configKey = 'mcp', paths, ...clientOpts } = opts;
+  const mcpConfig = config.getValue<RawMcpTuning>(configKey);
+  // v4.12 3a.3 — default MCP auth provider from paths (explicit authProvider wins).
+  const withAuth: McpClientOptions = {
+    ...clientOpts,
+    authProvider: clientOpts.authProvider ?? (paths ? createMcpAuthProvider(paths) : undefined),
+  };
+  // Merge user breaker/reconnect tuning from config.yaml (explicit opts win).
+  const client = createMcpClient(registry, resolveMcpClientOptions(mcpConfig, withAuth));
 
-  const mcpConfig = config.getValue<{ servers?: Record<string, RawConfigEntry> }>(configKey);
   const serversRaw = mcpConfig?.servers ?? {};
 
   const connected: string[] = [];

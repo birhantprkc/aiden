@@ -509,3 +509,32 @@ describe('AnthropicAdapter', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('AnthropicAdapter — image content (B2.2a)', () => {
+  it('maps user images to base64 image blocks alongside the text block', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse({ content: [{ type: 'text', text: 'a red square' }], stop_reason: 'end_turn', usage: { input_tokens: 9, output_tokens: 3 } }),
+    );
+    await new AnthropicAdapter(apiKeyOptions).call({
+      messages: [{ role: 'user', content: 'what is in this image?', images: ['data:image/png;base64,iVBORabc'] }],
+      tools: [],
+    });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.messages).toEqual([{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'what is in this image?' },
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORabc' } },
+      ],
+    }]);
+  });
+
+  it('text-only user message is UNCHANGED (string content — backward-compatible)', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
+    );
+    await new AnthropicAdapter(apiKeyOptions).call({ messages: [userMsg('plain text')], tools: [] });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.messages).toEqual([{ role: 'user', content: 'plain text' }]);
+  });
+});

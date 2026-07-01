@@ -130,6 +130,45 @@ describe('isPathAllowed — denylist (read & write)', () => {
     expect(d.allowed).toBe(false);
     expect(d.violation?.code).toBe('fs.sensitive_path');
   });
+
+  // ─── v4.12 SH.1 — hardened cross-platform credential-store denylist ──
+  it('★ SH.1 — file_read of a Windows credential store (%APPDATA%\\Microsoft\\Credentials) is denied', () => {
+    // Inject a synthetic Windows env so the test is deterministic on any OS.
+    const appData = path.join('C:', 'Users', 'test', 'AppData', 'Roaming');
+    const cfg = readSandboxConfig({ AIDEN_SANDBOX: '1', APPDATA: appData });
+    const target = path.join(appData, 'Microsoft', 'Credentials', 'DFBE70A7.bin');
+    const d = isPathAllowed(target, 'read', process.cwd(), cfg);
+    expect(d.allowed).toBe(false);
+    expect(d.violation?.code).toBe('fs.sensitive_path');
+  });
+
+  it('★ SH.1 — file_read of a Windows SAM/SYSTEM hive (System32\\config) is denied', () => {
+    const winDir = path.join('C:', 'Windows');
+    const cfg = readSandboxConfig({ AIDEN_SANDBOX: '1', SystemRoot: winDir });
+    const target = path.join(winDir, 'System32', 'config', 'SAM');
+    const d = isPathAllowed(target, 'read', process.cwd(), cfg);
+    expect(d.allowed).toBe(false);
+    expect(d.violation?.code).toBe('fs.sensitive_path');
+  });
+
+  it('★ SH.1 — cloud/cluster creds (~/.kube, ~/.docker, ~/.azure) are denied cross-platform', () => {
+    const cfg = readSandboxConfig({ AIDEN_SANDBOX: '1' });
+    for (const rel of [['.kube', 'config'], ['.docker', 'config.json'], ['.azure', 'accessTokens.json']]) {
+      const target = path.join(os.homedir(), ...rel);
+      const d = isPathAllowed(target, 'read', process.cwd(), cfg);
+      expect(d.allowed, `${rel.join('/')} should be denied`).toBe(false);
+      expect(d.violation?.code).toBe('fs.sensitive_path');
+    }
+  });
+
+  it('★ SH.1 — Windows cred paths are omitted when APPDATA is unset (no bogus entries)', () => {
+    // No APPDATA/LOCALAPPDATA/SystemRoot → no Windows-specific deny entries.
+    const cfg = readSandboxConfig({ AIDEN_SANDBOX: '1' });
+    const hasWinCredEntry = cfg.fsDenyList.some((p) => /Microsoft[\\/]Credentials/i.test(p));
+    // On a real Windows dev box process.env leaks in only via the singleton
+    // path (env === process.env); here we pass a custom env, so none appear.
+    expect(hasWinCredEntry).toBe(false);
+  });
 });
 
 describe('isPathAllowed — allowlist (write/delete only)', () => {

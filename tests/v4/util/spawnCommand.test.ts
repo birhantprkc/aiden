@@ -12,7 +12,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { escapeCmdArg, spawnCommand } from '../../../core/v4/util/spawnCommand';
+import { escapeCmdArg, spawnCommand, killProcessTree, getProcessCreationTime } from '../../../core/v4/util/spawnCommand';
 
 function fakeSpawn() {
   return vi.fn((_cmd: string, _args: readonly string[], _opts: unknown) => {
@@ -149,5 +149,69 @@ describe('spawnCommand — Windows', () => {
     // cmd.exe would split on the space and the MCP server would see a
     // truncated path. This is the integrity guarantee the helper provides.
     expect(r.resolvedArgs[3]).toContain('"C:\\My Files\\notes"');
+  });
+});
+
+describe('killProcessTree — v4.12 PM.1 (sync taskkill before child.kill)', () => {
+  function fakeChild(pid: number | null = 4242) {
+    const calls: string[] = [];
+    const child = { pid, kill: vi.fn((s?: string) => { calls.push(`kill:${s}`); return true; }) };
+    return { child, calls };
+  }
+
+  it('★ Windows: runs a SYNCHRONOUS `taskkill /pid <pid> /t` and does NOT child.kill (taskkill owns the tree incl. root)', () => {
+    const execSyncImpl = vi.fn(() => '') as any;
+    const { child, calls } = fakeChild(1234);
+    killProcessTree(child as any, 'SIGTERM', { platform: 'win32', execSyncImpl });
+    expect(execSyncImpl).toHaveBeenCalledTimes(1);
+    expect(String(execSyncImpl.mock.calls[0][0])).toBe('taskkill /pid 1234 /t');   // graceful: no /f
+    // ★ the fix: on Windows child.kill is NOT fired — firing it would kill the
+    // root during the graceful pass and orphan console descendants.
+    expect(calls).toEqual([]);
+  });
+
+  it('Windows SIGKILL adds /f (force tree-kill), still no child.kill', () => {
+    const execSyncImpl = vi.fn(() => '') as any;
+    const { child, calls } = fakeChild(999);
+    killProcessTree(child as any, 'SIGKILL', { platform: 'win32', execSyncImpl });
+    expect(String(execSyncImpl.mock.calls[0][0])).toBe('taskkill /pid 999 /t /f');
+    expect(calls).toEqual([]);
+  });
+
+  it('Windows: a throwing taskkill does not prevent the child.kill fallback', () => {
+    const execSyncImpl = vi.fn(() => { throw new Error('not found'); }) as any;
+    const { child, calls } = fakeChild(1);
+    expect(() => killProcessTree(child as any, 'SIGKILL', { platform: 'win32', execSyncImpl })).not.toThrow();
+    expect(calls).toContain('kill:SIGKILL');   // belt-and-suspenders still fires
+  });
+
+  it('POSIX: signals the process GROUP (-pid), then the direct child', () => {
+    const killed: Array<[number, string | number]> = [];
+    const killImpl = (p: number, s: NodeJS.Signals | number) => { killed.push([p, s]); };
+    const { child, calls } = fakeChild(555);
+    killProcessTree(child as any, 'SIGTERM', { platform: 'linux', killImpl });
+    expect(killed).toEqual([[-555, 'SIGTERM']]);   // negative pid → group
+    expect(calls).toContain('kill:SIGTERM');
+  });
+});
+
+describe('getProcessCreationTime — v4.12 PM.1', () => {
+  it('Windows: parses ISO StartTime → epoch ms', () => {
+    const execSyncImpl = vi.fn(() => '2026-07-01T08:09:18.1447871Z\n') as any;
+    const ms = getProcessCreationTime(1234, { platform: 'win32', execSyncImpl });
+    expect(ms).toBe(Date.parse('2026-07-01T08:09:18.1447871Z'));
+    expect(String(execSyncImpl.mock.calls[0][0])).toContain('Get-Process -Id 1234');
+    expect(String(execSyncImpl.mock.calls[0][0])).toContain("ToString('o')");
+  });
+
+  it('best-effort: a throwing query → null (never throws)', () => {
+    const execSyncImpl = vi.fn(() => { throw new Error('no such process'); }) as any;
+    expect(getProcessCreationTime(1234, { platform: 'win32', execSyncImpl })).toBeNull();
+  });
+
+  it('rejects a non-positive pid without querying', () => {
+    const execSyncImpl = vi.fn(() => '') as any;
+    expect(getProcessCreationTime(-1, { platform: 'win32', execSyncImpl })).toBeNull();
+    expect(execSyncImpl).not.toHaveBeenCalled();
   });
 });

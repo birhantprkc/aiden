@@ -435,6 +435,13 @@ function toWireTool(
  * the single-block identity array because the API requires the prefix
  * to be present.
  */
+/** Parse a `data:<media>;base64,<data>` URL into Anthropic's image-source parts. */
+function parseImageDataUrl(dataUrl: string): { mediaType: string; data: string } | null {
+  const m = /^data:([^;,]+);base64,(.*)$/s.exec(dataUrl);
+  if (!m) return null;
+  return { mediaType: m[1], data: m[2] };
+}
+
 function encodeMessages(
   messages: Message[],
   authMode: 'api_key' | 'oauth',
@@ -468,7 +475,19 @@ function encodeMessages(
     }
 
     if (msg.role === 'user') {
-      wireMessages.push({ role: 'user', content: msg.content });
+      // v4.12 B2.2a — a user turn may carry base64 image data URLs for vision.
+      // Text-only (no images) stays a plain string — unchanged wire shape.
+      if (msg.images && msg.images.length > 0) {
+        const blocks: unknown[] = [];
+        if (msg.content) blocks.push({ type: 'text', text: msg.content });
+        for (const dataUrl of msg.images) {
+          const img = parseImageDataUrl(dataUrl);
+          if (img) blocks.push({ type: 'image', source: { type: 'base64', media_type: img.mediaType, data: img.data } });
+        }
+        wireMessages.push({ role: 'user', content: blocks });
+      } else {
+        wireMessages.push({ role: 'user', content: msg.content });
+      }
       continue;
     }
 

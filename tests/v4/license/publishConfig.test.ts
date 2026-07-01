@@ -14,7 +14,10 @@ describe('npm publish config', () => {
     const raw = await fs.readFile(path.join(repoRoot, 'package.json'), 'utf8');
     const pkg = JSON.parse(raw) as Record<string, any>;
     expect(pkg.name).toBe('aiden-runtime');
-    expect(pkg.version).toMatch(/^4\.\d+\.\d+(-(?:beta|rc)\.\d+)?$/);
+    // Well-formedness check (not a publishability gate): `-dev` is a valid
+    // pre-release identifier for dev branches like feat/v4.12. The real
+    // publish gate is the tag-triggered .github/workflows/publish.yml.
+    expect(pkg.version).toMatch(/^4\.\d+\.\d+(-(?:beta|rc|dev)(?:\.\d+)?)?$/);
     expect(pkg.publishConfig?.access).toBe('public');
     expect(pkg.scripts?.prepublishOnly).toContain('typecheck');
     expect(pkg.scripts?.prepublishOnly).toContain('build');

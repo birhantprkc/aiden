@@ -39,6 +39,8 @@ import { fileMoveTool } from './files/fileMove';
 import { fileCopyTool } from './files/fileCopy';
 
 import { browserScreenshotTool } from './browser/browserScreenshot';
+import { browserSnapshotTool } from './browser/browserSnapshot';
+import { browserSeeTool } from './browser/browserSee';
 import { browserExtractTool } from './browser/browserExtract';
 import { browserGetUrlTool } from './browser/browserGetUrl';
 import { browserNavigateTool } from './browser/browserNavigate';
@@ -47,6 +49,8 @@ import { browserTypeTool } from './browser/browserType';
 import { browserFillTool } from './browser/browserFill';
 import { browserScrollTool } from './browser/browserScroll';
 import { browserCloseTool } from './browser/browserClose';
+import { browserDialogTool } from './browser/browserDialog';
+import { browserUploadTool } from './browser/browserUpload';
 
 import { sessionSearchTool } from './sessions/sessionSearch';
 import { sessionListTool } from './sessions/sessionList';
@@ -56,6 +60,7 @@ import { skillsListTool } from './skills/skillsList';
 import { skillViewTool } from './skills/skillView';
 import { skillManageTool } from './skills/skillManage';
 import { makeLookupToolSchema } from './skills/lookupToolSchema';
+import { makeToolBridge } from './skills/toolBridge';
 
 import { systemInfoTool } from './system/systemInfo';
 import { nowPlayingTool } from './system/nowPlaying';
@@ -135,6 +140,8 @@ export function registerReadOnlyTools(registry: ToolRegistry): void {
   register(fileListTool);
 
   register(browserScreenshotTool);
+  register(browserSnapshotTool);
+  register(browserSeeTool);
   register(browserExtractTool);
   register(browserGetUrlTool);
 
@@ -163,6 +170,10 @@ export function registerReadOnlyTools(registry: ToolRegistry): void {
   register(mediaSessionsTool);
 
   register(makeLookupToolSchema(registry));
+  // v4.12 OM.2 — the deferred-tool search bridge (tool_search + tool_call).
+  // toolset:'bridge' → excluded from normal assembly; injected only by
+  // applyToolDeferral when mcp schema cost crosses the threshold.
+  for (const h of makeToolBridge(registry)) register(h);
 
   // Phase v4.1-subagent — register a stub for subagent_fanout so its
   // schema is visible to the agent loop, the MCP server, and the
@@ -257,6 +268,8 @@ export function registerWriteTools(registry: ToolRegistry): void {
   register(browserFillTool);
   register(browserScrollTool);
   register(browserCloseTool);
+  register(browserDialogTool);
+  register(browserUploadTool);
 
   register(executeCodeTool);
 

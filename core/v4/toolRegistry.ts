@@ -47,6 +47,8 @@ import type { SSRFProtection } from '../../moat/ssrfProtection';
 import type { TirithScanner } from '../../moat/tirithScanner';
 import type { MemoryGuard } from '../../moat/memoryGuard';
 import { classifyCommand } from '../../moat/dangerousPatterns';
+import { classifyBrowserAction } from './browserState';
+import { pwBrowserStatus, pwDialogPendingTier } from '../playwrightBridge';
 import type { SkillLoader } from './skillLoader';
 import type { BundledManifest } from './skillBundledManifest';
 
@@ -282,7 +284,15 @@ export class ToolRegistry {
           continue;
         }
       }
-      if (filterToolsets && filterToolsets.length > 0) {
+      // v4.12 — MCP tools are explicitly user-added (via `/mcp add|import`
+      // or config.yaml `mcp.servers`), not part of the static profile
+      // taxonomy. They bypass the profile *include*-filter so they always
+      // reach the model regardless of the active profile's toolset list —
+      // otherwise they'd be registry-visible (`/mcp status`) but
+      // model-invisible. The exclude filter above still applies (so
+      // `excludeToolsets: ['mcp']` remains a working opt-out), as does the
+      // context filter below.
+      if (filterToolsets && filterToolsets.length > 0 && handler.toolset !== 'mcp') {
         if (!handler.toolset || !filterToolsets.includes(handler.toolset)) {
           continue;
         }
@@ -379,6 +389,33 @@ export class ToolRegistry {
           const c = classifyCommand(args.command);
           riskTier = c.tier;
           reason = c.reason;
+        } else if (
+          call.name === 'browser_click' || call.name === 'browser_type' ||
+          call.name === 'browser_fill' || call.name === 'browser_navigate'
+        ) {
+          // v4.12 B5.2 — confirm-destructive (committing clicks).
+          // v4.12 B5.3 — confirm external secret-bearing navigation (exfil guard;
+          // local URLs are never flagged/blocked).
+          // v4.12 B3.2a — when attached to the user's REAL browser, also confirm
+          // ANY external navigation (conservative default for live sessions).
+          const attached = pwBrowserStatus().mode === 'attached';
+          const c = classifyBrowserAction(call.name, args, { attached });
+          if (c) {
+            riskTier = c.tier;
+            reason = c.reason;
+          }
+        } else if (call.name === 'browser_dialog') {
+          // v4.12 B4.2a — accepting/responding to a DANGEROUS parked dialog is
+          // confirm-gated (reuses the dialog's tier from classifyDialog).
+          const act = String((args as Record<string, unknown>).action ?? '');
+          if (act === 'accept' || act === 'respond') {
+            const t = pwDialogPendingTier();
+            if (t) { riskTier = t; reason = `Responding (${act}) to a ${t} dialog.`; }
+          }
+        } else if (call.name === 'browser_upload') {
+          // v4.12 B4.2a — uploading local files to the page is always dangerous.
+          riskTier = 'dangerous';
+          reason = 'Uploading local file(s) to the page.';
         }
         // v4.4 Phase 4 — dangerous-tier auto-preview. Surface
         // "what would happen if you say yes" to the approval prompt.

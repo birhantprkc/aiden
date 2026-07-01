@@ -267,11 +267,33 @@ export class ApprovalEngine {
    */
   private refreshSink?: (entry: AllowlistEntry) => void;
   private batchGate?: BatchApprovalGate;
+  /**
+   * ★ v4.12 SH.1 — frozen-approval property: frozen at boot so in-process code
+   * can NOT flip approvals mid-session. After boot the host calls `freeze()`.
+   * From then on `setMode()` is a no-op UNLESS the caller passes
+   * `{ userInitiated: true }` — the controlled path used by `/yolo` and
+   * `--yolo`. This prevents a held ApprovalEngine ref (a tool, a plugin, a
+   * compromised code path) from silently disabling approvals.
+   */
+  private frozen = false;
 
   constructor(
     private mode: ApprovalMode = 'manual',
     private callbacks: ApprovalCallbacks = {},
   ) {}
+
+  /**
+   * ★ SH.1 — lock the mode against in-process flips. Idempotent. Called by the
+   * host once boot-time mode setup (config default + `--yolo`) is complete.
+   */
+  freeze(): void {
+    this.frozen = true;
+  }
+
+  /** Whether the mode is locked against non-user-initiated flips. */
+  isFrozen(): boolean {
+    return this.frozen;
+  }
 
   /**
    * Phase 20 wiring: late-binding installer for the Pro batch-approval
@@ -288,7 +310,14 @@ export class ApprovalEngine {
     return this.batchGate;
   }
 
-  setMode(mode: ApprovalMode): void {
+  /**
+   * ★ SH.1 — after `freeze()`, only a user-initiated call (`{ userInitiated:
+   * true }`, from `/yolo` or `--yolo`) may change the mode. Any other
+   * post-freeze call is a silent no-op — in-process code can NOT flip approvals.
+   * Pre-freeze (boot) calls apply normally.
+   */
+  setMode(mode: ApprovalMode, opts?: { userInitiated?: boolean }): void {
+    if (this.frozen && !opts?.userInitiated) return;
     this.mode = mode;
   }
 

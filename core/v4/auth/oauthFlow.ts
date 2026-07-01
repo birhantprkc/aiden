@@ -85,7 +85,8 @@ const DEVICE_VERIFY_PATH         = '/codex/device';
 const DEVICE_REDIRECT_PATH       = '/deviceauth/callback';
 
 const CONTENT_TYPE_JSON = 'application/json';
-const CONTENT_TYPE_FORM = 'application/x-www-form-urlencoded';
+/** Exported for reuse by the MCP loopback flow (core/v4/mcp/oauthLoginFlow.ts). */
+export const CONTENT_TYPE_FORM = 'application/x-www-form-urlencoded';
 
 // ── PKCE ──────────────────────────────────────────────────────────────
 
@@ -401,8 +402,10 @@ export async function refreshTokens(
  * POST `body` to each URL until one returns 200 with a valid token
  * payload. On all-failed, throws an error whose message embeds the last
  * status + body excerpt so the user can diagnose without diff-hunting.
+ *
+ * Exported for reuse by the MCP loopback flow (core/v4/mcp/oauthLoginFlow.ts).
  */
-async function tryTokenExchange(
+export async function tryTokenExchange(
   endpoints:    string[],
   body:         string,
   contentType:  string,

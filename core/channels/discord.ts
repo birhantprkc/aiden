@@ -31,7 +31,50 @@ import {
 } from 'discord.js'
 import { gateway } from '../gateway'
 import type { ChannelAdapter } from './adapter'
+import type { DeliveryBinding, DeliveryCapabilities } from '../deliveryContext'
 import { noopLogger, type Logger } from '../v4/logger'
+
+// v4.12 DC.3 — Discord's per-message hard limit. Replies longer than this were
+// previously TRUNCATED (substring(0, 2000)); migrating onto the DeliveryContext
+// seam chunks at this boundary instead, so nothing is lost.
+const DISCORD_MAX_MESSAGE_CHARS = 2000
+
+// v4.12 DC.3 — declared HONESTLY per what the seam actually routes after this
+// slice (SH.1/DC.2 discipline). Only chunking is wired now; edit / media /
+// voice / reactions are NOT routed through ctx.send, so they stay false/[] and
+// their kinds return an honest not-supported receipt until a future slice wires
+// them. (Slash commands still use interaction.editReply to resolve the deferred
+// reply — that's the interaction-response mechanism, not a seam 'edit'
+// capability, so `edit` is honestly false.)
+const DISCORD_DELIVERY_CAPABILITIES: DeliveryCapabilities = {
+  edit:              false,
+  chunkLongMessages: true,   // the DC.3 fix — chunkAtBoundary(text, 2000)
+  media:             [],
+  voiceBubble:       false,
+  reactions:         false,
+}
+
+/**
+ * v4.12 DC.3 — split `text` into pieces no larger than `limit`, preferring a
+ * newline boundary, then a space, then a hard cut; the split must fall in the
+ * second half so a long token near the start doesn't force a tiny chunk. Same
+ * algorithm Telegram uses (at 4096) — Discord chunks at 2000. Standalone here
+ * to avoid touching the byte-identical Telegram adapter (DC.2).
+ */
+function chunkAtBoundary(text: string, limit: number): string[] {
+  if (text.length <= limit) return [text]
+  const out: string[] = []
+  let cursor = text
+  while (cursor.length > 0) {
+    if (cursor.length <= limit) { out.push(cursor); break }
+    let cut = cursor.lastIndexOf('\n', limit)
+    if (cut < limit / 2) cut = cursor.lastIndexOf(' ', limit)
+    if (cut < limit / 2) cut = limit
+    out.push(cursor.slice(0, cut))
+    cursor = cursor.slice(cut).replace(/^\s+/, '')
+  }
+  return out
+}
 
 export class DiscordAdapter implements ChannelAdapter {
   readonly name = 'discord'
@@ -93,9 +136,17 @@ export class DiscordAdapter implements ChannelAdapter {
         await (message.channel as TextChannel).sendTyping?.()
       } catch {}
 
-      const response = await this.processMessage(message.channelId, message.author.id, message.content)
-      await message.reply(response.substring(0, 2000)).catch((e: Error) =>
-        this.log.error(`Reply error: ${e.message}`),
+      // v4.12 DC.3 — deliver through the DeliveryContext seam. The binding's
+      // sink sends chunk 0 as a reply (preserves the "replying to" reference),
+      // the rest as follow-on channel messages — so long replies chunk instead
+      // of truncating. The gateway calls ctx.send('final', …); no direct send
+      // here (exactly N chunk messages, no double-send).
+      await this.processMessage(
+        message.channelId, message.author.id, message.content,
+        this.buildDeliveryBinding(async (chunk, i) => {
+          if (i === 0) await message.reply(chunk)
+          else await (message.channel as TextChannel).send(chunk)
+        }),
       )
     })
 
@@ -119,9 +170,15 @@ export class DiscordAdapter implements ChannelAdapter {
       if (interaction.commandName === 'aiden') {
         const prompt = interaction.options.getString('prompt', true)
         await interaction.deferReply()
-        const response = await this.processMessage(channelId, userId, prompt)
-        await interaction.editReply(response.substring(0, 2000)).catch((e: Error) =>
-          this.log.error(`editReply error: ${e.message}`),
+        // v4.12 DC.3 — through the seam. Chunk 0 resolves the deferred reply via
+        // editReply (required to answer the interaction), the rest via followUp
+        // — long replies chunk instead of truncating.
+        await this.processMessage(
+          channelId, userId, prompt,
+          this.buildDeliveryBinding(async (chunk, i) => {
+            if (i === 0) await interaction.editReply(chunk)
+            else await interaction.followUp(chunk)
+          }),
         )
       } else if (interaction.commandName === 'aiden-help') {
         await interaction.reply({
@@ -169,7 +226,16 @@ export class DiscordAdapter implements ChannelAdapter {
     return true
   }
 
-  private async processMessage(channelId: string, userId: string, text: string): Promise<string> {
+  // v4.12 DC.3 — optional `delivery` binding (mirrors Telegram DC.2). When
+  // present, gateway.routeMessage constructs the immutable per-turn ctx and
+  // delivers the final reply through the seam (ctx.send('final', …) → the
+  // binding's sink). When absent, behaviour is unchanged (returns the string).
+  private async processMessage(
+    channelId: string,
+    userId: string,
+    text: string,
+    delivery?: DeliveryBinding,
+  ): Promise<string> {
     try {
       return await gateway.routeMessage({
         channel:   'discord',
@@ -177,10 +243,41 @@ export class DiscordAdapter implements ChannelAdapter {
         userId,
         text,
         timestamp: Date.now(),
-      })
+      }, delivery)
     } catch (e: any) {
       this.log.error(`routeMessage error: ${e.message}`)
       return '❌ Something went wrong. Try again.'
+    }
+  }
+
+  /**
+   * v4.12 DC.3 — the Discord DeliveryDriver + declared capabilities for one
+   * turn. `deliver('final' | 'status')` CHUNKS at the 2000-char boundary and
+   * sends each chunk via the caller-supplied `sink` (which owns the Discord
+   * send primitive for its context — message.reply/channel.send for a message,
+   * editReply/followUp for a slash interaction). This is the DC.3 payoff: long
+   * replies chunk instead of truncating. Not-yet-wired kinds return an honest
+   * not-supported receipt rather than silently dropping.
+   */
+  private buildDeliveryBinding(
+    sink: (chunk: string, index: number) => Promise<void>,
+  ): DeliveryBinding {
+    return {
+      capabilities: DISCORD_DELIVERY_CAPABILITIES,
+      driver: {
+        deliver: async (kind, payload) => {
+          if (kind === 'final' || kind === 'status') {
+            const chunks = chunkAtBoundary(payload.text ?? '', DISCORD_MAX_MESSAGE_CHARS)
+            for (let i = 0; i < chunks.length; i++) await sink(chunks[i], i)
+            return { ok: true, kind, chunks: chunks.length }
+          }
+          return {
+            ok:    false,
+            kind,
+            error: `Discord DC.3 does not yet route '${kind}' delivery through the seam`,
+          }
+        },
+      },
     }
   }
 
@@ -188,7 +285,11 @@ export class DiscordAdapter implements ChannelAdapter {
     try {
       const ch = this.client?.channels.cache.get(channelId)
       if (ch && (ch instanceof TextChannel || ch instanceof DMChannel)) {
-        await ch.send(text.substring(0, 2000))
+        // v4.12 DC.3 — chunk instead of truncate (was substring(0, 2000)); the
+        // proactive gateway.deliver() / send() path inherits the fix too.
+        for (const chunk of chunkAtBoundary(text, DISCORD_MAX_MESSAGE_CHARS)) {
+          await ch.send(chunk)
+        }
         return true
       }
       return false

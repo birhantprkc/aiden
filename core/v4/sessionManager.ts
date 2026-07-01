@@ -28,6 +28,7 @@ import type {
   SessionRecord,
   SessionSearchResult,
   SessionStore,
+  SearchOptions,
   AppendMessageInput,
 } from './sessionStore';
 import type { Message } from '../../providers/v4/types';
@@ -156,8 +157,14 @@ export class SessionManager {
     }
   }
 
-  search(query: string, limit?: number): SessionSearchResult[] {
-    return this.store.search(query, limit);
+  search(query: string, opts?: SearchOptions | number): SessionSearchResult[] {
+    return this.store.search(query, opts ?? {});
+  }
+
+  /** v4.12 BE.1 — cumulative tokens spent in a session (for the per-session cap). */
+  getSessionTokens(sessionId: string): number {
+    const s = this.store.getSession(sessionId);
+    return s ? s.totalInputTokens + s.totalOutputTokens : 0;
   }
 
   /**

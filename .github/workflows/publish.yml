@@ -79,6 +79,19 @@ jobs:
           fi
           echo "Verified: tag and package.json both at $PKG_VERSION"
 
+      - name: Refuse to publish non-release pre-release versions (e.g. -dev)
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          # Defense-in-depth: only plain releases (4.x.y) and beta/rc
+          # pre-releases may reach npm. Dev-line markers like -dev are NOT
+          # publishable by definition — a -dev tag matches the v4.*.* trigger
+          # and would otherwise ship as `latest`. Hard-stop before build/publish.
+          if [[ "$PKG_VERSION" == *-* ]] && [[ "$PKG_VERSION" != *-beta.* ]] && [[ "$PKG_VERSION" != *-rc.* ]]; then
+            echo "::error::Refusing to publish '$PKG_VERSION' — non-release pre-release (e.g. -dev). Bump to a release (4.x.y) or a -beta.N / -rc.N version first."
+            exit 1
+          fi
+          echo "Publishable version: $PKG_VERSION"
+
       - name: Build
         run: npm run build
 

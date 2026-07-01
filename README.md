@@ -71,7 +71,7 @@ Windows · Linux · WSL · macOS (API Mode)
 ![Daemon mode](https://img.shields.io/badge/Daemon-opt--in-FFB088?style=flat-square)
 ![Sub-agents](https://img.shields.io/badge/Sub--agents-fanout-FFB088?style=flat-square)
 ![TCE](https://img.shields.io/badge/TCE-error_recovery-4ADE80?style=flat-square)
-![Sandbox](https://img.shields.io/badge/Sandbox-tiered-FBBF24?style=flat-square)
+![Guardrails](https://img.shields.io/badge/Guardrails-tiered-FBBF24?style=flat-square)
 ![BYOK](https://img.shields.io/badge/BYOK-pure-FF6B35?style=flat-square)
 
 <!-- Providers (sample) -->
@@ -217,7 +217,7 @@ See [CHANGELOG.md](./CHANGELOG.md) for details.
 
 - **Persistent daemon mode (opt-in).** `AIDEN_DAEMON=1` boots a background service with a SQLite-backed trigger bus. File watchers, webhook endpoints, IMAP polling, and cron schedules all feed the same durable queue.
 - **Autonomous trigger dispatch.** When a trigger fires, a real `AidenAgent` turn runs end-to-end — same tools, same sandbox, same recovery pipeline as your interactive REPL. Surface the chain with `aiden runs show <id>`.
-- **Execution sandbox with risk tiers.** Filesystem allowlist + Docker session backend + dry-run preflight. Default on; flip live with `/sandbox on|off`.
+- **Execution guardrails + risk tiers.** Filesystem allow/deny lists (defense-in-depth for the `file_*` tools — **not** shell containment; a shell command can still reach the filesystem) + dry-run preflight, plus an optional Docker session backend that *is* real (if still weakly hardened) process containment. Default on; flip live with `/sandbox on|off`, inspect the honest policy with `/sandbox status`.
 - **State-aware browser depth.** URL + DOM + iframe-tree capture before/after every browser tool call. Stale-ref auto-retry. Surfaces login / 2FA / captcha / consent blockers as structured cards.
 - **Continuous error recovery (TCE).** 16 failure categories classified per tool call. Smart retry with cooldown. Dead-letter for permanent failures. Recovery report enriches the REPL's capability card.
 - **Live-flip slash commands.** `/sandbox`, `/tce`, `/browser-depth`, `/daemon status`, `/suggestions`, `/update` — toggle every subsystem without restart. Choices persist to `config.yaml`.

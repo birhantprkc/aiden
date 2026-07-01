@@ -86,9 +86,14 @@ describe('barrel exports', () => {
     // v4.9.3 Slice 1b added /greeter (45 → 46).
     // v4.11 Slice B added /undo (46 → 47).
     // v4.11 Slice C added /retry (47 → 48).
-    expect(allCommands.length).toBe(48);
+    // v4.12 Slice 1a added /mcp (48 → 49).
+    // v4.12 B3.1 added /browser (49 → 50).
+    // v4.12 BE.1 added /budget (50 → 51).
+    // v4.12 /commands slice added /home (51 → 52). (/activity is inline-
+    // registered in aidenCLI, like /tasks — not in the barrel, not counted.)
+    expect(allCommands.length).toBe(52);
     const names = new Set(allCommands.map((c) => c.name));
-    expect(names.size).toBe(48);
+    expect(names.size).toBe(52);
   });
 
   it('every command exposes name, description, category', () => {

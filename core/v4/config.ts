@@ -142,6 +142,10 @@ const KNOWN_KEYS = new Set([
   // Phase 10 introduced the terminal toolset — its config block lands
   // under the top-level `terminal` key (e.g. terminal.backend = 'auto').
   'terminal',
+  // v4.12 — MCP client config lives under `mcp.servers.<name>`. The value
+  // is read via getDotted/getValue regardless of this set; listing it here
+  // only silences the "unknown top-level key" boot warning.
+  'mcp',
 ]);
 
 const ENV_REF_RE = /\$\{([^}]+)\}/g;

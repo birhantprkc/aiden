@@ -53,6 +53,8 @@ import { update } from './update';
 import { sandbox } from './sandbox';
 import { tce } from './tce';
 import { browserDepth } from './browserDepth';
+import { browser } from './browser';
+import { budget } from './budget';
 import { daemonStatus } from './daemonStatus';
 // v4.5 Phase 8b — contextual capability suggestions toggle.
 import { suggestions } from './suggestions';
@@ -69,6 +71,10 @@ import { memory } from './memorySlash';
 import { hooks }  from './hooksSlash';
 // v4.9.3 Slice 1b — boot greeter management.
 import { greeter } from './greeter';
+// v4.12 Slice 1a — /mcp read-only surfacing of the MCP client.
+import { mcp } from './mcpManage';
+// v4.12 /commands slice — /home working-directory show/change.
+import { home } from './home';
 
 export {
   help,
@@ -111,6 +117,8 @@ export {
   sandbox,
   tce,
   browserDepth,
+  browser,
+  budget,
   daemonStatus,
   // v4.5 Phase 8b — contextual suggestions toggle.
   suggestions,
@@ -125,6 +133,8 @@ export {
   // v4.9.1 amendment.
   memory,
   hooks,
+  mcp,
+  home,
 };
 
 /** All built-in system commands, in canonical order. */
@@ -160,6 +170,8 @@ export const allCommands: SlashCommand[] = [
   history,
   reloadSoul,
   reloadMcp,
+  // v4.12 Slice 1a — /mcp read-only surfacing.
+  mcp,
   reasoning,
   verbose,
   // Phase v4.1.2-update: /update + /update install — fresh registry
@@ -170,6 +182,8 @@ export const allCommands: SlashCommand[] = [
   sandbox,
   tce,
   browserDepth,
+  browser,
+  budget,
   daemonStatus,
   // v4.5 Phase 8b — contextual suggestions toggle.
   suggestions,
@@ -186,6 +200,8 @@ export const allCommands: SlashCommand[] = [
   hooks,
   // v4.9.3 Slice 1b — boot greeter management.
   greeter,
+  // v4.12 /commands slice — /home working-directory show/change.
+  home,
   clear,
   quit,
 ];

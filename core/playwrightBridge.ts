@@ -14,6 +14,8 @@ import path   from 'path'
 import fs     from 'fs'
 import crypto from 'crypto'
 import { getUserDataDir } from './paths'
+import { getTabRegistry, type TabMeta } from './v4/browser/tabRegistry'
+import { getDialogSupervisor, type DialogRecord, type FileEventRecord } from './v4/browser/dialogState'
 
 // ── Lazy-import Playwright so the server boots even if playwright
 //    is not installed (tools will return a clear error message).
@@ -30,6 +32,17 @@ async function getChromium(): Promise<any> {
 let _browserContext: any = null
 let _activePage:     any = null
 let _idleTimer:      any = null
+
+// ── v4.12 B3.1 — attach-don't-own (CDP) ──────────────────────
+// 'owned'    → Aiden spawns + owns a Chromium (launchPersistentContext). Today's default.
+// 'attached' → Aiden connectOverCDP to the USER'S real Chrome. The user owns it;
+//              Aiden NEVER closes their tabs/browser and controls only a dedicated
+//              tab it creates. B3.2a: actions run, but ONLY on the controlled tab
+//              (assertControlledTab) and through B5's confirm guards.
+let _mode:           'owned' | 'attached' = 'owned'
+let _cdpBrowser:     any = null     // the connectOverCDP Browser (attached)
+let _cdpEndpoint:    string | null = null
+let _controlledPage: any = null     // Aiden's OWN tab in the attached context (only tab Aiden may close)
 
 const IDLE_MS         = 5 * 60 * 1000                                  // 5 min
 const NAV_TIMEOUT     = parseInt(process.env.AIDEN_BROWSER_TIMEOUT ?? '15000', 10)
@@ -143,6 +156,12 @@ function getBrowserProfileDir(): string {
 function resetIdleTimer(): void {
   if (_idleTimer) clearTimeout(_idleTimer)
   _idleTimer = setTimeout(async () => {
+    if (_mode === 'attached') {
+      // NEVER close the user's browser. Idle → DETACH (disconnect), Chrome stays.
+      console.log('[Browser] Idle — detaching from attached browser (your Chrome is left running)')
+      await pwDetach()
+      return
+    }
     if (_browserContext) {
       console.log('[Browser] Closing idle browser after 5 min inactivity')
       try { await _browserContext.close() } catch {}
@@ -153,6 +172,13 @@ function resetIdleTimer(): void {
 }
 
 async function ensureContext(): Promise<any> {
+  if (_mode === 'attached') {
+    if (!_browserContext) {
+      throw new Error('Attached browser context is gone — re-attach with /browser attach.')
+    }
+    resetIdleTimer()
+    return _browserContext
+  }
   if (!_browserContext) {
     const chromium  = await getChromium()
     const profile   = getBrowserProfileDir()
@@ -161,19 +187,323 @@ async function ensureContext(): Promise<any> {
       headless: HEADLESS,
       viewport: { width: 1280, height: 720 },
     })
+    // B4.1 — owned mode: Aiden owns the browser, so existing + new pages are Aiden's.
+    wireContext(_browserContext, 'aiden')
   }
   resetIdleTimer()
   return _browserContext
 }
 
 async function ensurePage(): Promise<any> {
-  const ctx    = await ensureContext()
+  const ctx = await ensureContext()
+  if (_mode === 'attached') {
+    // ★ NEVER grab a user tab — Aiden controls only its OWN created tab.
+    if (!_controlledPage || _controlledPage.isClosed()) {
+      _controlledPage = await ctx.newPage()
+      getTabRegistry().track(_controlledPage, 'aiden', null) // explicit: Aiden-created
+    }
+    _activePage = _controlledPage
+    getTabRegistry().markControlled(_controlledPage)
+    wireDialogHandler(_controlledPage)
+    return _controlledPage
+  }
   const pages  = ctx.pages() as any[]
   if (!_activePage || _activePage.isClosed()) {
     const blank  = pages.find((p: any) => p.url() === 'about:blank')
     _activePage  = blank ?? await ctx.newPage()
+    getTabRegistry().track(_activePage, 'aiden', null)
   }
+  getTabRegistry().markControlled(_activePage)
+  wireDialogHandler(_activePage)
   return _activePage
+}
+
+/**
+ * v4.12 B3.2a — defense-in-depth: in attached mode an action may ONLY run on
+ * Aiden's dedicated controlled tab, never a user tab. Every attached action
+ * calls this on the page it is about to act on; if targeting ever drifted off
+ * the controlled tab we refuse rather than touch the user's browser.
+ */
+export function assertControlledTab(page: any): void {
+  if (_mode === 'attached' && page !== _controlledPage) {
+    throw new Error('Refusing to act: target is not Aiden\'s controlled tab (attached mode protects your other tabs).')
+  }
+}
+
+// ── v4.12 B4.1 — live tab registry wiring ────────────────────
+// The registry is fed by context.on('page') / page.on('close') so membership,
+// createdBy classification, and opener chains are captured LIVE (not rebuilt at
+// snapshot time). Classification: owned mode → everything is Aiden's; attached
+// mode → new pages are the USER'S unless their opener roots at an Aiden tab.
+
+function wirePageClose(page: any): void {
+  try { page.on('close', () => { getTabRegistry().remove(page) }) } catch { /* mock/teardown */ }
+}
+
+// B4.2a — register the dialog/file-event supervisor on a page (idempotent).
+const _dialogWired = new WeakSet<object>()
+function wireDialogHandler(page: any): void {
+  if (!page || typeof page !== 'object' || _dialogWired.has(page)) return
+  _dialogWired.add(page)
+  const sup = getDialogSupervisor()
+  try { page.on('dialog', (d: any) => { void sup.handle(d) }) } catch { /* mock */ }
+  // PASSIVE: record file-chooser / download — never auto-fulfill.
+  try { page.on('filechooser', (fc: any) => { sup.recordFileEvent('filechooser', (() => { try { return fc.element ? 'file input' : 'chooser' } catch { return 'chooser' } })()) }) } catch { /* mock */ }
+  try { page.on('download', (dl: any) => { sup.recordFileEvent('download', (() => { try { return dl.suggestedFilename() as string } catch { return 'download' } })()) }) } catch { /* mock */ }
+}
+
+async function handleNewPage(page: any): Promise<void> {
+  const reg = getTabRegistry()
+  if (reg.has(page)) return // already tracked (Aiden's explicit newPage, or seeded at attach)
+  let createdBy: 'aiden' | 'user' = _mode === 'attached' ? 'user' : 'aiden'
+  let openerId: string | null = null
+  try {
+    const opener = await page.opener()
+    if (opener) {
+      const om = reg.get(opener)
+      if (om) {
+        openerId = om.tab_id
+        // ★ opener-rooted popup: a window.open from an Aiden tab is Aiden's
+        // (covers OAuth/payment/login popups) — never a genuine user tab.
+        if (om.createdBy === 'aiden') createdBy = 'aiden'
+      }
+    }
+  } catch { /* opener() unsupported on mock / detached */ }
+  reg.track(page, createdBy, openerId)
+  wirePageClose(page)
+}
+
+/** Seed the registry for a freshly-acquired context + subscribe to new pages. */
+function wireContext(ctx: any, existingAs: 'aiden' | 'user'): void {
+  const reg = getTabRegistry()
+  reg.clear()
+  try {
+    for (const pg of (ctx.pages() as any[])) { reg.track(pg, existingAs, null); wirePageClose(pg) }
+  } catch { /* mock */ }
+  try { ctx.on('page', (pg: any) => { void handleNewPage(pg) }) } catch { /* mock */ }
+}
+
+/** Refresh live url/title/origin onto each tracked tab and return the list. */
+async function refreshTabMeta(): Promise<void> {
+  const reg = getTabRegistry()
+  for (const [pg, m] of reg.entries()) {
+    try {
+      const u = typeof pg === 'object' && pg && typeof (pg as any).url === 'function' ? (pg as any).url() as string : ''
+      m.url = u
+      try { m.origin = u ? new URL(u).origin : '' } catch { m.origin = '' }
+      if ((pg as any).title) { try { m.title = await (pg as any).title() as string } catch { /* closed */ } }
+    } catch { /* page gone */ }
+  }
+}
+
+// ── v4.12 B3.1 — attach / detach / status ────────────────────
+
+/**
+ * Attach to the user's real Chrome over CDP. Connects to an existing
+ * remote-debugging endpoint (the user launched it), uses their existing
+ * context, and creates a DEDICATED Aiden tab to control. Read-only in B3.1.
+ */
+export async function pwAttach(endpoint: string): Promise<{ ok: boolean; endpoint?: string; controlledTabUrl?: string; error?: string }> {
+  const available = await checkPwAvailable()
+  if (!available) return { ok: false, error: 'playwright not installed. Run: npm install playwright && npx playwright install chromium' }
+  try {
+    const chromium = await getChromium()
+    const browser  = await chromium.connectOverCDP(endpoint)
+    const contexts = browser.contexts() as any[]
+    const ctx      = contexts[0] ?? (await browser.newContext())
+    // Switching from owned → close the owned context first (it's Aiden's own, safe).
+    if (_mode === 'owned' && _browserContext) {
+      try { await _browserContext.close() } catch {}
+    }
+    _cdpBrowser     = browser
+    _cdpEndpoint    = endpoint
+    _browserContext = ctx
+    _mode           = 'attached'
+    // B4.1 — existing pages are the USER'S; subscribe so popups classify live.
+    wireContext(ctx, 'user')
+    _controlledPage = await ctx.newPage()  // Aiden's OWN tab — never a user tab
+    getTabRegistry().track(_controlledPage, 'aiden', null)
+    getTabRegistry().markControlled(_controlledPage)
+    wireDialogHandler(_controlledPage)
+    _activePage     = _controlledPage
+    resetIdleTimer()
+    return { ok: true, endpoint, controlledTabUrl: _controlledPage.url() }
+  } catch (e: any) {
+    return { ok: false, error: e.message }
+  }
+}
+
+/**
+ * Detach (kill switch): disconnect from the user's Chrome. Closes ONLY Aiden's
+ * own tab (guarded), then disconnects — on a CDP connection browser.close()
+ * DISCONNECTS, it does NOT terminate the user's Chrome. Never touches user tabs.
+ */
+export async function pwDetach(): Promise<void> {
+  if (_idleTimer) { clearTimeout(_idleTimer); _idleTimer = null }
+  if (_mode !== 'attached') return
+  // ★ Close ONLY an Aiden-created controlled tab — NEVER a user-designated one.
+  if (_controlledPage && getTabRegistry().canClose(_controlledPage) && !_controlledPage.isClosed()) {
+    try { await _controlledPage.close() } catch {}
+  }
+  if (_cdpBrowser) {
+    try { await _cdpBrowser.close() } catch {}  // CDP: disconnect only; Chrome stays
+  }
+  _cdpBrowser = null; _cdpEndpoint = null; _controlledPage = null
+  _browserContext = null; _activePage = null; _mode = 'owned'
+  getTabRegistry().clear()
+  getDialogSupervisor().clear()
+  console.log('[Browser] Detached — your Chrome is left running')
+}
+
+/**
+ * v4.12 B3.2b — /browser stop: interrupt the in-flight action but STAY attached.
+ * Closes Aiden's controlled tab so any pending Playwright op on it rejects
+ * immediately ("Target closed"), then recreates a fresh blank controlled tab.
+ * Keeps the CDP connection / context / mode intact (unlike detach).
+ *
+ * NOT mutex-guarded — it runs concurrently with the stuck action so it can
+ * preempt; the action's `finally` frees the mutex once its op rejects.
+ */
+export async function pwStop(): Promise<{ stopped: boolean; reason?: string }> {
+  if (_mode !== 'attached') return { stopped: false, reason: 'not attached' }
+  const old = _controlledPage
+  // ★ Interrupt by closing the tab — but ONLY if it's Aiden's own. A user tab is
+  // never closed; we just move control to a fresh Aiden tab (the user tab stays).
+  if (old && getTabRegistry().canClose(old) && !old.isClosed()) {
+    try { await old.close() } catch {}  // interrupt: pending ops on this page reject
+  }
+  // Stay attached — recreate a fresh controlled tab for the next action.
+  if (_browserContext) {
+    _controlledPage = await _browserContext.newPage()
+    getTabRegistry().track(_controlledPage, 'aiden', null)
+    getTabRegistry().markControlled(_controlledPage)
+    wireDialogHandler(_controlledPage)
+    _activePage = _controlledPage
+  }
+  console.log('[Browser] Stopped current action — fresh tab ready, still attached')
+  return { stopped: true }
+}
+
+/** Current attach state for /browser status. */
+export function pwBrowserStatus(): { mode: 'owned' | 'attached'; endpoint: string | null; controlledTabUrl: string | null } {
+  return {
+    mode: _mode,
+    endpoint: _cdpEndpoint,
+    controlledTabUrl: _controlledPage && !_controlledPage.isClosed() ? (_controlledPage.url() as string) : null,
+  }
+}
+
+// ── v4.12 B4.1 — first-class multi-tab ops ───────────────────
+
+/** List all tracked tabs (live url/title), with createdBy + controlled flags. */
+export async function pwListTabs(): Promise<{ ok: boolean; tabs: TabMeta[]; error?: string }> {
+  try {
+    await ensurePage() // ensure the context + controlled tab are seeded
+    await refreshTabMeta()
+    return { ok: true, tabs: getTabRegistry().list() }
+  } catch (e: any) { return { ok: false, tabs: [], error: e.message } }
+}
+
+/**
+ * Switch which tab Aiden controls. Aiden's OWN tabs (incl. opener-rooted popups)
+ * switch freely. A genuine USER tab requires `userDesignated:true` — set only by
+ * the user-initiated `/browser control <tab_id>` (tier 2). Aiden can NEVER
+ * unilaterally take control of a user tab.
+ */
+export async function pwSwitchControl(
+  tabId: string,
+  opts: { userDesignated?: boolean } = {},
+): Promise<{ ok: boolean; error?: string }> {
+  const reg = getTabRegistry()
+  const page = reg.pageById(tabId) as any
+  if (!page) return { ok: false, error: `No such tab: ${tabId}` }
+  if (page.isClosed && page.isClosed()) return { ok: false, error: `Tab ${tabId} is closed` }
+  const meta = reg.get(page)!
+  if (meta.createdBy === 'user' && !opts.userDesignated) {
+    return {
+      ok: false,
+      error: `Tab ${tabId} is one of YOUR tabs. Aiden won't take control of it on its own — run "/browser control ${tabId}" to designate it explicitly.`,
+    }
+  }
+  _controlledPage = page
+  _activePage = page
+  reg.markControlled(page)
+  return { ok: true }
+}
+
+/** Open a new Aiden-created (controllable + closeable) tab; optionally navigate it. */
+export async function pwOpenTab(url?: string): Promise<{ ok: boolean; tab_id?: string; error?: string }> {
+  const available = await checkPwAvailable()
+  if (!available) return { ok: false, error: 'playwright not installed.' }
+  const release = await pwAcquire()
+  try {
+    const ctx = await ensureContext()
+    const page = await ctx.newPage()
+    const meta = getTabRegistry().track(page, 'aiden', null) // explicit: Aiden-created
+    wirePageClose(page)
+    wireDialogHandler(page)
+    if (url) { try { await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT }) } catch { /* surfaced via list */ } }
+    return { ok: true, tab_id: meta.tab_id }
+  } catch (e: any) { return { ok: false, error: e.message } }
+  finally { release() }
+}
+
+/**
+ * Close a tab. ★ Close-guard: ONLY Aiden-created tabs are closeable — a user tab
+ * is NEVER closed, even if it is the currently-controlled (user-designated) tab.
+ */
+export async function pwCloseTab(tabId: string): Promise<{ ok: boolean; error?: string }> {
+  const reg = getTabRegistry()
+  const page = reg.pageById(tabId) as any
+  if (!page) return { ok: false, error: `No such tab: ${tabId}` }
+  if (!reg.canClose(page)) {
+    return { ok: false, error: `Refusing to close ${tabId}: it is one of YOUR tabs. Aiden only closes tabs it opened.` }
+  }
+  try { if (!(page.isClosed && page.isClosed())) await page.close() } catch (e: any) { return { ok: false, error: e.message } }
+  reg.remove(page)
+  if (page === _controlledPage) { _controlledPage = null; _activePage = null } // next action re-seeds
+  return { ok: true }
+}
+
+// ── v4.12 B4.2a — dialog + file-event accessors / actions ────
+
+/** Current parked dialog (awaiting a browser_dialog response), or null. */
+export function pwDialogPending(): DialogRecord | null { return getDialogSupervisor().getPending() }
+/** Recently fired+settled dialogs (some close before the next snapshot). */
+export function pwDialogRecent(): DialogRecord[] { return getDialogSupervisor().getRecent() }
+/** Passively recorded file-chooser / download events (never auto-fulfilled). */
+export function pwFileEvents(): FileEventRecord[] { return getDialogSupervisor().getFileEvents() }
+/** Risk tier of the parked dialog — used by the executor's B5.2 gate on accept. */
+export function pwDialogPendingTier(): 'safe' | 'caution' | 'dangerous' | null { return getDialogSupervisor().pendingTier() }
+/** Pre-arm a prompt response so the NEXT action's prompt accepts with this text. */
+export function pwSetPromptResponse(text: string | null): void { getDialogSupervisor().setPromptResponse(text) }
+
+/** Respond to the parked dialog (browser_dialog tool). */
+export async function pwRespondDialog(
+  action: 'accept' | 'dismiss' | 'respond',
+  text?: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const r = await getDialogSupervisor().respond(action, text)
+  return { ok: r.ok, error: r.error }
+}
+
+/**
+ * Consent-gated upload: set files on a file input. The browser_upload tool that
+ * calls this is mutating + dangerous → the executor's B5.2 gate approves it
+ * BEFORE we ever touch the user's filesystem. The file-chooser EVENT stays
+ * passive (record only) — this is the explicit, approved action.
+ */
+export async function pwUpload(selector: string, paths: string[]): Promise<{ ok: boolean; error?: string }> {
+  const available = await checkPwAvailable()
+  if (!available) return { ok: false, error: 'playwright not installed.' }
+  const release = await pwAcquire()
+  try {
+    const page = await ensurePage()
+    assertControlledTab(page)
+    await page.locator(selector).first().setInputFiles(paths)
+    return { ok: true }
+  } catch (e: any) { return { ok: false, error: e.message } }
+  finally { release() }
 }
 
 // ── Exported helpers ─────────────────────────────────────────
@@ -199,14 +529,26 @@ export async function pwNavigate(url: string): Promise<{ ok: boolean; url: strin
   if (!available) {
     return { ok: false, url, error: 'playwright not installed. Run: npm install playwright && npx playwright install chromium' }
   }
+  const release = await pwAcquire() // B3.2b — serialize Aiden's own ops
+  getDialogSupervisor().arm() // B4.2a — a dialog this action triggers inherits its consent
   try {
-    const ctx    = await ensureContext()
-    const pages  = ctx.pages() as any[]
-    const blank  = pages.find((p: any) => p.url() === 'about:blank')
-    _activePage  = blank ?? await ctx.newPage()
-    await _activePage.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT })
-    return { ok: true, url: _activePage.url() }
+    let page: any
+    if (_mode === 'attached') {
+      // ★ B3.2a — in attached mode navigate ONLY Aiden's controlled tab.
+      // NEVER scan ctx.pages() (that's the user's context → would grab a user tab).
+      page = await ensurePage()
+    } else {
+      const ctx    = await ensureContext()
+      const pages  = ctx.pages() as any[]
+      const blank  = pages.find((p: any) => p.url() === 'about:blank')
+      page = blank ?? await ctx.newPage()
+    }
+    assertControlledTab(page)
+    _activePage = page
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT })
+    return { ok: true, url: page.url() }
   } catch (e: any) { return { ok: false, url, error: e.message } }
+  finally { release() }
 }
 
 /** Take a full-page screenshot, saved to workspace/screenshots/. Returns the file path. */
@@ -221,10 +563,30 @@ export async function pwScreenshot(): Promise<{ ok: boolean; path?: string; erro
   } catch (e: any) { return { ok: false, error: e.message } }
 }
 
+/**
+ * v4.12 B2.2b — in-memory screenshot for vision (browser_see). Returns the PNG
+ * as base64; NO disk write (the on-disk path is browser_screenshot's job) so
+ * page captures of logged-in/sensitive pages don't linger on disk (B5-aligned).
+ */
+export async function pwScreenshotBuffer(): Promise<{ ok: boolean; base64?: string; error?: string }> {
+  const available = await checkPwAvailable()
+  if (!available) return { ok: false, error: 'playwright not installed. Run: npm install playwright && npx playwright install chromium' }
+  const release = await pwAcquire()
+  try {
+    const page = await ensurePage()
+    const buf  = await page.screenshot({ fullPage: false })
+    return { ok: true, base64: Buffer.from(buf).toString('base64') }
+  } catch (e: any) { return { ok: false, error: e.message } }
+  finally { release() }
+}
+
 /** Click an element by CSS selector or text.  Pass 'first_result' for search-result shortcuts. */
 export async function pwClick(target: string): Promise<{ ok: boolean; error?: string }> {
+  const release = await pwAcquire() // B3.2b — serialize Aiden's own ops
+  getDialogSupervisor().arm() // B4.2a — a dialog this action triggers inherits its consent
   try {
     const page   = await ensurePage()
+    assertControlledTab(page)
     const tryClick = async (sel: string): Promise<boolean> => {
       try {
         await page.waitForSelector(sel, { state: 'visible', timeout: 5000 })
@@ -237,12 +599,16 @@ export async function pwClick(target: string): Promise<{ ok: boolean; error?: st
     await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {})
     return { ok: true }
   } catch (e: any) { return { ok: false, error: e.message } }
+  finally { release() }
 }
 
 /** Click the first organic search result on Google / YouTube / DuckDuckGo / Bing. */
 export async function pwClickFirstResult(): Promise<{ ok: boolean; url?: string; error?: string }> {
+  const release = await pwAcquire() // B3.2b — serialize Aiden's own ops
+  getDialogSupervisor().arm() // B4.2a — a dialog this action triggers inherits its consent
   try {
     const page       = await ensurePage()
+    assertControlledTab(page)
     const currentUrl = page.url() as string
 
     type SiteConfig = { selectors: string[]; navPattern?: RegExp }
@@ -289,16 +655,21 @@ export async function pwClickFirstResult(): Promise<{ ok: boolean; url?: string;
     }
     return { ok: true, url: page.url() }
   } catch (e: any) { return { ok: false, error: e.message } }
+  finally { release() }
 }
 
 /** Type text into the specified selector (defaults to first input). */
 export async function pwType(selector: string, text: string): Promise<{ ok: boolean; error?: string }> {
+  const release = await pwAcquire() // B3.2b — serialize Aiden's own ops
+  getDialogSupervisor().arm() // B4.2a — a dialog this action triggers inherits its consent
   try {
     const page = await ensurePage()
+    assertControlledTab(page)
     await page.waitForSelector(selector, { state: 'visible', timeout: 5000 }).catch(() => {})
     await page.fill(selector, text)
     return { ok: true }
   } catch (e: any) { return { ok: false, error: e.message } }
+  finally { release() }
 }
 
 /** Scroll the page or a specific element. */
@@ -307,8 +678,11 @@ export async function pwScroll(
   amount: number,
   selector?: string,
 ): Promise<{ ok: boolean; error?: string }> {
+  const release = await pwAcquire() // B3.2b — serialize Aiden's own ops
+  getDialogSupervisor().arm() // B4.2a — a dialog this action triggers inherits its consent
   try {
     const page = await ensurePage()
+    assertControlledTab(page)
 
     if (selector) {
       await page.waitForSelector(selector, { state: 'visible', timeout: 5000 }).catch(() => {})
@@ -343,6 +717,7 @@ export async function pwScroll(
     }
     return { ok: true }
   } catch (e: any) { return { ok: false, error: e.message } }
+  finally { release() }
 }
 
 /** Extract visible text from the current page body (first 3 000 chars). */
@@ -406,6 +781,209 @@ export async function pwSnapshotHash(): Promise<{
 
     return { ok: true, url, title, dom_text_hash, frame_tree_hash }
   } catch (e: any) { return { ok: false, error: e.message } }
+}
+
+/**
+ * v4.12 B1.1 — accessibility-tree snapshot. A single in-page DOM walk that
+ * enumerates INTERACTIVE elements (button / a[href] / input / textarea /
+ * select / [role=...] / [tabindex] / contenteditable), visible-filtered, in
+ * document order. For each it extracts RAW data only — tag/role-attr/input-type,
+ * the accessible-name source parts (aria-label, aria-labelledby text, text,
+ * placeholder, alt, title), a css_path fallback, and the bbox. B4.2b: every
+ * frame in page.frames() is extracted via Frame.evaluate (tagged frame-N by its
+ * index), so CROSS-ORIGIN OOPIFs are now visible too — the old contentDocument
+ * walk threw on cross-origin and skipped them. Bounded by MAX_FRAMES / depth.
+ *
+ * Semantics (role mapping, accessible-name precedence, @eN assignment) live in
+ * core/v4/browserState.ts where they're unit-testable — this fn stays a dumb
+ * extractor because page.evaluate code cannot import module helpers.
+ */
+export async function pwAxSnapshot(): Promise<{ ok: boolean; url?: string; elements?: any[]; error?: string }> {
+  const available = await checkPwAvailable()
+  if (!available) return { ok: false, error: 'playwright not installed. Run: npm install playwright && npx playwright install chromium' }
+  const release = await pwAcquire()
+  try {
+    const page = await ensurePage()
+    const url  = page.url() as string
+
+    // B4.2b — per-frame element extraction (no in-page iframe recursion). Runs in
+    // EACH frame's context via Frame.evaluate, which works cross-origin (OOPIFs) —
+    // the old contentDocument walk threw on cross-origin and skipped them.
+    // eslint-disable-next-line no-undef
+    const extract = () => {
+      const SEL = [
+        'button', 'a[href]', 'input', 'textarea', 'select',
+        '[role=button]', '[role=link]', '[role=textbox]', '[role=checkbox]',
+        '[role=radio]', '[role=tab]', '[role=menuitem]', '[role=combobox]',
+        '[tabindex]', '[contenteditable=""]', '[contenteditable=true]',
+      ].join(', ')
+
+      function cssPath(el: any): string {
+        if (el.id) return `#${(globalThis as any).CSS?.escape ? (globalThis as any).CSS.escape(el.id) : el.id}`
+        const parts: string[] = []
+        let node: any = el
+        for (let depth = 0; node && node.nodeType === 1 && depth < 5; depth += 1) {
+          const tag = node.tagName.toLowerCase()
+          if (node.id) { parts.unshift(`#${node.id}`); break }
+          let i = 1
+          let sib = node.previousElementSibling
+          while (sib) { if (sib.tagName === node.tagName) i += 1; sib = sib.previousElementSibling }
+          parts.unshift(`${tag}:nth-of-type(${i})`)
+          node = node.parentElement
+        }
+        return parts.join(' > ')
+      }
+
+      function visible(el: any): boolean {
+        const r = el.getBoundingClientRect()
+        if (r.width <= 0 || r.height <= 0) return false
+        const s = (globalThis as any).getComputedStyle(el)
+        return s.visibility !== 'hidden' && s.display !== 'none'
+      }
+
+      function labelledByText(el: any, doc: any): string {
+        const ids = (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+        if (ids.length === 0) return ''
+        return ids.map((id: string) => (doc.getElementById(id)?.textContent || '').trim()).join(' ').trim()
+      }
+
+      const doc = (globalThis as any).document
+      const out: any[] = []
+      let els: any[] = []
+      try { els = Array.from(doc.querySelectorAll(SEL)) } catch { return out }
+      for (const el of els) {
+        try {
+          if (el.disabled) continue
+          if (!visible(el)) continue
+          const r = el.getBoundingClientRect()
+          const tag = el.tagName.toLowerCase()
+          const itype = (el.getAttribute('type') || '').toLowerCase()
+          const submit =
+            (tag === 'input' && (itype === 'submit' || itype === 'image')) ||
+            (tag === 'button' && (itype === 'submit' || (itype === '' && !!el.closest('form'))))
+          out.push({
+            tag,
+            roleAttr:       el.getAttribute('role') || '',
+            inputType:      itype,
+            submit,
+            ariaLabel:      el.getAttribute('aria-label') || '',
+            labelledByText: labelledByText(el, doc),
+            textContent:    (el.textContent || '').trim().slice(0, 1000),
+            placeholder:    el.getAttribute('placeholder') || '',
+            alt:            el.getAttribute('alt') || '',
+            title:          el.getAttribute('title') || '',
+            css_path:       cssPath(el),
+            bbox:           { x: r.x, y: r.y, w: r.width, h: r.height },
+          })
+        } catch { /* per-element defensive */ }
+      }
+      return out
+    }
+
+    // ★ UNIFIED ADDRESSING: frame_id is the index into page.frames() — the SAME
+    // scheme scopeForFrame resolves, so a lease in frame N acts in frame N.
+    // Bounded DAG (count + depth) so ad-heavy pages can't blow up the snapshot.
+    const frames = page.frames() as any[]
+    const elements: any[] = []
+    let scanned = 0
+    for (let i = 0; i < frames.length && scanned < MAX_FRAMES; i += 1) {
+      const f = frames[i]
+      if (frameDepth(f) > MAX_FRAME_DEPTH) continue
+      scanned += 1
+      let descs: any[] = []
+      try { descs = await f.evaluate(extract) as any[] } catch { continue } // detached/blocked → skip
+      const frameId = i === 0 ? 'main' : `frame-${i}`
+      for (const d of descs) { d.frame_id = frameId; elements.push(d) }
+    }
+
+    return { ok: true, url, elements }
+  } catch (e: any) { return { ok: false, error: e.message } }
+  finally { release() }
+}
+
+/**
+ * v4.12 B1.2 — act on an element by its lease (from browser_snapshot's @eN).
+ * Resolution: getByRole(role,{name}) PRIMARY (exact), frame-scoped via
+ * scopeForFrame (B4.2b: the lease's frame_id → the matching page.frames() Frame,
+ * cross-origin OOPIFs included); page.locator(css_path) FALLBACK when the
+ * role/name match is empty or ambiguous (count ≠ 1).
+ *
+ * Structural `lease` param (role/name/css_path/frame_id) — not the ElementLease
+ * type — so the bridge doesn't import core/v4 (avoids a cycle with browserState).
+ */
+export interface LeaseTarget {
+  ref?:      string;
+  role:      string;
+  name:      string;
+  css_path:  string;
+  frame_id:  string;
+}
+
+// B4.2b — bounded frame DAG so ad-heavy pages can't blow up the snapshot.
+const MAX_FRAMES = 30
+const MAX_FRAME_DEPTH = 2
+
+/** Nesting depth of a Playwright Frame (main = 0, iframe-in-main = 1, …). */
+function frameDepth(frame: any): number {
+  let d = 0
+  let f = frame
+  try { while (f && typeof f.parentFrame === 'function' && f.parentFrame()) { d += 1; f = f.parentFrame() } } catch { /* detached */ }
+  return d
+}
+
+/**
+ * v4.12 B4.2b — UNIFIED frame addressing: frame_id is the index into
+ * page.frames() (the SAME scheme pwAxSnapshot tags), so a lease generated in
+ * frame N resolves to that exact Frame here — works cross-origin (OOPIF) because
+ * Frame.getByRole/locator operate in the frame's own context. 'main' → the page
+ * (its main frame). Read fresh each call → no manual swap/detach handling.
+ */
+function scopeForFrame(page: any, frameId: string): any {
+  if (!frameId || frameId === 'main') return page
+  const m = /^frame-(\d+)$/.exec(frameId)
+  if (!m) return page
+  const idx = parseInt(m[1], 10)
+  const frames = page.frames() as any[]
+  return frames[idx] ?? page
+}
+
+export async function pwActByLease(
+  lease: LeaseTarget,
+  action: { kind: 'click' } | { kind: 'fill'; text: string },
+): Promise<{ ok: boolean; error?: string }> {
+  const available = await checkPwAvailable()
+  if (!available) return { ok: false, error: 'playwright not installed. Run: npm install playwright && npx playwright install chromium' }
+  const release = await pwAcquire()
+  getDialogSupervisor().arm() // B4.2a — act-by-ref dialogs inherit consent
+  try {
+    const page  = await ensurePage()
+    assertControlledTab(page)
+    const scope = scopeForFrame(page, lease.frame_id)
+
+    // Primary: semantic getByRole(role, {name}). Use it only on an unambiguous
+    // single match; empty/ambiguous → css_path fallback.
+    let locator: any = null
+    if (lease.role && lease.role !== 'generic' && lease.name) {
+      try {
+        const byRole = scope.getByRole(lease.role, { name: lease.name, exact: true })
+        const count  = await byRole.count()
+        if (count === 1) locator = byRole.first()
+      } catch { /* role query unsupported → fall through to css */ }
+    }
+    if (!locator && lease.css_path) locator = scope.locator(lease.css_path).first()
+    if (!locator) {
+      return { ok: false, error: `Could not resolve ${lease.ref ?? 'element'} (role=${lease.role} name="${lease.name}")` }
+    }
+
+    if (action.kind === 'click') {
+      await locator.click({ timeout: 5000 })
+      await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {})
+    } else {
+      await locator.fill(action.text, { timeout: 5000 })
+    }
+    return { ok: true }
+  } catch (e: any) { return { ok: false, error: e.message } }
+  finally { release() }
 }
 
 // ── v4.3 Phase 4 — multi-tab snapshot ─────────────────────────────────────
@@ -510,6 +1088,11 @@ export async function pwGetUrl(): Promise<{ ok: boolean; url?: string; error?: s
 /** Close the browser context and release all resources (call on server shutdown). */
 export async function pwClose(): Promise<void> {
   if (_idleTimer) { clearTimeout(_idleTimer); _idleTimer = null }
+  if (_mode === 'attached') {
+    // ★ Never close the user's Chrome — detach (disconnect) instead.
+    await pwDetach()
+    return
+  }
   if (_browserContext) {
     try { await _browserContext.close() } catch {}
     _browserContext = null

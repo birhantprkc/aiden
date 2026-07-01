@@ -20,6 +20,11 @@
 
 import { sessionRouter } from './sessionRouter'
 import { noopLogger, type Logger } from './v4/logger'
+import {
+  createDeliveryContext,
+  type DeliveryBinding,
+  type DeliveryContext,
+} from './deliveryContext'
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -44,6 +49,7 @@ export interface IncomingMessage {
   attachments?: string[]
   timestamp:    number
   replyTo?:     string          // message ID being replied to
+  threadId?:    string          // platform thread/topic id (e.g. forum topic); optional
   sessionId?:   string          // stable cross-channel session ID (set by routeMessage)
 }
 
@@ -58,7 +64,10 @@ export interface OutgoingMessage {
   }
 }
 
-export type MessageHandler  = (message: IncomingMessage) => Promise<string>
+// DC.1 — the processor receives the immutable per-turn DeliveryContext (when a
+// caller bound one) so future mid-run delivery (progress/status) routes to the
+// frozen target. Existing processors ignore the second arg — back-compatible.
+export type MessageHandler  = (message: IncomingMessage, ctx?: DeliveryContext) => Promise<string>
 export type DeliveryHandler = (message: OutgoingMessage) => Promise<boolean>
 
 // ── Gateway class ──────────────────────────────────────────────
@@ -104,7 +113,12 @@ class Gateway {
 
   // ── Route an incoming message through Aiden ───────────────────
 
-  async routeMessage(message: IncomingMessage): Promise<string> {
+  // DC.1 — an optional `delivery` binding (platform driver + capabilities +
+  // first-message hint) lets the gateway construct the immutable per-turn
+  // DeliveryContext, thread it to the processor, and route the final reply
+  // through the seam (`ctx.send('final', …)`). When omitted, behaviour is
+  // exactly as before: the string is returned and the caller delivers it.
+  async routeMessage(message: IncomingMessage, delivery?: DeliveryBinding): Promise<string> {
     if (!this.messageProcessor) {
       throw new Error('No message processor registered')
     }
@@ -114,6 +128,22 @@ class Gateway {
     session.messageCount++
     message.sessionId    = session.sessionId
 
+    // DC.1 — build the immutable-per-turn delivery context from the inbound
+    // message. Routing authority (platform/chatId/threadId) is frozen here and
+    // never sourced from mutable/global state. Concurrent turns each get their
+    // own ctx, so replies can never cross-route.
+    const ctx: DeliveryContext | undefined = delivery
+      ? createDeliveryContext(
+          {
+            platform:    message.channel,
+            chatId:      message.channelId,
+            threadId:    message.threadId,
+            replyAnchor: message.replyTo,
+          },
+          delivery,
+        )
+      : undefined
+
     this.log.debug(
       `${message.channel}:${message.channelId} → "${message.text.substring(0, 60)}"`,
       { sessionId: session.sessionId },
@@ -121,24 +151,43 @@ class Gateway {
 
     const start = Date.now()
 
+    let response: string
     try {
-      let response = await this.messageProcessor(message)
+      response = await this.messageProcessor(message, ctx)
       const duration = Date.now() - start
-
       this.log.debug(`response ready → ${message.channel}`, { durationMs: duration })
 
-      // Hint on Telegram first message: conversation continues on desktop
-      if (message.channel === 'telegram' && session.messageCount === 1) {
-        response += '\n\n_Tip: Continue this conversation on your desktop dashboard with full context._'
+      // DC.1 — first-message hint is now a per-platform capability supplied via
+      // the binding, not a hardcoded `channel === 'telegram'` branch. The
+      // generic layer no longer knows any platform's specifics.
+      if (ctx?.firstMessageHint && session.messageCount === 1) {
+        response += '\n\n' + ctx.firstMessageHint
       }
-
-      return response
     } catch (error) {
       this.log.error(
         `processing failed: ${error instanceof Error ? error.message : String(error)}`,
       )
-      return 'Something went wrong processing your message. Try again.'
+      response = 'Something went wrong processing your message. Try again.'
     }
+
+    // DC.1 — when bound, the final reply is delivered through the seam (the same
+    // message to the same chat, just via ctx.send). Delivery failures are logged
+    // by the driver and surfaced in the receipt; they never throw here.
+    if (ctx) {
+      try {
+        const receipt = await ctx.send('final', response)
+        if (!receipt.ok) {
+          this.log.warn(`final delivery not ok → ${message.channel}`, { error: receipt.error })
+        }
+      } catch (error) {
+        this.log.error(
+          `final delivery threw → ${message.channel}: ` +
+            (error instanceof Error ? error.message : String(error)),
+        )
+      }
+    }
+
+    return response
   }
 
   // ── Deliver a message to a specific channel ───────────────────

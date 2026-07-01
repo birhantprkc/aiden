@@ -79,6 +79,31 @@ describe('PromptBuilder', () => {
     expect(out).toContain('User prefers concise');
   });
 
+  it('4b. v4.12 — empty USER.md injects the onboarding nudge (not USER PROFILE)', async () => {
+    const pb = new PromptBuilder();
+    const out = await pb.build({
+      paths: makePaths(tmp),
+      memorySnapshot: { memoryMd: '', userMd: '', loadedAt: Date.now(), isEmpty: true },
+      platform: 'linux',
+      skipFilesystem: true,
+    });
+    expect(out).toContain('Getting to know the user');
+    expect(out).toContain('memory_add(file: "user")');
+    expect(out).not.toContain('USER PROFILE');
+  });
+
+  it('4c. v4.12 — non-empty USER.md injects USER PROFILE, not the onboarding nudge', async () => {
+    const pb = new PromptBuilder();
+    const out = await pb.build({
+      paths: makePaths(tmp),
+      memorySnapshot: { memoryMd: '', userMd: 'Name: Shiva', loadedAt: Date.now(), isEmpty: false },
+      platform: 'linux',
+      skipFilesystem: true,
+    });
+    expect(out).toContain('USER PROFILE');
+    expect(out).not.toContain('Getting to know the user');
+  });
+
   it('4a. memory section uses identity framing (Phase 16e)', async () => {
     // Locks the parenthetical identity-framing phrasing. Without it,
     // the model treats USER.md as past conversation and refuses to surface it

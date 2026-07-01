@@ -54,13 +54,17 @@ export const processSpawnTool: ToolHandler = {
     if (!command) return { success: false, error: 'No command provided' };
     const cwd = typeof args.cwd === 'string' ? args.cwd : ctx.cwd;
     try {
-      const handle = ctx.processes.spawn(command, { cwd });
+      // v4.12 PM.1 — tag the owning session (best-effort from ctx.sessionId) so
+      // the handle records ownership; creation-time is captured inside spawn().
+      const handle = ctx.processes.spawn(command, { cwd, sessionId: ctx.sessionId });
       return {
         success: true,
         id: handle.id,
         pid: handle.pid,
         status: handle.status,
         startedAt: handle.startedAt,
+        createdAt: handle.createdAt,
+        cwd: handle.cwd,
       };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

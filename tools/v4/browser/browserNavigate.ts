@@ -17,6 +17,7 @@
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { pwNavigate, pwSnapshot } from '../../../core/playwrightBridge';
 import { detectCaptchaMarkers } from './captchaCheck';
+import { redactBrowserContent } from './redactContent';
 import { withBrowserState } from './_observer';
 
 const _browserNavigateTool: ToolHandler = {
@@ -53,7 +54,8 @@ const _browserNavigateTool: ToolHandler = {
     const url = String(args.url ?? '').trim();
     if (!url) return { success: false, error: 'No URL provided' };
     const r = await pwNavigate(url);
-    if (!r.ok) return { success: false, error: r.error, url };
+    // B5.3 — redact any credential the URL embeds before it reaches the model.
+    if (!r.ok) return { success: false, error: r.error, url: redactBrowserContent(url) };
 
     // Phase 16f Task 3: post-load CAPTCHA detection. Without this check
     // browser_navigate returned success:true on Cloudflare-walled pages
@@ -67,7 +69,7 @@ const _browserNavigateTool: ToolHandler = {
         if (check.detected) {
           return {
             success: false,
-            url: r.url,
+            url: redactBrowserContent(r.url),
             error:
               `Page appears to be a CAPTCHA / bot challenge ` +
               `(matched: ${check.markers.slice(0, 3).join(', ')}). ` +
@@ -84,7 +86,7 @@ const _browserNavigateTool: ToolHandler = {
       // navigation when the snapshot path has an unrelated bug.
     }
 
-    return { success: true, url: r.url };
+    return { success: true, url: redactBrowserContent(r.url) };
   },
 };
 

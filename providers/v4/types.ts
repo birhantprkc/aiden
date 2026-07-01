@@ -193,12 +193,14 @@ export interface ToolCallResult {
  * `toolCalls` alongside (or instead of) text content. Tool turns carry the
  * matching `toolCallId` so the model can correlate result → request.
  *
- * `content` is plain text in v4.0.0; structured content blocks (images,
- * documents) get added in Phase 4 when vision/file tools land.
+ * `content` is plain text; a `user` turn may ALSO carry `images` (v4.12 B2.2a —
+ * base64 data URLs, e.g. `data:image/png;base64,…`) for vision-capable models.
+ * `images` is OPTIONAL and backward-compatible: every text-only flow is
+ * unchanged, and adapters that don't implement image-mapping ignore it.
  */
 export type Message =
   | { role: 'system'; content: string }
-  | { role: 'user'; content: string }
+  | { role: 'user'; content: string; images?: string[] }
   | { role: 'assistant'; content: string; toolCalls?: ToolCallRequest[] }
   | { role: 'tool'; toolCallId: string; content: string };
 

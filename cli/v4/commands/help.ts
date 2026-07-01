@@ -71,6 +71,8 @@ export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
   license: 'System',
   plugins: 'System',
   'reload-mcp': 'System',
+  // v4.12 Slice 1a — /mcp read-only surfacing of connected MCP servers.
+  mcp: 'System',
   tools: 'System',
   skills: 'System',
   quit: 'System',
@@ -90,6 +92,8 @@ export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
   sandbox: 'System',
   tce: 'System',
   'browser-depth': 'System',
+  browser: 'System',
+  budget: 'System',
   daemon: 'System',
   // v4.5 Phase 8b — contextual capability suggestions.
   suggestions: 'System',
@@ -106,6 +110,9 @@ export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
   hooks:  'System',
   // v4.9.3 Slice 1b — boot greeter management.
   greeter: 'System',
+  // v4.12 /commands slice — /home (working dir) + /activity (inline roll-up).
+  home: 'System',
+  activity: 'System',
 
   // ── Authentication ──
   auth: 'Authentication',

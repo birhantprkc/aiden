@@ -132,7 +132,8 @@ function expandPathInline(input: string, cwd: string): string {
 }
 
 /**
- * Boundary-aware containment check. `path.relative` avoids the
+ * Boundary-aware path check (file_* tool defense-in-depth — NOT process
+ * containment; shell_exec bypasses this). `path.relative` avoids the
  * `<root>/user-evil` vs `<root>/user` false positive that a naive
  * `startsWith` would produce.
  */

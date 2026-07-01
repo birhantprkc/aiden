@@ -493,6 +493,48 @@ describe('ApprovalEngine — Slice 10.6 per-project + global grant coexistence',
   });
 });
 
+// ─── v4.12 SH.1 — frozen approval mode (in-process can't flip approvals) ──
+
+describe('ApprovalEngine — SH.1 frozen approval mode', () => {
+  it('pre-freeze setMode applies normally (boot-time --yolo path)', () => {
+    const engine = new ApprovalEngine('manual', {});
+    engine.setMode('off');
+    expect(engine.getMode()).toBe('off');
+    expect(engine.isFrozen()).toBe(false);
+  });
+
+  it('★ after freeze(), an in-process setMode(\'off\') is a silent no-op', async () => {
+    const promptUser = vi.fn(async () => 'deny' as const);
+    const engine = new ApprovalEngine('manual', { promptUser });
+    engine.freeze();
+    expect(engine.isFrozen()).toBe(true);
+    // A held ref tries to disable approvals mid-session:
+    engine.setMode('off');
+    expect(engine.getMode()).toBe('manual');           // unchanged
+    // and enforcement is unchanged — the mutating call still prompts + is denied.
+    expect(await engine.checkApproval(writeReq())).toBe(false);
+    expect(promptUser).toHaveBeenCalledOnce();
+  });
+
+  it('★ after freeze(), user-initiated setMode still works (the /yolo path)', () => {
+    const engine = new ApprovalEngine('manual', {});
+    engine.freeze();
+    engine.setMode('off', { userInitiated: true });
+    expect(engine.getMode()).toBe('off');
+    // and the controlled restore path works too
+    engine.setMode('smart', { userInitiated: true });
+    expect(engine.getMode()).toBe('smart');
+  });
+
+  it('freeze() is idempotent and does not alter the current mode', () => {
+    const engine = new ApprovalEngine('smart', {});
+    engine.freeze();
+    engine.freeze();
+    expect(engine.getMode()).toBe('smart');
+    expect(engine.isFrozen()).toBe(true);
+  });
+});
+
 // ── Notes on PTY approval-flow regression layer ───────────────────────
 //
 // The Slice 10.5 PTY harness (tests/v4/cli/aidenPromptFooterGhost.test.ts)

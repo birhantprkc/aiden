@@ -495,7 +495,10 @@ describe('ChatSession.run', () => {
       }),
     );
     await session.run();
-    expect((approvalEngine as { setMode: { mock: { calls: unknown[][] } } }).setMode.mock.calls).toEqual([['off']]);
+    // v4.12 SH.1 — yoloMode is user-initiated so it survives the frozen-mode
+    // lock (in-process code can't flip approvals; the user's --yolo still can).
+    expect((approvalEngine as { setMode: { mock: { calls: unknown[][] } } }).setMode.mock.calls)
+      .toEqual([['off', { userInitiated: true }]]);
   });
 
   it('queueSystemPrompt prepends a system message on the next turn', async () => {

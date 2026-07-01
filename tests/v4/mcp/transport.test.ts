@@ -13,6 +13,7 @@ import {
   StdioTransport,
   HttpTransport,
   type HttpSseSource,
+  type McpExitInfo,
 } from '../../../core/v4/mcp/transport';
 
 // ─── Stdio mock ─────────────────────────────────────────────────────
@@ -359,5 +360,52 @@ describe('HttpTransport', () => {
     const t = new HttpTransport({ baseUrl: 'http://x.test', fetchFn, disableSse: true });
     await t.close();
     await expect(t.request('foo')).rejects.toThrow(/closed/);
+  });
+});
+
+describe('StdioTransport — exit seam + tree-kill (Slice 2a)', () => {
+  it('onExit fires on subprocess exit with code/signal', () => {
+    const child = makeFakeChild();
+    const t = new StdioTransport({ command: 'fake', args: [], spawnFn: spawnFactory(child), killTreeFn: () => {} });
+    const infos: McpExitInfo[] = [];
+    t.onExit((i) => infos.push(i));
+    child.emit('exit', 3, null);
+    expect(infos).toHaveLength(1);
+    expect(infos[0]).toMatchObject({ code: 3, signal: null });
+    expect(infos[0].error).toBeUndefined();
+  });
+
+  it('onExit fires on spawn error with error set (→ permanent)', () => {
+    const child = makeFakeChild();
+    const t = new StdioTransport({ command: 'fake', args: [], spawnFn: spawnFactory(child), killTreeFn: () => {} });
+    const infos: McpExitInfo[] = [];
+    t.onExit((i) => infos.push(i));
+    child.emit('error', new Error('spawn fake ENOENT'));
+    expect(infos).toHaveLength(1);
+    expect(infos[0].error).toBeInstanceOf(Error);
+  });
+
+  it('onExit does NOT fire after a deliberate close()', async () => {
+    const child = makeFakeChild();
+    const t = new StdioTransport({
+      command: 'fake', args: [], spawnFn: spawnFactory(child),
+      killTreeFn: (_c, sig) => { if (sig === 'SIGTERM') setImmediate(() => child.emit('exit', 0, 'SIGTERM')); },
+    });
+    const infos: McpExitInfo[] = [];
+    t.onExit((i) => infos.push(i));
+    await t.close();
+    expect(infos).toHaveLength(0);
+  });
+
+  it('close() tree-kills via killTreeFn, not the direct child', async () => {
+    const child = makeFakeChild();
+    const killed: string[] = [];
+    const t = new StdioTransport({
+      command: 'fake', args: [], spawnFn: spawnFactory(child),
+      killTreeFn: (_c, sig) => { killed.push(sig); if (sig === 'SIGTERM') setImmediate(() => child.emit('exit', 0, 'SIGTERM')); },
+    });
+    await t.close();
+    expect(killed).toContain('SIGTERM');
+    expect(child.killSignals).toEqual([]); // direct child.kill() not used
   });
 });

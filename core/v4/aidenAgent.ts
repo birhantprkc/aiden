@@ -80,6 +80,7 @@ import {
   fillRemainingAsBlocked,
   synthesizeBlockedToolResult,
 } from './toolCallInvariant';
+import { ModelMetadata } from './modelMetadata';
 // v4.2 Phase 1 — per-tool result verifier. Same TCE gate as
 // TurnState (default ON, opt-out via AIDEN_TCE=0); classification
 // feeds the recovery controller.
@@ -188,6 +189,15 @@ export interface AidenAgentOptions {
   sessionId?:              string;
   /** Hard cap on iterations through the loop. Default 90. */
   maxTurns?:               number;
+  /**
+   * v4.12 BE.1 — per-session TOKEN cap (money-safety). When set, the loop
+   * refuses to make a provider call that would push cumulative session tokens
+   * past the cap (enforced BEFORE the call at the callProvider boundary), keeps
+   * a summary reserve so the graceful finalization fits within budget, and
+   * returns a partial + resume-handoff. Unset (undefined) = no cap = today's
+   * behaviour, byte-identical.
+   */
+  sessionTokenCap?:        number;
   fallback?:               FallbackStrategy;
   /**
    * Phase v4.1.2-slice3 telemetry. Optional aggregator the caller
@@ -212,11 +222,16 @@ export interface AidenAgentOptions {
     phase:   'before' | 'after',
     result?: ToolCallResult,
   ) => void;
-  /** Fires once when crossing 70% (caution) and once at 90% (warning). */
+  /**
+   * Fires once at caution and once at warning. `kind` distinguishes the
+   * iteration budget (turn/maxTurns) from the v4.12 BE.1 token budget
+   * (usedTokens/capTokens). `kind` defaults to 'iterations' for back-compat.
+   */
   onBudgetWarning?: (
-    level: 'caution' | 'warning',
-    turn:  number,
-    max:   number,
+    level:   'caution' | 'warning',
+    current: number,
+    max:     number,
+    kind?:   'iterations' | 'tokens',
   ) => void;
   // ── Moat ─────────────────────────────────────────────────────────────
   plannerGuard?:           PlannerGuard;
@@ -351,10 +366,26 @@ export interface AidenAgentResult {
     cannotReliably: string[];
     fix:            string;
   };
+  /**
+   * v4.12 BE.1 — populated when `finishReason === 'budget_exhausted'` due to the
+   * TOKEN cap (not the iteration cap). Lossy-but-recoverable money-safety
+   * handoff: what got done, what remains, and how to resume.
+   */
+  resumeHandoff?: {
+    partial_work: string;
+    next_steps:   string;
+    resume:       string;
+  };
 }
 
 export interface RunConversationOptions {
   stream?:           boolean;
+  /**
+   * v4.12 BE.1 — tokens already spent in THIS session before this run (from
+   * sessionStore totals). The per-session token cap enforces on
+   * `sessionTokensSoFar + this-run usage`. Default 0 → cap is per-run.
+   */
+  sessionTokensSoFar?: number;
   onDelta?:          (text: string) => void;
   onFirstDelta?:     () => void;
   onToolCallStart?:  (call: ToolCallRequest) => void;
@@ -413,6 +444,12 @@ interface EmptyResponseMetrics {
 const DEFAULT_MAX_TURNS    = 90;
 const CAUTION_FRACTION     = 0.7;
 const WARNING_FRACTION     = 0.9;
+// v4.12 BE.1 — token-budget tuning.
+const TOKEN_CAUTION_FRACTION = 0.8;   // warn at 80% of the token cap
+const TOKEN_WARNING_FRACTION = 0.9;   // warn at 90%
+const SUMMARY_RESERVE_FRACTION = 0.05; // hold back ≥5% of the cap for the toolless summary
+const MIN_SUMMARY_RESERVE = 2_000;     // …but at least this many tokens
+const SUMMARY_OUTPUT_ALLOWANCE = 1_000; // assumed output size of the toolless summary
 const BUDGET_INJECT_FRAC   = 0.3;
 const EMPTY_RETRY_CAP      = 1;
 const EMPTY_RETRY_NOTE =
@@ -429,6 +466,10 @@ export class AidenAgent {
   // v4.9.4 Slice 1 — TurnState test seam (undefined in production).
   private readonly turnStateFactory?:           () => TurnState;
   private readonly maxTurns:                    number;
+  private readonly sessionTokenCap?:            number;
+  // v4.12 BE.1 — stateless token estimator for the budget check (getLimits +
+  // estimateMessageTokens/estimateToolTokens). No per-model state carried.
+  private readonly modelMetadata = new ModelMetadata();
   private readonly fallback?:                   FallbackStrategy;
   private readonly onToolCall?:                 AidenAgentOptions['onToolCall'];
   private readonly onBudgetWarning?:            AidenAgentOptions['onBudgetWarning'];
@@ -522,6 +563,7 @@ export class AidenAgent {
     this.tools                    = opts.tools;
     this.turnStateFactory         = opts.turnStateFactory;
     this.maxTurns                 = opts.maxTurns ?? DEFAULT_MAX_TURNS;
+    this.sessionTokenCap          = opts.sessionTokenCap;
     this.fallback                 = opts.fallback;
     this.onToolCall               = opts.onToolCall;
     this.onBudgetWarning          = opts.onBudgetWarning;
@@ -950,6 +992,7 @@ export class AidenAgent {
       // threshold mid-turn. chatSession reads this to render the
       // structured-failure card; undefined on all other finishReasons.
       toolLoopCard:       loopResult.toolLoopCard,
+      resumeHandoff:      loopResult.resumeHandoff,
     };
   }
 
@@ -1077,6 +1120,8 @@ export class AidenAgent {
     uiClaims:           Array<{ name: string; args: unknown }>;
     /** v4.1.6 spike (TCE) — populated when finishReason === 'tool_loop'. */
     toolLoopCard?:      AidenAgentResult['toolLoopCard'];
+    /** v4.12 BE.1 — money-safety handoff when the token cap tripped. */
+    resumeHandoff?:     AidenAgentResult['resumeHandoff'];
   }> {
     // v4.6 Phase 1 — expose the per-turn signal to tools via
     // `getCurrentSignal()`. Set at loop entry; cleared before the return
@@ -1122,9 +1167,12 @@ export class AidenAgent {
     let   fallbackActivated = false;
     let   cautionFired      = false;
     let   warningFired      = false;
+    let   tokenCautionFired = false; // v4.12 BE.1 — token warn-ladder (80/90%)
+    let   tokenWarningFired = false;
     let   emptyRetriesUsed  = 0;
     let   finishReason: 'stop' | 'budget_exhausted' | 'error' | 'tool_loop' | 'interrupted' = 'stop';
     let   finalContent      = '';
+    let   resumeHandoff: AidenAgentResult['resumeHandoff'];
     // v4.1.6 spike (TCE) — per-turn loop detection + recovery state.
     // Default ON as of v4.2 Phase 6 — set AIDEN_TCE=0 to disable.
     // When disabled, TurnState.recordToolCall short-circuits with
@@ -1197,6 +1245,53 @@ export class AidenAgent {
       if (cooledDown.length > 0) {
         const cdSet = new Set(cooledDown);
         effectiveTools = tools.filter((t) => !cdSet.has(t.name));
+      }
+
+      // ── v4.12 BE.1 — per-session TOKEN cap (money-safety), enforced BEFORE
+      // the provider call so spend never crosses the cap. Unset → no-op. ──
+      if (this.sessionTokenCap && this.sessionTokenCap > 0) {
+        const cap  = this.sessionTokenCap;
+        const used = (runOptions.sessionTokensSoFar ?? 0) + totalUsage.inputTokens + totalUsage.outputTokens;
+        // token warn-ladder (once each, before the limit)
+        if (!tokenCautionFired && used >= cap * TOKEN_CAUTION_FRACTION) {
+          tokenCautionFired = true;
+          this.onBudgetWarning?.('caution', used, cap, 'tokens');
+        }
+        if (!tokenWarningFired && used >= cap * TOKEN_WARNING_FRACTION) {
+          tokenWarningFired = true;
+          this.onBudgetWarning?.('warning', used, cap, 'tokens');
+        }
+        // Would the NEXT normal call breach (cap − reserve)? maxOutputTokens is
+        // the provider's hard output ceiling, so estNext is an UPPER bound.
+        const reserve = Math.max(MIN_SUMMARY_RESERVE, Math.floor(cap * SUMMARY_RESERVE_FRACTION));
+        const limits  = this.modelMetadata.getLimits(this.providerId ?? '', this.modelId ?? '');
+        const estNext = this.modelMetadata.estimateMessageTokens(messages)
+          + this.modelMetadata.estimateToolTokens(effectiveTools)
+          + limits.maxOutputTokens;
+        if (used + estNext > cap - reserve) {
+          // ★ Money-safety: DO NOT make this call. Graceful finalization only —
+          // no new side-effects, spend never exceeds the cap.
+          finishReason = 'budget_exhausted';
+          if (used + SUMMARY_OUTPUT_ALLOWANCE <= cap) {
+            // reserve headroom → ONE toolless summary (tools:[] → no side-effects)
+            const fin = await this.finalizeWithinBudget(messages, runOptions);
+            if (fin) {
+              if (fin.content) finalContent = fin.content;
+              totalUsage.inputTokens  += fin.inputTokens;
+              totalUsage.outputTokens += fin.outputTokens;
+            }
+          }
+          // else: no headroom → keep the deterministic partial, ZERO further spend.
+          if (!finalContent) {
+            finalContent = 'Work paused — the session token budget was reached before the task finished.';
+          }
+          resumeHandoff = {
+            partial_work: finalContent,
+            next_steps:   'Task incomplete — the per-session token budget was reached; the work above is partial.',
+            resume:       'Raise budget.session_token_cap (or use /budget), or start a fresh session, then re-send the request to continue.',
+          };
+          break;
+        }
       }
 
       let output: ProviderCallOutput;
@@ -1849,7 +1944,34 @@ export class AidenAgent {
       fullTrace,
       uiClaims,
       toolLoopCard,
+      resumeHandoff,
     };
+  }
+
+  /**
+   * v4.12 BE.1 — one toolless final summary within the token budget. tools:[]
+   * → the model cannot start new side-effects. Best-effort: on failure the
+   * caller keeps a deterministic partial (no further spend).
+   */
+  private async finalizeWithinBudget(
+    messages: Message[],
+    runOptions: RunConversationOptions,
+  ): Promise<{ content: string; inputTokens: number; outputTokens: number } | null> {
+    try {
+      const nudge: Message = {
+        role: 'user',
+        content:
+          'You have reached the session token budget. Do NOT call any tools. Give a brief final summary of what you accomplished and what still remains.',
+      };
+      const out = await this.callProvider([...messages, nudge], [], runOptions);
+      return {
+        content: out.content ?? '',
+        inputTokens: out.usage?.inputTokens ?? 0,
+        outputTokens: out.usage?.outputTokens ?? 0,
+      };
+    } catch {
+      return null;
+    }
   }
 
   /**

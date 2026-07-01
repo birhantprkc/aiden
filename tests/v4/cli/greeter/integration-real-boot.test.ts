@@ -62,6 +62,13 @@ beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-greeter-boot-'));
   // Greeter only needs `root`; full AidenPaths is satisfied via cast.
   paths = { root } as unknown as AidenPaths;
+  // v4.12 — these tests model a RETURNING, already-onboarded user (they
+  // seed greeter history). Write the onboarding marker so the speaks-first
+  // intro is suppressed and the greeter runs as the subject under test.
+  // (Without this, an empty USER.md + absent marker would trigger
+  // onboarding, which now suppresses the greeter — see the dedicated
+  // suppression test below, which clears this marker.)
+  await fs.writeFile(path.join(root, '.onboarding-shown'), new Date().toISOString() + '\n', 'utf8');
   // Force process.stdout.isTTY=true for the duration of the test —
   // chatSession.renderStartupCard's gate at line 1781 reads the real
   // process.stdout, not our wrapped stream. Without this, the whole
@@ -254,6 +261,27 @@ describe('renderStartupCard — greeter wiring', () => {
     const text = chunks.join('');
     expect(text).toMatch(/aiden-runtime .* → 4\.9\.99 available\./);
     expect(text).toContain('/update install');
+  });
+
+  it('v4.12 — suppresses the greeter when onboarding fires (no contradictory "welcome back")', async () => {
+    // Onboarding-eligible state: clear the marker beforeEach wrote, and the
+    // {root} paths cast leaves USER.md absent (= empty). Seed greeter history
+    // that WOULD trigger the Tier-2 "welcome back" offer, to prove the greeter
+    // is skipped entirely (not merely offer-less) when the speaks-first intro
+    // owns the boot — the upgrade-cohort contradiction the fix prevents.
+    await fs.rm(path.join(root, '.onboarding-shown'), { force: true });
+    await writeHistory(paths, mkHistory({ lastCwd: process.cwd() }));
+
+    const { display, chunks } = mkTtyDisplay();
+    const session = new ChatSession(buildOpts({ display }));
+    await session.renderStartupCard();
+
+    // The greeter writes to `display` (captured here); the onboarding intro
+    // writes to process.stdout. So an empty-of-greeter-speech display proves
+    // the greeter was suppressed.
+    const text = chunks.join('');
+    expect(text).not.toMatch(/Welcome back/);
+    expect(text).not.toMatch(/Last session/);
   });
 });
 

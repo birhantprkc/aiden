@@ -26,7 +26,7 @@
  * helper's value is resolving the EINVAL trap, not abstracting I/O.
  */
 
-import { spawn as defaultSpawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { spawn as defaultSpawn, execSync as defaultExecSync, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
 import path from 'node:path';
 
@@ -34,10 +34,141 @@ export interface SpawnCommandOptions {
   stdio?:    SpawnOptions['stdio'];
   env?:      NodeJS.ProcessEnv;
   cwd?:      string;
+  /**
+   * POSIX-only: spawn the child as its own process-group leader so the
+   * whole tree (e.g. `npx` → `node`) can be killed via the group. Ignored
+   * on Windows (where `killProcessTree` uses `taskkill /T` instead).
+   */
+  detached?: boolean;
   /** Override platform — test seam. Defaults to `process.platform`. */
   platform?: NodeJS.Platform;
   /** Override `child_process.spawn` — test seam. */
   spawnImpl?: typeof defaultSpawn;
+}
+
+export interface KillProcessTreeOptions {
+  /** Override platform — test seam. Defaults to `process.platform`. */
+  platform?: NodeJS.Platform;
+  /**
+   * Override `child_process.execSync` (for the Windows taskkill path) — test
+   * seam. v4.12 PM.1: the Windows tree-kill runs `taskkill` SYNCHRONOUSLY (was
+   * async `spawn`) so it enumerates + reaps the tree while the root is alive,
+   * before the `child.kill()` fallback fires.
+   */
+  execSyncImpl?: typeof defaultExecSync;
+  /** Override `process.kill` (for the POSIX group-kill path) — test seam. */
+  killImpl?: (pid: number, signal: NodeJS.Signals | number) => void;
+}
+
+/**
+ * Kill a child process AND its descendants. `child.kill()` signals only the
+ * direct child; for shim chains that re-spawn (npx → node, or Windows
+ * `cmd.exe` → node) that orphans the grandchild. This walks the whole tree:
+ *
+ *   - Windows: `taskkill /pid <pid> /t [/f]` — `/t` includes descendants,
+ *     `/f` forces (used for SIGKILL; SIGTERM stays graceful).
+ *   - POSIX: signal the process GROUP (`-pid`) — requires the child was
+ *     spawned `detached: true` so its pid is the group leader. Falls back to
+ *     a direct signal if the group send fails (e.g. not detached / gone).
+ *
+ * Best-effort + non-throwing: a process that's already dead is a no-op.
+ */
+export function killProcessTree(
+  child: ChildProcess,
+  signal: NodeJS.Signals,
+  opts: KillProcessTreeOptions = {},
+): void {
+  const platform = opts.platform ?? process.platform;
+  const pid = child.pid;
+
+  if (pid != null && platform === 'win32') {
+    // ★ v4.12 PM.1 — SYNCHRONOUS `taskkill /t` reaps the whole tree INCLUDING
+    // the root. On Windows we deliberately do NOT fall through to `child.kill`:
+    // `child.kill` is TerminateProcess on the root, and firing it during a
+    // GRACEFUL pass (`taskkill /t` without `/f`) kills the root before the
+    // console descendants exit — they ignore the graceful request, get
+    // reparented, and ORPHAN (the Firefox lesson, live: graceful never reaps
+    // them and the later force pass targets a now-dead root PID). Letting
+    // `taskkill /t` own the tree keeps the root alive through the graceful
+    // window so the caller's grace→force escalation can `/f` the intact tree.
+    //   - `/f`   → force  (SIGKILL)
+    //   - no `/f`→ graceful request (SIGTERM); caller escalates to `/f` on grace.
+    const execSync = opts.execSyncImpl ?? defaultExecSync;
+    const force = signal === 'SIGKILL' ? ' /f' : '';
+    try {
+      execSync(`taskkill /pid ${pid} /t${force}`, { stdio: 'ignore', timeout: 5000, windowsHide: true });
+      return;   // taskkill owns the Windows tree — do not also child.kill the root
+    } catch {
+      // taskkill missing / failed — fall through to the child.kill best-effort.
+    }
+  } else if (pid != null) {
+    const kill = opts.killImpl ?? ((p, s) => process.kill(p, s));
+    try {
+      kill(-pid, signal);        // negative pid → whole process group
+    } catch { /* not detached / already gone — direct kill below still runs */ }
+  }
+
+  // Fallback / POSIX belt-and-suspenders: signal the direct child. On POSIX
+  // this backstops a failed group send; it's also the only path when pid is
+  // absent (a test fake) or when the Windows taskkill itself threw.
+  try {
+    child.kill(signal);
+  } catch { /* already dead */ }
+}
+
+export interface CreationTimeOptions {
+  /** Override platform — test seam. Defaults to `process.platform`. */
+  platform?:   NodeJS.Platform;
+  /** Override `child_process.execSync` — test seam. */
+  execSyncImpl?: typeof defaultExecSync;
+}
+
+/**
+ * v4.12 PM.1 — best-effort OS/kernel process CREATION-TIME (epoch ms) for a pid.
+ *
+ * ★ PID is not identity — PID reuse can recycle a stale PID onto an unrelated
+ * process, so verify identity before signalling. PID + creation-time IS the
+ * practical identity. This captures the re-queryable kernel
+ * start-time at spawn so a later recovery pass (PM.3) can verify a recovered pid
+ * still belongs to the same process before signalling it — `Date.now()` at spawn
+ * can't be re-derived from a bare pid, the kernel start-time can.
+ *
+ *   - Windows: `Get-Process -Id <pid>` → `.StartTime` → Unix ms.
+ *   - POSIX:   `ps -o lstart= -p <pid>` → parse the absolute start timestamp.
+ *
+ * Best-effort + non-throwing: returns `null` when the query fails or the process
+ * is already gone (a very short-lived spawn). PM.1 stores it as a foundation;
+ * identity-check enforcement is PM.3.
+ */
+export function getProcessCreationTime(
+  pid: number,
+  opts: CreationTimeOptions = {},
+): number | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const platform = opts.platform ?? process.platform;
+  const execSync = opts.execSyncImpl ?? defaultExecSync;
+  try {
+    if (platform === 'win32') {
+      // Emit StartTime as a UTC ISO-8601 string and parse in JS. (An earlier
+      // `[DateTimeOffset](…).ToUnixTimeMilliseconds()` form failed: PowerShell's
+      // cast binds looser than the method call, so ToUnixTimeMilliseconds was
+      // invoked on System.DateTime → MethodNotFound. ISO round-trips cleanly.)
+      const out = execSync(
+        `powershell -NoProfile -NonInteractive -Command ` +
+          `"(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')"`,
+        { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true },
+      );
+      const ms = Date.parse(String(out).trim());
+      return Number.isFinite(ms) && ms > 0 ? ms : null;
+    }
+    const out = execSync(`ps -o lstart= -p ${pid}`, {
+      encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const parsed = Date.parse(String(out).trim());
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  } catch {
+    return null;   // process gone, query failed, or tool missing — foundation stays undefined
+  }
 }
 
 export interface SpawnCommandResult {
@@ -148,6 +279,9 @@ export function spawnCommand(
     env:   opts.env,
     cwd:   opts.cwd,
     shell: false,
+    // POSIX: own process group so killProcessTree can signal the whole tree
+    // (npx → node). Ignored on Windows (taskkill /T walks the tree by PID).
+    detached: opts.detached === true && !isWin,
   };
 
   if (!isWin) {

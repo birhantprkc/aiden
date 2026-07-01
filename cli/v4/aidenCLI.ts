@@ -45,6 +45,12 @@ import { runSetupWizard, isFreshInstall } from './setupWizard';
 import { runDoctorCli } from './doctor';
 import { runModelPicker } from './commands/modelPicker';
 import { allCommands } from './commands';
+// v4.12 /commands slice — inline /activity roll-up + /home cwd invalidation + history source.
+import { makeActivityCommand } from './commands/activity';
+import { loadRecent, HISTORY_MAX_ENTRIES } from './historyStore';
+import { invalidateSandboxConfig } from '../../core/v4/sandboxConfig';
+// v4.12 PM.1 — background-process registry, wired into the REPL + daemon executor.
+import { ProcessRegistry } from '../../core/v4/processRegistry';
 
 import {
   resolveAidenPaths,
@@ -52,6 +58,7 @@ import {
   type AidenPaths,
 } from '../../core/v4/paths';
 import { ensureSoulMdSeeded } from '../../core/v4/soulSeed';
+import { setVisionProvider } from '../../core/v4/visionClient';
 import { ConfigManager } from '../../core/v4/config';
 import { SessionStore } from '../../core/v4/sessionStore';
 import { SessionManager } from '../../core/v4/sessionManager';
@@ -85,6 +92,7 @@ import { AuxiliaryClient } from '../../core/v4/auxiliaryClient';
 // reported "Compressor or session not wired."
 import { ContextCompressor } from '../../core/v4/contextCompressor';
 import { ModelMetadata } from '../../core/v4/modelMetadata';
+import { applyToolDeferral } from '../../core/v4/toolDeferral';
 import { MemoryManager } from '../../core/v4/memoryManager';
 // v4.10 Slice 10.1b — boot-time project-root detection so the REPL's
 // MemoryManager can route memory_add file=project to the cwd's
@@ -1317,6 +1325,10 @@ export async function buildAgentRuntime(
     }
   }
 
+  // v4.12 B2.2a — wire the active adapter/model for one-shot vision calls
+  // (browser_see). Routing checks supportsVision at call time; no re-routing.
+  setVisionProvider({ adapter, providerId, modelId });
+
   // Tool registry + executor.
   const toolRegistry = new ToolRegistry();
   registerAllTools(toolRegistry);
@@ -1461,7 +1473,11 @@ export async function buildAgentRuntime(
   const approvalEngine = new ApprovalEngine(
     config.getValue<'manual' | 'smart' | 'off'>('agent.approval_mode', 'smart'),
   );
-  if (cliOpts.yolo) approvalEngine.setMode('off');
+  if (cliOpts.yolo) approvalEngine.setMode('off', { userInitiated: true });
+  // ★ v4.12 SH.1 — freeze the mode once boot-time setup (config default +
+  // --yolo) is done. From here, only user-initiated /yolo may flip it; a held
+  // ApprovalEngine ref in tool/plugin code can NOT silently disable approvals.
+  approvalEngine.freeze();
   // Phase 16f / v4.10 Slice 10.6: hydrate persistent allowlist from
   // BOTH sources so "Allow always" choices survive across REPL
   // restarts AND project-specific permissions don't bleed across
@@ -1697,7 +1713,7 @@ export async function buildAgentRuntime(
   } as any;
 
   // MCP setup (best-effort — connection failures are non-fatal).
-  const mcpResult = await setupMcpFromConfig(config, toolRegistry).catch(
+  const mcpResult = await setupMcpFromConfig(config, toolRegistry, { paths }).catch(
     () => ({ client: null, connected: [], failures: {} }),
   );
   const mcpClient = mcpResult.client ?? null;
@@ -1824,7 +1840,17 @@ export async function buildAgentRuntime(
   callbacks.setSkillTeacher(skillTeacher);
 
   // ── Tool executor with full Phase 9 + 10 context ─────────────────────
-  const toolExecutor = toolRegistry.buildExecutor({
+  // v4.12 /commands slice — the context is a NAMED object (not an inline
+  // literal) so `/home` can patch its `.cwd` live. `buildExecutor` closes over
+  // THIS object and reads `context.cwd` on every call, so mutating it here
+  // takes immediate effect for file_* + shell_exec + process spawns.
+  // v4.12 PM.1 — one background-process registry, shared by the REPL executor
+  // and (via the reused toolExecutor closure) the daemon. Fixes the dormancy:
+  // ctx.processes is now defined, so process_spawn/list/kill/wait/log_read work
+  // in a real session. Reaped on shutdown via cleanup() (wired below).
+  const processRegistry = new ProcessRegistry();
+
+  const toolExecutorContext = {
     cwd: process.cwd(),
     paths,
     sessions: sessionManager,
@@ -1834,11 +1860,27 @@ export async function buildAgentRuntime(
     ssrfProtection,
     tirithScanner,
     skillLoader,
+    // v4.12 PM.1 — make the process_* tools reachable (were "not configured").
+    processes: processRegistry,
     // v4.11 Slice 1 — interactive clarify callback for the `clarify` tool
     // (REPL only; reuses the approval prompt path). Absent from the daemon
     // executor, so headless agents get the tool's "unavailable" degrade.
     clarify: callbacks.promptClarify,
-  });
+  };
+  const toolExecutor = toolRegistry.buildExecutor(toolExecutorContext);
+
+  // v4.12 /commands slice — the `/home` seam. Aiden sources tool cwd two ways:
+  // the boot-snapshotted tool-executor `context.cwd` (file/shell tools) and
+  // fresh `process.cwd()` (sandbox allow-list, subagent/mcp contexts built
+  // on demand). To make `/home` genuinely take effect (not cosmetic), change
+  // BOTH, then invalidate the sandbox config so its cwd-derived fs allow-list
+  // rebuilds — otherwise writes into the new cwd would stay blocked when the
+  // sandbox is enabled.
+  const setWorkingDir = (absPath: string): void => {
+    process.chdir(absPath);
+    toolExecutorContext.cwd = absPath;
+    invalidateSandboxConfig();
+  };
 
   // Resolve verified-flag from memory tool results (Phase 9 wrappers
   // surface `{ ok, verified, ... }`).
@@ -1900,10 +1942,19 @@ export async function buildAgentRuntime(
     // chars). Full descriptions stay available on demand via skills_list
     // / skill_view; those paths are deliberately NOT narrowed.
     const loaded = await skillLoader.list();
-    skillsList = loaded.map((s) => ({
-      name: (s as { name: string }).name,
-      description: narrowSkillDesc((s as { description?: string }).description ?? ''),
-    }));
+    // v4.12 OM.1 — carry category/trustLevel/userModified so PromptBuilder can
+    // demote off-posture / low-trust skills to names-only (name kept, teaser
+    // dropped). Every name still ships; bodies stay a skill_view away.
+    skillsList = loaded.map((s) => {
+      const su = s as { name: string; description?: string; category?: string; trustLevel?: string; userModified?: boolean };
+      return {
+        name: su.name,
+        description: narrowSkillDesc(su.description ?? ''),
+        category: su.category,
+        trustLevel: su.trustLevel,
+        userModified: su.userModified,
+      };
+    });
   } catch {
     skillsList = [];
   }
@@ -2003,13 +2054,23 @@ export async function buildAgentRuntime(
     // for the UI-leak class; the sanitizer stays as defense-in-depth).
     // isWeakModel (core/v4/modelCapability.ts) is the single predicate
     // shared with the prompt-guidance gate, so guidance + tools agree.
-    tools: toolRegistry.getSchemas(
-      toolProfile.toolsets as string[] | undefined,
-      'repl',
-      isWeakModel(modelId) ? ['ui'] : undefined,
+    // v4.12 OM.2 — cost-based MCP tool deferral. Always exclude the `bridge`
+    // toolset from the base assembly; applyToolDeferral injects tool_search +
+    // tool_call ONLY when mcp schema cost crosses the threshold (else the schema
+    // list passes through unchanged — no bridge, byte-identical to today).
+    tools: applyToolDeferral(
+      toolRegistry.getSchemas(
+        toolProfile.toolsets as string[] | undefined,
+        'repl',
+        isWeakModel(modelId) ? ['ui', 'bridge'] : ['bridge'],
+      ),
+      toolRegistry,
+      { providerId, modelId, meta: modelMetadata },
     ),
     toolExecutor,
     maxTurns: config.getValue<number>('agent.max_turns', 90)!,
+    // v4.12 BE.1 — per-session token cap (money-safety). 0/unset → no cap.
+    sessionTokenCap: config.getValue<number>('budget.session_token_cap', 0)! || undefined,
     auxiliaryClient,
     plannerGuard,
     honestyEnforcement,
@@ -2839,6 +2900,21 @@ export async function buildAgentRuntime(
     },
   });
 
+  // ── v4.12 /commands slice — /activity roll-up ──────────────────────
+  //
+  // Thin aggregator over the SAME accessors /usage /budget /history /tasks
+  // /artifacts read. Inline (not barrel) because the task + artifact stores
+  // are boot-local, like /tasks and /artifacts. `makeActivityCommand` takes
+  // the live accessors so the roll-up logic stays unit-testable.
+  commandRegistry.register(makeActivityCommand({
+    sessionId:     () => replParentRunRef.chatSessionId,
+    getCap:        () => config.getValue<number>('budget.session_token_cap', 0) ?? 0,
+    getUsedTokens: (id) => sessionManager.getSessionTokens(id),
+    getHistoryCount: async () => (await loadRecent(HISTORY_MAX_ENTRIES)).length,
+    listTasks:     (id) => replTaskStore.listRecent({ sessionId: id, limit: 200 }),
+    listArtifacts: (id) => replArtifactStore.listRecent({ sessionId: id, limit: 200 }),
+  }));
+
   // ── v4.10 Slice 10.8 — /adjust slash command ───────────────────────
   //
   // Mutation surface for the Task-lite kernel. Two operations:
@@ -3057,6 +3133,10 @@ export async function buildAgentRuntime(
     replTaskStore,
     // v4.11 — artifact registry store.
     replArtifactStore,
+    // v4.12 /commands slice — /home working-directory change seam.
+    setWorkingDir,
+    // v4.12 PM.1 — background-process registry (reaped on session shutdown).
+    processRegistry,
   };
 }
 
@@ -3159,6 +3239,10 @@ export interface AgentRuntime {
    */
   replTaskStore:    import('../../core/v4/daemon/taskStore').TaskStore;
   replArtifactStore: import('../../core/v4/daemon/artifactStore').ArtifactStore;
+  /** v4.12 /commands slice — `/home` working-directory change seam. */
+  setWorkingDir: (absPath: string) => void;
+  /** v4.12 PM.1 — background-process registry (reaped on session shutdown). */
+  processRegistry: import('../../core/v4/processRegistry').ProcessRegistry;
   /**
    * v4.10 Slice 10.2c — `chatSessionId` is the long-lived REPL session
    * id (set once at ChatSession.run() init, never cleared between turns).
@@ -3238,6 +3322,10 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     // Phase v4.1-1.1 — live ChannelManager so /channel commands can
     // list, add, remove, and inspect adapters without an external server.
     channelManager: runtime.channelManager,
+    // v4.12 /commands slice — /home working-directory change seam.
+    setWorkingDir: runtime.setWorkingDir,
+    // v4.12 PM.1 — process registry so session shutdown reaps spawns.
+    processRegistry: runtime.processRegistry,
     // Phase v4.1.2 session-summary-followup: ChatSession.maybeAutoSummarize
     // needs these to write MEMORY.md directly (bypassing the agent loop)
     // when /quit fires the auto-summary path.

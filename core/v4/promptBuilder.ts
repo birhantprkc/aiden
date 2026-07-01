@@ -57,7 +57,15 @@ export interface PromptBuilderOptions {
   paths:                AidenPaths;
   config?:              ConfigManager;
   memorySnapshot?:      MemorySnapshot;
-  skillsList?:          Array<{ name: string; description: string }>;
+  // v4.12 OM.1 — category/trustLevel/userModified drive posture-aware names-only
+  // demotion (off-posture / low-trust entries keep their NAME but drop the teaser).
+  skillsList?:          Array<{
+    name: string;
+    description: string;
+    category?: string;
+    trustLevel?: string;
+    userModified?: boolean;
+  }>;
   /**
    * Phase v4.1.2 alive-core: which tool-set tags are currently loaded
    * in the agent's ToolRegistry. Each known toolset unlocks a paragraph
@@ -370,6 +378,23 @@ function formatUserSection(userMd: string): string {
 }
 
 /**
+ * v4.12 — speaks-first onboarding nudge. Injected (in place of the USER
+ * PROFILE block) only when USER.md is empty: the user hasn't been onboarded
+ * yet. Instructs honest extraction — save ONLY the facts the user actually
+ * states, never inferred ones — into USER.md via the existing memory_add
+ * tool. Personalization (work-relevant facts), not companionship.
+ */
+const ONBOARDING_NUDGE = [
+  '## Getting to know the user',
+  '',
+  'You have no saved profile for this user yet (USER.md is empty). If they',
+  'tell you who they are or what they work on, save ONLY the facts they',
+  'actually state — their name, projects, and stated preferences/conventions',
+  '— to USER.md via memory_add(file: "user"). Never invent or infer facts',
+  'they did not say. Keep it work-relevant; do not record feelings or mood.',
+].join('\n');
+
+/**
  * v4.11 Skill Injection Narrowing — hard per-entry cap for the
  * system-prompt skill index. The cap actually fires (the pre-v4.11
  * `.slice(0, 120)` never did: avg description is ~62 chars), so this is
@@ -403,10 +428,46 @@ export function narrowSkillDesc(desc: string): string {
   return firstSentence.slice(0, SKILL_DESC_CAP).trimEnd() + '…';
 }
 
+export interface SkillIndexEntry {
+  name: string;
+  description: string;
+  category?: string;
+  trustLevel?: string;
+  userModified?: boolean;
+}
+
+/**
+ * v4.12 OM.1 — posture-aware demotion. A demoted skill keeps its NAME in the
+ * index (never hidden — war-story #3) but drops the teaser. Conservative: when
+ * relevance is ambiguous we KEEP the teaser (blinding the model is the failure
+ * mode, not a few extra tokens).
+ *
+ *   - user-modified (project-local / user-touched) → KEEP teaser.
+ *   - category matches a loaded toolset (posture-relevant) → KEEP teaser.
+ *   - low-trust 'community' + off-posture → names-only.
+ *   - categorized but off-posture (any trust) → names-only.
+ *   - no category + not low-trust → KEEP (ambiguous → conservative).
+ */
+export function shouldDemoteSkill(
+  skill: { category?: string; trustLevel?: string; userModified?: boolean },
+  loadedToolsets: ReadonlySet<string>,
+): boolean {
+  if (skill.userModified) return false;                    // project-local / user-touched
+  const cat = (skill.category ?? '').trim().toLowerCase();
+  if (cat && loadedToolsets.has(cat)) return false;        // posture-relevant
+  if (skill.trustLevel === 'community') return true;       // low-trust + off-posture
+  if (cat) return true;                                    // categorized but off-posture (any trust)
+  return false;                                            // uncategorized + non-community → conservative keep
+}
+
 function formatSkillsSection(
-  skills: ReadonlyArray<{ name: string; description: string }>,
+  skills: ReadonlyArray<SkillIndexEntry>,
+  loadedToolsets: ReadonlySet<string>,
 ): string {
-  const lines = skills.map((s) => `- ${s.name}: ${s.description}`);
+  // Demoted entries render NAME-ONLY (teaser dropped); full entries keep the teaser.
+  const lines = skills.map((s) =>
+    shouldDemoteSkill(s, loadedToolsets) ? `- ${s.name}` : `- ${s.name}: ${s.description}`,
+  );
   return [
     HEADER_SKILLS,
     '',
@@ -491,6 +552,17 @@ export class PromptBuilder {
         content:  formatUserSection(userMd),
         optional: true,
       });
+    } else {
+      // v4.12 — onboarding nudge. USER.md is empty (user not yet onboarded).
+      // If the user states who they are or what they're working on, save the
+      // STATED facts to USER.md via memory_add(file:'user'). Self-limiting:
+      // disappears once USER.md has content. Same anti-fabrication bar as the
+      // verifier — only what the user actually said, never inferred.
+      slots.push({
+        name:     'user-onboarding',
+        content:  ONBOARDING_NUDGE,
+        optional: true,
+      });
     }
 
     // ── 4.25. Runtime manifest (self-awareness) ───────────────────────
@@ -544,7 +616,7 @@ export class PromptBuilder {
     if (opts.skillsList && opts.skillsList.length > 0) {
       slots.push({
         name:     'skills',
-        content:  formatSkillsSection(opts.skillsList),
+        content:  formatSkillsSection(opts.skillsList, opts.toolsetsLoaded ?? new Set()),
         optional: true,
       });
     }

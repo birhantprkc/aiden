@@ -56,7 +56,8 @@ describe('/sandbox', () => {
     const ctx = mkCtx(['on']);
     await sandbox.handler(ctx);
     const lines = (ctx as unknown as { _lines: string[] })._lines;
-    expect(lines.some((l) => l.includes('Sandbox: ON'))).toBe(true);
+    // v4.12 SH.1 — honest relabel: 'Sandbox' → 'File guardrails'.
+    expect(lines.some((l) => l.includes('File guardrails: ON'))).toBe(true);
   });
 
   it('off flips state + prints status', async () => {
@@ -64,7 +65,7 @@ describe('/sandbox', () => {
     const ctx = mkCtx(['off']);
     await sandbox.handler(ctx);
     const lines = (ctx as unknown as { _lines: string[] })._lines;
-    expect(lines.some((l) => l.includes('Sandbox: OFF'))).toBe(true);
+    expect(lines.some((l) => l.includes('File guardrails: OFF'))).toBe(true);
   });
 
   it('status prints current state without mutating', async () => {
@@ -72,7 +73,7 @@ describe('/sandbox', () => {
     const ctx = mkCtx(['status']);
     await sandbox.handler(ctx);
     const lines = (ctx as unknown as { _lines: string[] })._lines;
-    expect(lines.some((l) => l.includes('Sandbox:') && l.includes('source:'))).toBe(true);
+    expect(lines.some((l) => l.includes('File guardrails:') && l.includes('source:'))).toBe(true);
   });
 
   it('persists to config.yaml when ConfigManager wired', async () => {
@@ -129,8 +130,8 @@ describe('env precedence visible in status', () => {
     const ctx = mkCtx(['status']);
     await sandbox.handler(ctx);
     const lines = (ctx as unknown as { _lines: string[] })._lines;
-    const status = lines.find((l) => l.includes('Sandbox:'));
-    expect(status).toMatch(/Sandbox: OFF\s+\(source: env\)/);
+    const status = lines.find((l) => l.includes('File guardrails:'));
+    expect(status).toMatch(/File guardrails: OFF\s+\(source: env\)/);
   });
 });
 

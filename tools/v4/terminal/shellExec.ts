@@ -31,6 +31,7 @@
  */
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
+import { capToolOutput, shellOutputHandle } from '../../../core/v4/toolOutputCap';
 import { localBackendExecute } from '../backends/local';
 import { dockerBackendExecute } from '../backends/docker';
 import {
@@ -141,14 +142,20 @@ export const shellExecTool: ToolHandler = {
       result = await localBackendExecute(shellArgs, cb);
     }
 
+    // v4.12 TOC.1 — cap output at the boundary (head40/tail60 + marker, ANSI
+    // strip, secret-redact-after-truncation). Under cap → byte-identical.
+    const outCap = capToolOutput(result.stdout ?? '');
+    const errCap = capToolOutput(result.stderr ?? '');
+    const omitted = outCap.omittedChars + errCap.omittedChars;
     return {
       success: result.exitCode === 0,
       exitCode: result.exitCode,
-      stdout: result.stdout,
-      stderr: result.stderr,
+      stdout: outCap.text,
+      stderr: errCap.text,
       durationMs: result.durationMs,
       timedOut: result.timedOut,
       backend: result.backend,
+      ...(outCap.truncated || errCap.truncated ? shellOutputHandle(omitted) : {}),
     };
   },
 };

@@ -7,9 +7,17 @@
 import { getRuntimeToggles } from './runtimeToggles';
 
 /**
- * core/v4/sandboxConfig.ts — v4.4 Phase 1: Execution sandbox configuration.
+ * core/v4/sandboxConfig.ts — v4.4 Phase 1: execution-guardrail configuration.
  *
- * Single source of truth for sandbox enablement + resource policies +
+ * ★ v4.12 SH.1 honesty note: the filesystem allow/deny lists here are
+ * DEFENSE-IN-DEPTH for the file_* tools ONLY — `shell_exec` does NOT consult
+ * them, so under the LOCAL backend they are NOT containment (a shell command can
+ * reach any path). Real process containment exists only under the Docker
+ * backend (`defaultBackend='docker'`); see core/v4/executionPolicy.ts for the
+ * honest floor/ceiling/router surface. Do not describe the file ACLs as a
+ * "sandbox" on the local backend.
+ *
+ * Single source of truth for guardrail enablement + resource policies +
  * filesystem allow/deny lists + Docker hardening flags. Read from
  * environment variables at construction time (matches v4.2's TurnState
  * + v4.3's BrowserState env-driven pattern).
@@ -171,7 +179,7 @@ function buildDefaultAllowList(): string[] {
  * allow list. Mirrors the consult-shaped deny-list pattern (sensitive
  * configs, system dirs).
  */
-function buildDefaultDenyList(): string[] {
+function buildDefaultDenyList(env: NodeJS.ProcessEnv = process.env): string[] {
   const home = os.homedir();
   const paths = [
     path.join(home, '.ssh'),
@@ -185,6 +193,11 @@ function buildDefaultDenyList(): string[] {
     path.join(home, '.bashrc'),
     path.join(home, '.zshrc'),
     path.join(home, '.profile'),
+    // v4.12 SH.1 — cross-platform cloud/cluster credential stores.
+    path.join(home, '.kube'),
+    path.join(home, '.docker'),        // config.json holds registry creds
+    path.join(home, '.azure'),
+    path.join(home, '.config', 'gcloud'),
     '/etc',
     '/var',
     '/usr',
@@ -192,6 +205,24 @@ function buildDefaultDenyList(): string[] {
     '/sys',
     '/proc',
   ];
+  // v4.12 SH.1 — Windows-native credential/system stores (Aiden is Windows-first).
+  // Guarded on presence (undefined env → skipped on non-Windows).
+  const appData = env.APPDATA;
+  const localAppData = env.LOCALAPPDATA;
+  const winDir = env.SystemRoot ?? env.windir;
+  if (appData) {
+    paths.push(path.join(appData, 'Microsoft', 'Credentials'));
+    paths.push(path.join(appData, 'Microsoft', 'Protect'));   // DPAPI master keys
+    paths.push(path.join(appData, 'gcloud'));
+    paths.push(path.join(appData, 'npm'));                     // may carry .npmrc
+  }
+  if (localAppData) {
+    paths.push(path.join(localAppData, 'Microsoft', 'Credentials'));
+    paths.push(path.join(localAppData, 'Google', 'Cloud SDK'));
+  }
+  if (winDir) {
+    paths.push(path.join(winDir, 'System32', 'config'));       // SAM/SYSTEM/SECURITY hives
+  }
   return resolveRealPaths(paths);
 }
 
@@ -322,7 +353,7 @@ export function readSandboxConfig(
   const customAllow = parseList(env.AIDEN_SANDBOX_ALLOW).map(resolveRealPath);
   const customDeny  = parseList(env.AIDEN_SANDBOX_DENY).map(resolveRealPath);
   const fsAllowList = Array.from(new Set([...buildDefaultAllowList(), ...customAllow]));
-  const fsDenyList  = Array.from(new Set([...buildDefaultDenyList(),  ...customDeny ]));
+  const fsDenyList  = Array.from(new Set([...buildDefaultDenyList(env),  ...customDeny ]));
 
   // Resource limits — string values pass through Docker as-is.
   const resourceLimits: SandboxResourceLimits = {
@@ -383,6 +414,17 @@ export function getSandboxConfig(): SandboxConfig {
   }
   if (!_singleton) _singleton = readSandboxConfig();
   return _singleton;
+}
+
+/**
+ * v4.12 — invalidate the cached config so the next `getSandboxConfig()` rebuilds
+ * it from the current `process.cwd()`. Used by `/home` after `process.chdir()`
+ * so the filesystem allow-list (which snapshots cwd at build time) includes the
+ * new working directory — otherwise writes into the new cwd would stay blocked
+ * under an enabled sandbox. Mirrors the `/sandbox`-toggle invalidation hook.
+ */
+export function invalidateSandboxConfig(): void {
+  _singleton = null;
 }
 
 /** Reset the singleton for test isolation. Production code never calls this. */

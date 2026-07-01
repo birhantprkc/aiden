@@ -14,23 +14,29 @@
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { pwType } from '../../../core/playwrightBridge';
+import { pwActByLease } from '../../../core/playwrightBridge';
+import { getLeaseStore } from '../../../core/v4/browserState';
 import { withBrowserState } from './_observer';
 
 const _browserTypeTool: ToolHandler = {
   schema: {
     name: 'browser_type',
     description:
-      'Type text into a browser input identified by CSS selector. Replaces existing value.',
+      'Type text into a browser input. Preferred: pass ref="@eN" from browser_snapshot. Or pass a CSS selector. Replaces existing value.',
     inputSchema: {
       type: 'object',
       properties: {
+        ref: {
+          type: 'string',
+          description: 'Input element ref from browser_snapshot, e.g. "@e2". Preferred addressing mode.',
+        },
         selector: {
           type: 'string',
-          description: 'CSS selector for the input field.',
+          description: 'CSS selector for the input field. Used when ref is not given.',
         },
         text: { type: 'string', description: 'Text to enter.' },
       },
-      required: ['selector', 'text'],
+      required: ['text'],
     },
   },
   category: 'browser',
@@ -38,20 +44,32 @@ const _browserTypeTool: ToolHandler = {
   toolset: 'browser',
   riskTier: 'caution',   // v4.4 Phase 1
   buildPreview(args) {
-    const selector = String(args.selector ?? 'input');
+    const target = String(args.ref ?? '').trim() || String(args.selector ?? 'input');
     const text = String(args.text ?? '');
     return {
       tool: 'browser_type',
       args,
       riskTier: 'caution',
-      sideEffects: [{ type: 'browser_action', action: 'type', target: selector }],
+      sideEffects: [{ type: 'browser_action', action: 'type', target }],
       detectedRisks: [],
-      summary: `Would type ${text.length} chars into ${selector}`,
+      summary: `Would type ${text.length} chars into ${target}`,
     };
   },
   async execute(args) {
-    const selector = String(args.selector ?? 'input').trim();
     const text = String(args.text ?? '');
+    // B1.2 — ref-based addressing (additive; selector path below unchanged).
+    const ref = String(args.ref ?? '').trim();
+    if (ref) {
+      const lease = getLeaseStore().get(ref);
+      if (!lease) {
+        return { success: false, error: `Element ref ${ref} is not in the current snapshot. Run browser_snapshot to refresh element refs, then retry.` };
+      }
+      const r = await pwActByLease(lease, { kind: 'fill', text });
+      if (r.ok) return { success: true, ref };
+      return { success: false, error: r.error, ref };
+    }
+
+    const selector = String(args.selector ?? 'input').trim();
     const r = await pwType(selector, text);
     if (r.ok) return { success: true, selector };
     return { success: false, error: r.error, selector };

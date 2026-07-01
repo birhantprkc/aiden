@@ -11,6 +11,7 @@
  */
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
+import { scrubString } from '../../../core/v4/logger/redact';
 
 export const processListTool: ToolHandler = {
   schema: {
@@ -27,7 +28,14 @@ export const processListTool: ToolHandler = {
     if (!ctx.processes) {
       return { success: false, error: 'process registry not configured' };
     }
-    const handles = ctx.processes.list();
+    // ★ PM.1 — secret-redact the command before it reaches the model. A spawned
+    // command can carry credentials (e.g. `curl -H "Authorization: Bearer …"`);
+    // reuse the B5.1 scrubString patterns (Bearer / sk- / labelled secrets)
+    // rather than hand-rolling. Do NOT wire a secret-leaking list.
+    const handles = ctx.processes.list().map((h) => ({
+      ...h,
+      command: scrubString(h.command),
+    }));
     return { success: true, count: handles.length, processes: handles };
   },
 };

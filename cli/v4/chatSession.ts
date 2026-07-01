@@ -363,6 +363,20 @@ export interface ChatSessionOptions {
   channelManager?: import('../../core/channels/manager').ChannelManager;
 
   /**
+   * v4.12 /commands slice — change Aiden's working directory. aidenCLI wires
+   * this to `process.chdir()` + live tool-executor `ctx.cwd` patch + sandbox
+   * config invalidation, so `/home <path>` actually takes effect. Absent in
+   * contexts that can't change cwd.
+   */
+  setWorkingDir?: (absPath: string) => void;
+
+  /**
+   * v4.12 PM.1 — background-process registry. Reaped (cleanup → tree-kill all
+   * tracked spawns) on session-end / signal shutdown so nothing is orphaned.
+   */
+  processRegistry?: import('../../core/v4/processRegistry').ProcessRegistry;
+
+  /**
    * v4.6 Phase 2Q-B — REPL parent-run wiring.
    *
    * When supplied, each REPL turn inserts a `runs` row (status:
@@ -604,7 +618,9 @@ export class ChatSession implements ChatSessionLike {
     this.currentProviderId = opts.initialProviderId;
     this.currentModelId = opts.initialModelId;
     this.modelMetadata = opts.modelMetadata ?? new ModelMetadata();
-    if (opts.yoloMode) opts.approvalEngine.setMode('off');
+    // ★ SH.1 — yoloMode reflects the user's --yolo flag → user-initiated, so it
+    // still applies after the engine is frozen at boot.
+    if (opts.yoloMode) opts.approvalEngine.setMode('off', { userInitiated: true });
     if (opts.resumeHistory) this.history = [...opts.resumeHistory];
   }
 
@@ -753,6 +769,9 @@ export class ChatSession implements ChatSessionLike {
           const timeout = new Promise<void>((res) => setTimeout(res, 1000).unref?.());
           await Promise.race([stopPromise, timeout]);
         }
+        // v4.12 PM.1 — reap background processes so a spawned dev server / build
+        // isn't orphaned when the session exits (tree-kill all tracked spawns).
+        try { this.opts.processRegistry?.cleanup(); } catch { /* best-effort reap */ }
         try {
           await this.maybeAutoSummarizeWithTimeout(sig);
         } catch (err) {
@@ -960,6 +979,8 @@ export class ChatSession implements ChatSessionLike {
             agent: this.opts.agent,
             pluginLoader: this.opts.pluginLoader,
             channelManager: this.opts.channelManager,
+            // v4.12 /commands slice — /home working-directory change seam.
+            setWorkingDir: this.opts.setWorkingDir,
             // v4.9.2 Slice 3 — UX-rebuilt confirmation primitive.
             // The stdin/keypress mechanics worked correctly all along;
             // users simply couldn't see the prompt was open. The
@@ -1005,6 +1026,8 @@ export class ChatSession implements ChatSessionLike {
                 this.opts.display.write(line + '\n');
               }
             }
+            // v4.12 PM.1 — /quit is session-end: reap background spawns too.
+            try { this.opts.processRegistry?.cleanup(); } catch { /* best-effort reap */ }
             break;
           }
           if (result.clearHistory) this.history = [];
@@ -1882,6 +1905,11 @@ export class ChatSession implements ChatSessionLike {
     try {
       const result = await this.opts.agent.runConversation(baseHistory, {
         stream: streamingEnabled,
+        // v4.12 BE.1 — seed the per-session token cap with tokens already spent
+        // this session, so the cap enforces across turns (not just this run).
+        sessionTokensSoFar: this.sessionId
+          ? (this.opts.sessionManager.getSessionTokens?.(this.sessionId) ?? 0)
+          : 0,
         // v4.11 Slice 3 — wake the dead AbortSignal wire (Phase A
         // audit A6.1). All downstream consumers (between-iter check,
         // pre-tool check, callProvider forward into adapters) were
@@ -2627,11 +2655,25 @@ export class ChatSession implements ChatSessionLike {
     // setup; dismissed when the user sends their first message or
     // runs /dismiss. Lazy-required so test-harness sessions that
     // omit `paths` don't pay the fs cost.
+    // v4.12 — true when the speaks-first onboarding intro fires this boot.
+    // Hoisted to function scope so the greeter block below can suppress
+    // itself: the intro OWNS the boot, so a contradictory "welcome back /
+    // last session Nh ago" must not print under it (matters for the
+    // upgrade cohort — existing greeter history + empty USER.md).
+    let onboarded = false;
     try {
       if (this.opts.paths) {
+        // v4.12 — speaks-first onboarding for a brand-new user (USER.md
+        // empty + marker absent). When the intro fires, skip the
+        // /walkthrough tip so the first screen stays uncluttered.
         // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const { renderFirstRunHint } = require('./repl/firstRunHint') as typeof import('./repl/firstRunHint');
-        await renderFirstRunHint({ paths: this.opts.paths, out: process.stdout });
+        const { renderOnboardingIntro } = require('./onboarding/speakFirst') as typeof import('./onboarding/speakFirst');
+        onboarded = await renderOnboardingIntro({ paths: this.opts.paths, out: process.stdout });
+        if (!onboarded) {
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const { renderFirstRunHint } = require('./repl/firstRunHint') as typeof import('./repl/firstRunHint');
+          await renderFirstRunHint({ paths: this.opts.paths, out: process.stdout });
+        }
       }
     } catch { /* never let a missing marker crash boot */ }
 
@@ -2641,8 +2683,13 @@ export class ChatSession implements ChatSessionLike {
     // without `paths` wired skip the fs cost. Internal errors are
     // already swallowed inside renderGreeter; outer try/catch is the
     // belt-and-braces guarantee against a boot-crash regression.
+    //
+    // v4.12 — skipped entirely when onboarding fired this boot: the intro
+    // owns the moment, so a "welcome back / last session Nh ago" offer
+    // (or any other greeter offer) must not print under "Hi — I'm Aiden".
+    // Same spirit as the first-launch-silent path above.
     try {
-      if (this.opts.paths) {
+      if (this.opts.paths && !onboarded) {
         await renderGreeter({
           paths:   this.opts.paths,
           version: AIDEN_VERSION,

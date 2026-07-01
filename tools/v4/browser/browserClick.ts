@@ -15,23 +15,32 @@
  */
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
-import { pwClick, pwClickFirstResult } from '../../../core/playwrightBridge';
+import { pwClick, pwClickFirstResult, pwActByLease } from '../../../core/playwrightBridge';
+import { getLeaseStore } from '../../../core/v4/browserState';
 import { withBrowserState } from './_observer';
+
+/** Shared @eN→lease error (B1.2). */
+function staleRefError(ref: string): string {
+  return `Element ref ${ref} is not in the current snapshot. Run browser_snapshot to refresh element refs, then retry.`;
+}
 
 const _browserClickTool: ToolHandler = {
   schema: {
     name: 'browser_click',
     description:
-      'Click an element by CSS selector or visible text. Use target="first_result" to click the first organic search result on supported engines.',
+      'Click an element. Preferred: pass ref="@eN" from browser_snapshot. Or pass target as a CSS selector / visible text / "first_result" (first organic search result on supported engines).',
     inputSchema: {
       type: 'object',
       properties: {
+        ref: {
+          type: 'string',
+          description: 'Element ref from browser_snapshot, e.g. "@e3". Preferred addressing mode.',
+        },
         target: {
           type: 'string',
-          description: 'CSS selector, visible text, or "first_result".',
+          description: 'CSS selector, visible text, or "first_result". Used when ref is not given.',
         },
       },
-      required: ['target'],
     },
   },
   category: 'browser',
@@ -39,7 +48,8 @@ const _browserClickTool: ToolHandler = {
   toolset: 'browser',
   riskTier: 'caution',   // v4.4 Phase 1
   buildPreview(args) {
-    const target = String(args.target ?? args.selector ?? '');
+    const ref = String(args.ref ?? '').trim();
+    const target = ref || String(args.target ?? args.selector ?? '');
     return {
       tool: 'browser_click',
       args,
@@ -50,8 +60,18 @@ const _browserClickTool: ToolHandler = {
     };
   },
   async execute(args) {
+    // B1.2 — ref-based addressing (additive; CSS/text path below is unchanged).
+    const ref = String(args.ref ?? '').trim();
+    if (ref) {
+      const lease = getLeaseStore().get(ref);
+      if (!lease) return { success: false, error: staleRefError(ref) };
+      const r = await pwActByLease(lease, { kind: 'click' });
+      if (r.ok) return { success: true, ref };
+      return { success: false, error: r.error, ref };
+    }
+
     const target = String(args.target ?? args.selector ?? '').trim();
-    if (!target) return { success: false, error: 'No target provided' };
+    if (!target) return { success: false, error: 'No target provided — pass ref="@eN" (from browser_snapshot) or a target selector.' };
     if (target === 'first_result') {
       const r = await pwClickFirstResult();
       if (r.ok) return { success: true, url: r.url };
