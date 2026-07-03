@@ -94,7 +94,7 @@ Windows · Linux · WSL · macOS (API Mode)
 ![Built solo](https://img.shields.io/badge/Built-solo-B8A893?style=flat-square)
 ![By Taracod](https://img.shields.io/badge/By-Taracod-FF6B35?style=flat-square)
 ![White Lotus](https://img.shields.io/badge/Brand-White_Lotus-FFB088?style=flat-square)
-![v4.10.0](https://img.shields.io/badge/Latest-v4.10.0-4ADE80?style=flat-square)
+![v4.13.0](https://img.shields.io/badge/Latest-v4.13.0-4ADE80?style=flat-square)
 
 </div>
 
@@ -146,6 +146,37 @@ https://github.com/user-attachments/assets/7a66bc19-8b17-4b01-be85-3aa5945a1b3b
 
 
 <br>
+
+## What's new in v4.13
+
+**Aiden can now take a job, verify it, and keep going safely.**
+
+- **Durable autonomy.** Every task gets a job-card; Aiden verifies work before claiming success, resumes after restart, avoids duplicate sends/actions, retries recoverable failures, and stops for permissions.
+- **Evidence-required subagents.** Helper agents must return real proof — a file, test result, id, or similar artifact — and Aiden re-checks that proof before trusting the result.
+- **Trust dial.** Choose how much Aiden can do: Observer, Assistant, or Partner. Destructive actions and spending still ask, even at the highest setting.
+- **Glass dashboard + operator TUI.** Watch model, token, budget, elapsed time, and tool steps live. Queue a follow-up, redirect mid-task, or interrupt cleanly while Aiden works.
+- **One-shot mode + polish.** `aiden -q "..."` for scripting, Discord setup inside the terminal, central cross-platform path handling, and green CI across Windows, macOS, and Linux.
+
+## What's new in v4.12
+
+**Aiden can now connect outward to MCP servers and operate the browser with more state.**
+
+- **MCP client.** Connect to external MCP servers over stdio and Streamable HTTP, with OAuth 2.0 discovery, dynamic client registration, PKCE, token refresh, reconnects, circuit breakers, and one-command curated installs.
+- **Approval-gated MCP tools.** External tools are model-callable, but gated by approval. Results are redacted and fenced as untrusted input.
+- **Browser depth.** Accessibility-tree snapshots, stable element handles, act-by-reference click/type/fill, stale-element re-resolution, visual screenshot-to-vision support, multi-tab/dialog handling, and local browser attach/launch.
+- **Safety breadth.** Cross-session search, posture-aware skill/tool narrowing, truncate-then-redact tool-output caps, per-session budget enforcement, honest execution-policy messaging, and exfiltration-aware browser guardrails.
+- **Process manager + activity.** Tracked spawns, reliable tree-kill, redacted process listing, shutdown reaping, plus `/home` and `/activity` commands.
+
+## What's new in v4.11
+
+**A reliability release for honest output, better control, and stronger setup.**
+
+- **Honesty & verification.** Per-turn outcome verifier catches failed tool results and contradictions instead of glossing over them.
+- **Artifact registry.** `/artifacts` tracks files Aiden creates, with provenance: source tool, originating request, and turn link.
+- **Streaming & control.** Streaming delta coalescer reduces terminal writes, while `/undo`, `/retry`, `/compress`, and `/usage` give direct operator control.
+- **Task durability.** Orphan-task boot sweep retires crashed-session tasks as interrupted; `/tasks all` shows tasks across sessions.
+- **Setup polish.** Wizard back-navigation and config detection fixes prevent working OAuth/env setups from being mistaken as empty.
+- **Model updates.** DeepSeek V4 Pro and V4 Flash added, model picker table improved, and weak-model UI gating reduces markup leaks.
 
 ## What's new in v4.10
 
@@ -237,11 +268,12 @@ Full v4.5 internals: [`docs/v4.5/`](docs/v4.5/) (overview, triggers, architectur
 | **Self-promoting memory** | `USER.md` + `SOUL.md` identity, plus `MEMORY.md` split between durable facts (compression-protected) and recent-session distillations. Each session ends with a structured summary that graduates durable facts into the protected section. Semantic recall over past sessions via `recall_session`. |
 | **Voice** | Edge TTS / Windows SAPI text-to-speech, speech-to-text helpers. |
 | **Channel adapters** | Discord, Slack, Telegram, WhatsApp, Email (IMAP+SMTP), Webhook, Twilio SMS, iMessage (macOS), Signal — any channel triggers the same agent loop. |
-| **Computer use** | Screenshot capture, screen-state vision loop, browser automation. Mouse/keyboard automation partial. |
+| **Computer use** | Screenshot capture, screen-state vision loop, state-aware browser automation, accessibility-tree snapshots, stable element handles, act-by-reference click/type/fill, and partial mouse/keyboard automation. |
 | **v4.5 daemon mode (opt-in)** | File watcher / webhook / email IMAP / scheduled triggers route through a durable trigger bus consumed by the Phase 5a dispatcher. Triggers fire → real agent runs → tool calls execute → `run_events` captures the chain. **Off by default.** |
+| **v4.13 durable autonomy** | Job-cards, restart-safe task continuation, duplicate-action prevention, smart retries, evidence-required subagents, trust dial, and live operator dashboard. |
 | **Plugins** | Three bundled plugins: Chrome DevTools Protocol bridge, Claude Pro OAuth, ChatGPT Plus OAuth. Permission-state machine (pending-grant / loaded / suspended). |
-| **MCP** | Model Context Protocol bridge — stdio + HTTP transports, schema discovery, tool dispatch. |
-| **Security moat** | Tiered approval engine (`safe` / `caution` / `dangerous`), dangerous-command pattern classifier, honesty enforcement (post-loop scan rewrites false claims), memory guard, planner-guard tool narrowing, SSRF-safe URL fetcher, secret/PII pre-write scanner, skill-teacher (auto-create skills from successful flows). |
+| **MCP** | Model Context Protocol bridge and client — stdio + Streamable HTTP transports, schema discovery, OAuth 2.0 flow, approval-gated external tools, and tool dispatch. |
+| **Security moat** | Tiered approval engine (`safe` / `caution` / `dangerous`), dangerous-command pattern classifier, outcome verification, artifact provenance, trust dial, memory guard, planner-guard tool narrowing, SSRF-safe URL fetcher, secret/PII pre-write scanner, exfiltration-aware browser guardrails, and skill-teacher. |
 
 
 
@@ -254,7 +286,7 @@ Full v4.5 internals: [`docs/v4.5/`](docs/v4.5/) (overview, triggers, architectur
 
 ## Architecture
 
-Aiden is a local-first agent loop: provider adapters feed a 90-turn ceiling, every tool call passes through verification + failure classification + recovery, and tool results stream back as structured envelopes the model can reason over. v4.5 added a SQLite daemon foundation alongside the REPL — file watchers and webhook endpoints write to a durable trigger bus, a single-worker dispatcher claims events, and each trigger fires a fresh agent turn keyed by a stable session id. Sandboxed execution (filesystem allow/deny + Docker session backend), state-aware browser observation, and continuous error recovery apply to daemon-fired turns identically to REPL turns.
+Aiden is a local-first agent loop: provider adapters feed a 90-turn ceiling, every tool call passes through verification + failure classification + recovery, and tool results stream back as structured envelopes the model can reason over. v4.5 added a SQLite daemon foundation alongside the REPL — file watchers and webhook endpoints write to a durable trigger bus, a single-worker dispatcher claims events, and each trigger fires a fresh agent turn keyed by a stable session id. v4.12 added outward MCP client support and deeper browser state; v4.13 added job-cards, restart-safe task continuation, evidence-required subagents, and a trust dial. Sandboxed execution (filesystem allow/deny + Docker session backend), state-aware browser observation, and continuous error recovery apply to daemon-fired turns identically to REPL turns.
 
 Detailed diagrams + module map in [`docs/v4.5/architecture.md`](docs/v4.5/architecture.md).
 
@@ -382,15 +414,16 @@ export AIDEN_DEFAULT_MODEL=llama-3.3-70b-versatile
 
 | Use case | Best models |
 |---|---|
-| **General-purpose / quality** | Claude Sonnet 4.6 / Opus, GPT-5, Gemini 2.5 Pro |
+| **Best overall / quality** | GPT-5.5 via ChatGPT OAuth, GPT-5, Claude Sonnet 4.6 / Opus, Gemini 2.5 Pro |
+| **ChatGPT OAuth / no API key** | GPT-5.5, GPT-5.4, GPT-5.3 Instant, GPT-5, and other available ChatGPT models through `chatgpt-plus` |
 | **Speed + free tier** | Groq Llama 3.3 70B, Cerebras Llama 3.3 70B |
 | **Fully local** | Ollama with Qwen 2.5 32B, Llama 3.3 70B, or DeepSeek R1 |
 | **Open weights via subscription** | Nous Portal (Hermes-3-405B) |
 | **Long context** | Gemini 2.5 Pro (2M tokens) |
 
-> 💡 **Quality scales with model capability.** Aiden's output quality depends heavily on the model you pick. For real work, prefer the highest-capability model your budget allows — Claude Sonnet 4.6, GPT-5, or Gemini 2.5 Pro. Smaller models work for simple tasks but agentic loops benefit from stronger reasoning.
+> 💡 **Quality scales with model capability.** Aiden's output quality depends heavily on the model you pick. For real work, prefer the highest-capability model your budget allows — GPT-5.5 via ChatGPT OAuth, GPT-5, Claude Sonnet 4.6, Opus, or Gemini 2.5 Pro. Smaller models work for simple tasks, but agentic loops benefit from stronger reasoning.
 
-> 💡 **ChatGPT Plus / Claude Pro subscribers**: use the OAuth flow instead of an API key. Pick `chatgpt-plus` or `claude-pro` as your provider during `/model` setup, then sign in via browser. No separate API costs — uses your existing subscription's model allowances.
+> 💡 **ChatGPT Plus / Claude Pro subscribers**: use the OAuth flow instead of an API key. Pick `chatgpt-plus` or `claude-pro` as your provider during `/model` setup, then sign in via browser. For ChatGPT OAuth, Aiden can route to GPT-5.5, GPT-5.4, GPT-5.3 Instant, GPT-5, and other GPT models available on your plan. No separate API costs — uses your existing subscription's model allowances.
 
 <br>
 
@@ -450,6 +483,7 @@ Most flags are also flippable live via slash commands.
 | Command | What it does |
 |---|---|
 | `aiden` | Start the REPL (runs setup wizard on first launch) |
+| `aiden -q "..."` | Run a one-shot prompt for scripting / automation |
 | `aiden setup` | Re-run the onboarding wizard |
 | `aiden doctor` | Diagnose providers, auth, config, and environment |
 | `aiden --version` | Print the installed version |
@@ -470,16 +504,16 @@ Most flags are also flippable live via slash commands.
 
 ## In-chat slash commands
 
-Type `/help` inside Aiden for the full list grouped by category. 38 commands total.
+Type `/help` inside Aiden for the full list grouped by category.
 
 ### Configuration
 `/model` · `/personality` · `/skin` · `/streaming` · `/reasoning` · `/verbose` · `/debug-prompt` · `/identity`
 
 ### Session
-`/clear` · `/compress` · `/save` · `/title` · `/usage`
+`/clear` · `/compress` · `/save` · `/title` · `/usage` · `/undo` · `/retry`
 
 ### System
-`/sandbox` · `/tce` · `/browser-depth` · `/daemon` · `/suggestions` · `/update` · `/skills` · `/tools` · `/plugins` · `/cron` · `/runs` · `/trigger` · `/doctor` · `/status` · `/show` · `/history`
+`/sandbox` · `/tce` · `/browser-depth` · `/daemon` · `/suggestions` · `/update` · `/skills` · `/tools` · `/plugins` · `/cron` · `/runs` · `/trigger` · `/tasks` · `/adjust` · `/trace` · `/artifacts` · `/home` · `/activity` · `/doctor` · `/status` · `/show` · `/history`
 
 ### Sub-agents (v4.6)
 `/spawn-pause on|off|status` · `/recovery list|show|clear` · `/planner-guard on|off|status`
@@ -610,6 +644,7 @@ The future `skills.taracod.com` marketplace will ship community skills under the
 | 📦 **npm** | [aiden-runtime](https://www.npmjs.com/package/aiden-runtime) |
 | 🐙 **Source** | [github.com/taracodlabs/aiden](https://github.com/taracodlabs/aiden) |
 | 📁 **Standalone releases** | [github.com/taracodlabs/aiden-releases](https://github.com/taracodlabs/aiden-releases) |
+| 🧾 **Release notes** | [v4.13.0](https://github.com/taracodlabs/aiden/releases/tag/v4.13.0) · [v4.12.0](https://github.com/taracodlabs/aiden/releases/tag/v4.12.0) · [v4.11.0](https://github.com/taracodlabs/aiden/releases/tag/v4.11.0) · [v4.10.0](https://github.com/taracodlabs/aiden/releases/tag/v4.10.0) |
 | 📖 **Book — Omega** | [Amazon](https://amzn.to/49ceO8l) |
 | 📚 **Docs** | [`docs/v4.5/`](docs/v4.5/) (in this repo) |
 | 💖 **Sponsor (Razorpay)** | [razorpay.me/@whitelotus9625](https://razorpay.me/@whitelotus9625) |
