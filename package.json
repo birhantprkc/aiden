@@ -42,6 +42,9 @@
   "files": [
     "dist/",
     "skills/",
+    "!skills/installed/*/**",
+    "!skills/learned/pending/*/**",
+    "!skills/learned/approved/*/**",
     "themes/",
     "plugins/aiden-plugin-cdp-browser/",
     "plugins/aiden-plugin-claude-pro/",
