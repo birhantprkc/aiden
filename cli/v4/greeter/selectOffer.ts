@@ -61,6 +61,11 @@ export interface SelectOfferInput {
   lastSessionAt?: string | null;
   /** v4.14 Bug 1 — deterministic rotation seed for the no-history fallback. */
   rotateSeed?:    number;
+  /**
+   * v4.14 — explicit round-robin index for the warm fallback greeting, chosen
+   * by the orchestrator so it never repeats the previous boot's line.
+   */
+  fallbackIndex?: number;
   /** v4.14 Personality L1 — the user's stored call-name, so the welcome
    *  greets them by name. Read from USER.md by the orchestrator. */
   userName?:      string | null;
@@ -134,7 +139,27 @@ export function selectOffer(input: SelectOfferInput): Offer | null {
     }
   }
 
-  return null;  // silence rule
+  // ── Tier 5: warm fallback -------------------------------------------
+  // v4.14 — nothing specific to say, but boot shouldn't feel canned or cold.
+  // Show a short, warm line that ROTATES (never the previous boot's line — the
+  // orchestrator supplies a persisted round-robin `fallbackIndex`). First-ever
+  // launch stays silent (the orchestrator returns before selectOffer runs) and
+  // `/greeter off` is honoured at the top; otherwise a returning user always
+  // gets a friendly hello instead of the old silence.
+  return {
+    id:         `welcome-fallback-${today}`,
+    templateId: 'welcome-back',
+    tier:       4,
+    speech: buildWelcomeLine({
+      now:           input.now,
+      lastSessionAt: null,
+      recallSummary: null,
+      paintMuted:    input.paintMuted,
+      paintAccent:   input.paintAccent,
+      fallbackIndex: input.fallbackIndex,
+      rotateSeed:    input.rotateSeed,
+    }),
+  };
 }
 
 // ── helpers ----------------------------------------------------------

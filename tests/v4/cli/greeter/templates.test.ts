@@ -87,14 +87,14 @@ describe('TEMPLATES — Tier 3 (environment)', () => {
 });
 
 describe('TEMPLATES — Tier 4 (update)', () => {
-  it('update-available shows installed → latest with /update install in accent', () => {
+  it('update-available shows installed → latest in the warm advisory voice', () => {
     expect(TEMPLATES['update-available'](mkCtx({ installed: '4.9.3', latest: '4.9.4' })))
-      .toBe('aiden-runtime 4.9.3 → 4.9.4 available. <a>/update install</a> to ship.');
+      .toBe("There's a newer version of me available (4.9.3 → 4.9.4). Run <a>/update install</a> to upgrade — or just say the word.");
   });
 
   it('update-available falls back to "?" on missing versions (defensive)', () => {
     expect(TEMPLATES['update-available'](mkCtx()))
-      .toBe('aiden-runtime ? → ? available. <a>/update install</a> to ship.');
+      .toBe("There's a newer version of me available (? → ?). Run <a>/update install</a> to upgrade — or just say the word.");
   });
 });
 

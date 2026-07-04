@@ -21,6 +21,7 @@ import os from 'node:os';
 
 import { renderGreeter, type GreeterDisplay } from '../../../../cli/v4/greeter';
 import { historyPath, readHistory, writeHistory } from '../../../../cli/v4/greeter/history';
+import { WELCOME_FALLBACKS } from '../../../../cli/v4/greeter/welcomeLine';
 import type { AidenPaths, GreeterHistory } from '../../../../cli/v4/greeter/types';
 
 let root: string;
@@ -88,13 +89,38 @@ describe('renderGreeter — silence when disabled', () => {
   });
 });
 
-describe('renderGreeter — silence when nothing observable', () => {
-  it('writes ZERO bytes when no offer wins', async () => {
-    // Morning, no update cache, no distillations → silence.
+describe('renderGreeter — warm fallback when nothing else fires (v4.14)', () => {
+  it('shows a warm rotating greeting (not cold silence) on a no-signal boot', async () => {
+    // Morning, no update cache, no distillations, a RECENT session (so no
+    // welcome-back regardless of the runner timezone), cwd unchanged.
     const NOON = new Date(2026, 4, 25, 12, 0, 0);
-    await writeHistory(paths, mkHistory({ lastCwd: process.cwd() }));
+    await writeHistory(paths, mkHistory({
+      lastCwd: process.cwd(),
+      lastSessionAt: new Date(NOON.getTime() - 3 * 3600 * 1000).toISOString(),
+    }));
     await renderGreeter({ paths, version: VERSION, display, now: NOON });
-    expect(writes).toEqual([]);
+    expect(writes).toHaveLength(1);
+    expect(WELCOME_FALLBACKS).toContain(writes[0].trim());
+  });
+
+  it('rotates the fallback across consecutive boots — never the same line twice running', async () => {
+    const MORN = new Date(2026, 4, 25, 9, 0, 0);   // hour 9 → no time-of-day tier
+    await writeHistory(paths, mkHistory({
+      lastCwd: process.cwd(),
+      lastSessionAt: new Date(MORN.getTime() - 3 * 3600 * 1000).toISOString(),  // recent → no welcome-back
+    }));
+    const lines: string[] = [];
+    for (let i = 0; i < WELCOME_FALLBACKS.length + 1; i++) {
+      writes.length = 0;
+      await renderGreeter({ paths, version: VERSION, display, now: MORN });
+      lines.push((writes[0] ?? '').trim());
+    }
+    // Every boot showed a warm fallback…
+    for (const l of lines) expect(WELCOME_FALLBACKS).toContain(l);
+    // …and never repeated the previous boot's line.
+    for (let i = 1; i < lines.length; i++) expect(lines[i]).not.toBe(lines[i - 1]);
+    // The rotation index is persisted so it survives across boots.
+    expect(typeof (await readHistory(paths))!.lastFallbackIndex).toBe('number');
   });
 });
 
@@ -110,10 +136,10 @@ describe('renderGreeter — speaks when an offer wins', () => {
     await writeHistory(paths, mkHistory({ lastCwd: process.cwd() }));
     await renderGreeter({ paths, version: VERSION, display, now: MORN });
 
-    // One write call, with the canonical layout.
+    // One write call, with the canonical layout + the warm advisory voice.
     expect(writes).toHaveLength(1);
     expect(writes[0]).toBe(
-      '  aiden-runtime 4.9.3 → 4.9.4 available. /update install to ship.\n\n',
+      "  There's a newer version of me available (4.9.3 → 4.9.4). Run /update install to upgrade — or just say the word.\n\n",
     );
   });
 
@@ -168,12 +194,13 @@ describe('renderGreeter — reconciliation closes pending offers from prior boot
         // response: undefined — pending
       }],
     }));
-    // Running 4.9.3 now → should reconcile as accepted.
+    // Running 4.9.3 now → should reconcile as accepted. (The warm fallback
+    // also fires this boot and appends its own offer, so assert on the
+    // reconciled update offer specifically rather than array length.)
     const MORN = new Date(2026, 4, 25, 9, 0, 0);
     await renderGreeter({ paths, version: '4.9.3', display, now: MORN });
     const h = await readHistory(paths);
-    expect(h!.offers).toHaveLength(1);
-    expect(h!.offers[0].response).toBe('accepted');
+    expect(h!.offers.find((o) => o.id === 'update-available-4.9.3')?.response).toBe('accepted');
   });
 });
 

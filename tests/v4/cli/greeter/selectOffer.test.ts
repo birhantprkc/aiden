@@ -13,6 +13,7 @@
 import { describe, it, expect } from 'vitest';
 
 import { selectOffer } from '../../../../cli/v4/greeter/selectOffer';
+import { WELCOME_FALLBACKS } from '../../../../cli/v4/greeter/welcomeLine';
 import type {
   GreeterHistory, GreeterOfferRecord, ScanResult,
 } from '../../../../cli/v4/greeter/types';
@@ -127,14 +128,15 @@ describe('selectOffer — Tier 3 environment', () => {
     expect(r?.templateId).toBe('time-of-day-evening');
   });
 
-  it('time-of-day-evening does NOT fire when hour < 18', () => {
+  it('time-of-day-evening does NOT fire when hour < 18 (falls to the warm fallback)', () => {
     const NOON = new Date(2026, 4, 25, 12, 0, 0);
     const r = selectOffer({
       scan: mkScan({ hourOfDay: 12 }),
       history: mkHistory(),
       now: NOON, ...paint,
     });
-    expect(r).toBeNull();
+    expect(r?.templateId).not.toBe('time-of-day-evening');
+    expect(r?.id.startsWith('welcome-fallback-')).toBe(true);   // v4.14: no more cold silence
   });
 
   it('time-of-day-evening is suppressed by recent ignored entry (3-day decay)', () => {
@@ -148,8 +150,8 @@ describe('selectOffer — Tier 3 environment', () => {
       history: mkHistory({ offers: [offered] }),
       now: NOW, ...paint,
     });
-    // Suppressed → falls through to next tier; nothing else matches → null.
-    expect(r).toBeNull();
+    // Suppressed → falls through past every tier to the warm fallback.
+    expect(r?.id.startsWith('welcome-fallback-')).toBe(true);
   });
 
   it('cwd-changed fires when cwd differs AND no tier 2 AND no time-of-day (e.g. morning)', () => {
@@ -199,7 +201,9 @@ describe('selectOffer — Tier 4 update', () => {
       history: mkHistory({ offers: [offered] }),
       now: MORN, ...paint,
     });
-    expect(r).toBeNull();
+    // Update suppressed by decay → falls to the warm fallback (not the update line).
+    expect(r?.templateId).not.toBe('update-available');
+    expect(r?.id.startsWith('welcome-fallback-')).toBe(true);
   });
 
   it('update-available fires AGAIN after the 7-day decay window passes', () => {
@@ -235,13 +239,36 @@ describe('selectOffer — Tier 4 update', () => {
   });
 });
 
-describe('selectOffer — silence rule', () => {
-  it('returns null when nothing is observable', () => {
-    const MORN = new Date(2026, 4, 25, 9, 0, 0);
+describe('selectOffer — warm fallback (v4.14: no more cold silence)', () => {
+  const MORN = new Date(2026, 4, 25, 9, 0, 0);
+
+  it('shows a warm fallback greeting when nothing else is observable', () => {
     const r = selectOffer({
       scan: mkScan({ hourOfDay: 9 }),
       history: mkHistory(),
       now: MORN, ...paint,
+      fallbackIndex: 0,
+    });
+    expect(r?.id.startsWith('welcome-fallback-')).toBe(true);
+    expect(WELCOME_FALLBACKS).toContain(r?.speech);
+    expect(r?.speech).toBe(WELCOME_FALLBACKS[0]);
+  });
+
+  it('the fallback line tracks the supplied round-robin index', () => {
+    const at = (i: number) => selectOffer({
+      scan: mkScan({ hourOfDay: 9 }), history: mkHistory(), now: MORN, ...paint, fallbackIndex: i,
+    })?.speech;
+    expect(at(1)).toBe(WELCOME_FALLBACKS[1]);
+    expect(at(2)).toBe(WELCOME_FALLBACKS[2]);
+    expect(at(WELCOME_FALLBACKS.length)).toBe(WELCOME_FALLBACKS[0]);   // wraps
+  });
+
+  it('the kill switch still wins — /greeter off stays silent', () => {
+    const r = selectOffer({
+      scan: mkScan({ hourOfDay: 9 }),
+      history: mkHistory({ disabled: true }),
+      now: MORN, ...paint,
+      fallbackIndex: 0,
     });
     expect(r).toBeNull();
   });

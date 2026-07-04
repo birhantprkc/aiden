@@ -142,6 +142,12 @@ export interface GreeterHistory {
    */
   lastSessionAt?:  string;
   lastCwd?:        string;
+  /**
+   * v4.14 — index of the LAST warm fallback greeting shown. The orchestrator
+   * advances it round-robin each time the fallback fires so boot never shows
+   * the same canned line twice running. Absent until the first fallback.
+   */
+  lastFallbackIndex?: number;
   offers:          GreeterOfferRecord[];
   /** Kill switch from /greeter off. Defaults to false. */
   disabled:        boolean;

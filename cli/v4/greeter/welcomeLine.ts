@@ -50,9 +50,15 @@ export interface WelcomeLineContext {
   /**
    * Deterministic rotation index for the no-history fallback. Same seed ⇒
    * same friendly line; a changing seed (e.g. day-of-month) rotates it.
-   * Defaults to 0.
+   * Defaults to 0. Superseded by `fallbackIndex` when that is supplied.
    */
   rotateSeed?:    number;
+  /**
+   * v4.14 — an explicit index into WELCOME_FALLBACKS, chosen by the
+   * orchestrator to never repeat the previous boot's line (persisted round-
+   * robin). Takes precedence over `rotateSeed`. Out-of-range values wrap.
+   */
+  fallbackIndex?: number;
 }
 
 /** Max width for the recalled summary before it's clamped with an ellipsis. */
@@ -67,7 +73,11 @@ export const WELCOME_FALLBACKS: readonly string[] = [
   'Ready when you are.',
   "Let's build something.",
   'What are we working on?',
-  'Fresh start — where to?',
+  'Back at it — where to?',
+  "Good to see you. What's the plan?",
+  'Standing by — point me at it.',
+  "Fresh page. What's first?",
+  "Right here when you need me. Let's go.",
 ];
 
 /** Collapse whitespace/newlines to a single line and clamp the width. */
@@ -123,9 +133,16 @@ export function buildWelcomeLine(ctx: WelcomeLineContext): string {
     return `${back} — ${gapSentence(gap)}`;
   }
 
-  // ── Tier 3: rotate a friendly fallback ──────────────────────────────
-  const seed = Number.isFinite(ctx.rotateSeed) ? Math.abs(Math.trunc(ctx.rotateSeed as number)) : 0;
-  return WELCOME_FALLBACKS[seed % WELCOME_FALLBACKS.length];
+  // ── Tier 3: warm, non-repeating fallback ────────────────────────────
+  // Prefer the orchestrator's explicit round-robin index (never repeats the
+  // previous boot); fall back to the deterministic seed, then 0.
+  const n = WELCOME_FALLBACKS.length;
+  const idx = Number.isFinite(ctx.fallbackIndex)
+    ? ((Math.trunc(ctx.fallbackIndex as number) % n) + n) % n
+    : Number.isFinite(ctx.rotateSeed)
+      ? Math.abs(Math.trunc(ctx.rotateSeed as number)) % n
+      : 0;
+  return WELCOME_FALLBACKS[idx];
 }
 
 /**

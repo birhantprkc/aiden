@@ -303,7 +303,8 @@ describe('renderStartupCard — greeter wiring', () => {
 
     const text = chunks.join('');
     const escapedNewer = NEWER_VERSION.replace(/\./g, '\\.');
-    expect(text).toMatch(new RegExp(`aiden-runtime .* → ${escapedNewer} available\\.`));
+    // v4.14 — warm advisory voice: "There's a newer version of me available (X → Y)."
+    expect(text).toMatch(new RegExp(`newer version of me available \\(.* → ${escapedNewer}\\)`));
     expect(text).toContain('/update install');
   });
 

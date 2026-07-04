@@ -136,4 +136,36 @@ describe('buildWelcomeLine — no-history fallback', () => {
   it('defaults to the first line when no seed is supplied', () => {
     expect(buildWelcomeLine({ ...base, lastSessionAt: null, recallSummary: null })).toBe(WELCOME_FALLBACKS[0]);
   });
+
+  it('an explicit fallbackIndex selects that pool line and wins over rotateSeed', () => {
+    for (let i = 0; i < WELCOME_FALLBACKS.length; i++) {
+      expect(buildWelcomeLine({ ...base, lastSessionAt: null, recallSummary: null, fallbackIndex: i, rotateSeed: 0 }))
+        .toBe(WELCOME_FALLBACKS[i]);
+    }
+  });
+
+  it('fallbackIndex wraps (round-robin never goes out of range)', () => {
+    const n = WELCOME_FALLBACKS.length;
+    expect(buildWelcomeLine({ ...base, lastSessionAt: null, recallSummary: null, fallbackIndex: n })).toBe(WELCOME_FALLBACKS[0]);
+    expect(buildWelcomeLine({ ...base, lastSessionAt: null, recallSummary: null, fallbackIndex: n + 3 })).toBe(WELCOME_FALLBACKS[3]);
+  });
+
+  it('consecutive round-robin indices never repeat the same line twice running', () => {
+    let prev = '';
+    for (let i = 0; i < WELCOME_FALLBACKS.length * 2; i++) {
+      const line = buildWelcomeLine({ ...base, lastSessionAt: null, recallSummary: null, fallbackIndex: i });
+      expect(line).not.toBe(prev);
+      prev = line;
+    }
+  });
+
+  it('the pool is warm, one-line, width-safe (≤1 emoji, ≤72 chars)', () => {
+    const emoji = /\p{Extended_Pictographic}/gu;
+    for (const line of WELCOME_FALLBACKS) {
+      expect(line).not.toContain('\n');
+      expect(line.length).toBeLessThanOrEqual(72);
+      expect((line.match(emoji) ?? []).length).toBeLessThanOrEqual(1);
+    }
+    expect(WELCOME_FALLBACKS.length).toBeGreaterThanOrEqual(6);
+  });
 });

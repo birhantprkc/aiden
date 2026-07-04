@@ -56,7 +56,10 @@ export const TEMPLATES: Record<TemplateId, (ctx: TemplateContext) => string> = {
   },
 
   // ── Tier 4 (update) --------------------------------------------------
+  // v4.14 — personified, advisory voice (tell, don't auto-update; the user
+  // stays in control, same discipline as skill freshness). Reuses the boot
+  // update-check cache via the greeter's scanUpdate — no new network path.
   'update-available': (ctx) =>
-    `aiden-runtime ${ctx.installed ?? '?'} → ${ctx.latest ?? '?'} available. ` +
-    `${ctx.paintAccent('/update install')} to ship.`,
+    `There's a newer version of me available (${ctx.installed ?? '?'} → ${ctx.latest ?? '?'}). ` +
+    `Run ${ctx.paintAccent('/update install')} to upgrade — or just say the word.`,
 };

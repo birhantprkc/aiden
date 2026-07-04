@@ -31,6 +31,7 @@ import { readHistory, writeHistory, reconcilePending } from './history';
 import { runScans } from './scan';
 import { selectOffer } from './selectOffer';
 import type { GreeterHistory, Offer } from './types';
+import { WELCOME_FALLBACKS } from './welcomeLine';
 import { readUserName } from '../onboarding/speakFirst';
 
 /**
@@ -120,6 +121,11 @@ async function renderGreeterUnsafe(opts: RenderGreeterOptions): Promise<void> {
   // the paths, tolerating the narrow test-paths shape that only carries `root`.
   const userMdPath = opts.paths.userMd ?? path.join(opts.paths.root, 'memories', 'USER.md');
   const userName = await readUserName(userMdPath, fsImpl);
+  // v4.14 — round-robin the warm fallback so it never repeats the previous
+  // boot's line. Advance from the persisted index (wrapping the pool).
+  const nextFallbackIndex =
+    (((existing.lastFallbackIndex ?? -1) + 1) % WELCOME_FALLBACKS.length + WELCOME_FALLBACKS.length)
+    % WELCOME_FALLBACKS.length;
   const offer: Offer | null = selectOffer({
     scan:          scanForReconcile,
     history:       reconciled,
@@ -130,9 +136,10 @@ async function renderGreeterUnsafe(opts: RenderGreeterOptions): Promise<void> {
     lastDecision:  distillation?.lastDecision,
     lastSessionAt,
     userName,
-    // Deterministic per-day rotation for the no-history fallback line.
-    rotateSeed:    now.getDate(),
+    fallbackIndex: nextFallbackIndex,
   });
+  // Only persist the advance when the fallback actually fired this boot.
+  const fallbackFired = offer?.id.startsWith('welcome-fallback-') === true;
 
   // ── Render (or stay silent) -----------------------------------------
   if (offer) {
@@ -149,6 +156,7 @@ async function renderGreeterUnsafe(opts: RenderGreeterOptions): Promise<void> {
     ...reconciled,
     lastGreetingAt: now.toISOString(),
     lastSessionAt:  now.toISOString(),
+    lastFallbackIndex: fallbackFired ? nextFallbackIndex : reconciled.lastFallbackIndex,
     lastCwd:        cwd,
     offers: offer
       ? [...reconciled.offers, {
