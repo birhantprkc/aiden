@@ -79,6 +79,8 @@ export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
   yolo: 'System',
   // v4.12.1 Pillar 2 — the autonomy dial (Observer | Assistant | Partner).
   autonomy: 'System',
+  // v4.14 — one-command opt-in to Partner ("auto"), persisted across restarts.
+  auto: 'System',
   // v4.12.1 Pillar 4 Slice 2a — type-next-while-busy.
   busy: 'System',
   queue: 'System',

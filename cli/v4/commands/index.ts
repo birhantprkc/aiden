@@ -24,6 +24,7 @@ import { undo } from './undo';
 import { retry } from './retry';
 import { yolo } from './yolo';
 import { autonomy } from './autonomy';
+import { auto } from './auto';
 import { busy } from './busy';
 import { queue } from './queue';
 import { redirect } from './redirect';
@@ -93,6 +94,7 @@ export {
   retry,
   yolo,
   autonomy,
+  auto,
   busy,
   queue,
   redirect,
@@ -163,6 +165,7 @@ export const allCommands: SlashCommand[] = [
   retry,
   yolo,
   autonomy,
+  auto,
   busy,
   queue,
   redirect,

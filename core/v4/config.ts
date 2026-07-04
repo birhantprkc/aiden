@@ -210,31 +210,32 @@ function setDotted(obj: Record<string, unknown>, key: string, value: unknown): v
  * `agent.autonomy` wins; a typo must never silently RAISE autonomy, so an
  * invalid value falls through to the default rather than throwing.
  *
- * v4.14 UX (Bug 2) — the DEFAULT is now `Partner`, not `Assistant`.
+ * v4.14 — the SHIPPED default is the SAFE, documented level: `Assistant`
+ * (acts, asks at each write boundary). Shipping the most-autonomous level by
+ * default is the wrong risk posture, so the brief Partner-as-default
+ * experiment is REVERTED. `Partner` ("auto") is now an explicit, one-command
+ * OPT-IN (`/auto`), persisted as `agent.autonomy: Partner` and read back here
+ * on the next boot — so the opt-in survives a restart.
  *
- * Why: the old default (Assistant, `allowWrite: 'ask'`) prompted on EVERY
- * write, including routine safe/reversible workspace-internal writes and
- * moves — the "asks too often" nag that trains blind-yes. `Partner` is the
- * level the dial already defines as "acts freely INSIDE the workspace;
- * destructive + external-send + out-of-scope still ask." It auto-allows only
- * the genuinely-safe class and KEEPS EVERY FLOOR intact (destructive,
- * external send, spend, shell, out-of-workspace all still ask; the hard-block
- * set still denies). Choosing Partner-as-default — rather than loosening
- * Assistant (which would collapse two distinct levels into one) — keeps all
- * three levels meaningful: Observer (read-only) < Assistant (asks at every
- * write) < Partner (workspace writes auto). No floor is touched.
+ * The three levels stay meaningful: Observer (read-only) < Assistant (asks at
+ * every write) < Partner (workspace writes auto). NO floor moves at any level:
+ * destructive, external-send, spend, shell, and out-of-workspace writes still
+ * ASK, and the hard-block set still DENIES — including under `/auto` (Partner).
  *
- * A user who explicitly opted into the cautious `approval_mode: manual` is
- * respected → Assistant (asks at every write boundary). Everything else
- * (smart / off / unset) → Partner.
+ * `approval_mode` no longer RAISES the level. Nothing configured — or any
+ * `approval_mode` value — resolves to the safe `Assistant` default; only an
+ * explicit, valid `agent.autonomy` (e.g. the persisted `/auto` opt-in, or a
+ * hand-set `Observer`) selects another level. A typo never silently raises
+ * autonomy: an invalid value falls through to `Assistant`.
  */
 export function resolveConfiguredAutonomyLevel(config: {
   getValue<T = unknown>(key: string, fallback?: T): T;
 }): AutonomyLevel {
   const raw = config.getValue<string | undefined>('agent.autonomy', undefined);
   if (isAutonomyLevel(raw)) return raw;
-  const mode = config.getValue<'manual' | 'smart' | 'off' | undefined>('agent.approval_mode', undefined);
-  return mode === 'manual' ? 'Assistant' : 'Partner';
+  // Nothing valid configured → the safe default. Partner is an explicit
+  // opt-in only (persisted `agent.autonomy`); no `approval_mode` value raises.
+  return 'Assistant';
 }
 
 export class ConfigManager implements ConfigProvider {

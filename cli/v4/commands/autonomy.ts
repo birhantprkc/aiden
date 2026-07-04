@@ -19,12 +19,57 @@
  * in-process / prompt-injected code (no userInitiated) can NEVER raise the
  * level. `--yolo` stays a separate dev bypass, not a dial level.
  */
-import type { SlashCommand } from '../commandRegistry';
-import { isAutonomyLevel, resolveAutonomyPolicy, AUTONOMY_LEVELS } from '../../../moat/autonomy';
+import type { SlashCommand, SlashCommandContext } from '../commandRegistry';
+import {
+  type AutonomyLevel,
+  isAutonomyLevel,
+  resolveAutonomyPolicy,
+  AUTONOMY_LEVELS,
+} from '../../../moat/autonomy';
+
+/**
+ * Apply an autonomy level to the LIVE session AND persist it so the choice
+ * SURVIVES A RESTART. The engine change uses `userInitiated: true` — the ONLY
+ * sanctioned raise path (respects the SH.1 freeze; in-process / prompt-injected
+ * code can never raise the level). Persistence writes `agent.autonomy` to
+ * config.yaml, which `resolveConfiguredAutonomyLevel` reads back at the next
+ * boot (aidenCLI wires the boot default from it).
+ *
+ * Returns `{ applied, persisted }`:
+ *   • applied=false   → no engine, or the approval floor blocked the change.
+ *   • persisted=false → no ConfigManager wired (session-only switch); the
+ *     caller MUST surface this so a change is never silently non-durable.
+ *
+ * Shared by `/autonomy <level>` and `/auto` so the two can never drift.
+ */
+export async function applyAndPersistAutonomy(
+  ctx: SlashCommandContext,
+  level: AutonomyLevel,
+): Promise<{ applied: boolean; persisted: boolean }> {
+  const engine = ctx.approvalEngine;
+  if (!engine) return { applied: false, persisted: false };
+  const policy = resolveAutonomyPolicy(level, { workspaceRoots: [process.cwd()] });
+  const applied = engine.setAutonomyPolicy(policy, { userInitiated: true });
+  if (!applied) return { applied: false, persisted: false };
+  let persisted = false;
+  if (ctx.config) {
+    ctx.config.set('agent.autonomy', level);
+    await ctx.config.save();
+    persisted = true;
+  }
+  return { applied: true, persisted };
+}
+
+/** Human note for a level, appended to the confirmation line. */
+function levelNote(level: AutonomyLevel): string {
+  return level === 'Observer'  ? 'read-only — no mutations will run.'
+    : level === 'Partner' ? `acts freely under ${process.cwd()} — destructive / external / spend / out-of-scope still ask.`
+    : 'acts, asks at each risk boundary.';
+}
 
 export const autonomy: SlashCommand = {
   name: 'autonomy',
-  description: 'Set the autonomy dial: Observer | Assistant | Partner.',
+  description: 'Set the autonomy dial: Observer | Assistant | Partner (persisted).',
   category: 'system',
   icon: '🎚️',
   handler: async (ctx) => {
@@ -39,7 +84,7 @@ export const autonomy: SlashCommand = {
     if (!arg) {
       ctx.display.info(
         `Autonomy: ${current}. Levels: ${AUTONOMY_LEVELS.join(' | ')}. ` +
-        `Usage: /autonomy <level>.`,
+        `Usage: /autonomy <level>  (or /auto to toggle Partner).`,
       );
       return {};
     }
@@ -52,18 +97,15 @@ export const autonomy: SlashCommand = {
       return {};
     }
 
-    const policy = resolveAutonomyPolicy(level, { workspaceRoots: [process.cwd()] });
-    // ★ userInitiated — the ONLY sanctioned raise path; respects SH.1 freeze.
-    const applied = engine.setAutonomyPolicy(policy, { userInitiated: true });
+    const { applied, persisted } = await applyAndPersistAutonomy(ctx, level);
     if (!applied) {
       ctx.display.warn('Autonomy change was not applied (blocked by the approval floor).');
       return {};
     }
-    const note =
-      level === 'Observer'  ? 'read-only — no mutations will run.'
-      : level === 'Partner' ? `acts freely under ${process.cwd()} — destructive / external / out-of-scope still ask.`
-      : 'acts, asks at each risk boundary.';
-    ctx.display.success(`Autonomy set to ${level} — ${note}`);
+    const durability = persisted
+      ? ' Persisted — survives restart.'
+      : ' Session only (config not writable here).';
+    ctx.display.success(`Autonomy set to ${level} — ${levelNote(level)}${durability}`);
     return {};
   },
 };
