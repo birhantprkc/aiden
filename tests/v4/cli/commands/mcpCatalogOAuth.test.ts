@@ -22,14 +22,17 @@ describe('catalog — OAuth static-client + verified flag', () => {
     }
   });
 
-  it('github carries a device-flow client config and is UNVERIFIED (not yet proven)', () => {
+  it('github carries a device-flow client config and is VERIFIED (proven live → one-tap connect)', () => {
     const gh = findCatalogEntry('github')!;
     expect(gh.auth).toBe('oauth');
-    expect(gh.oauthVerified).toBe(false);
+    // v4.14 — device flow proven end-to-end against real GitHub, so github is
+    // marked verified and offered for one-tap `/mcp connect`.
+    expect(gh.oauthVerified).toBe(true);
     expect(gh.oauth?.deviceAuthorizationEndpoint).toBe('https://github.com/login/device/code');
     expect(gh.oauth?.scopes).toContain('repo');
-    // Ships with an empty client id (no Aiden OAuth App registered yet) — supplied
-    // at runtime via AIDEN_MCP_GITHUB_CLIENT_ID. Device flow → no secret anywhere.
+    // Ships with an empty client id (no Aiden OAuth App registered yet) — the
+    // user supplies their own PUBLIC client id via `/mcp connect` (prompted once,
+    // then persisted) or --client-id. Device flow → no secret anywhere.
     expect(gh.oauth?.clientId).toBe('');
     expect(JSON.stringify(gh)).not.toMatch(/client_secret|clientSecret/);
   });

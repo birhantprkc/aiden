@@ -41,6 +41,7 @@ import {
   MCP_CATALOG,
   findCatalogEntry,
   catalogEntryToRawConfig,
+  isConnectable,
   type CatalogAuth,
   type McpServerOAuth,
 } from './mcpCatalog';
@@ -164,7 +165,7 @@ async function addServer(
   ctx: SlashCommandContext,
   name: string,
   rawEntry: RawServerEntry,
-  opts: { authType?: CatalogAuth } = {},
+  opts: { authType?: CatalogAuth; chained?: boolean } = {},
 ): Promise<void> {
   const { display } = ctx;
   if (!ctx.mcpClient) { display.warn('MCP client is not available in this session.'); return; }
@@ -218,9 +219,15 @@ async function addServer(
   ctx.config.set(`mcp.servers.${name}`, rawEntry);
   await ctx.config.save();
 
-  // OAuth: defer the connect to the explicit /mcp auth (no token yet).
+  // OAuth: defer the connect to the explicit /mcp auth (no token yet). When the
+  // one-tap wrapper drives this it authorizes right after, so skip the manual
+  // hint and just confirm the add calmly.
   if (isOauth) {
-    display.success(`Saved '${name}'. Run /mcp auth ${name} to authorize and connect.`);
+    display.success(
+      opts.chained
+        ? `Added '${name}' ✓`
+        : `Saved '${name}'. Run /mcp auth ${name} to authorize and connect.`,
+    );
     return;
   }
 
@@ -273,7 +280,12 @@ function handleCatalog(ctx: SlashCommandContext): void {
 }
 
 /** `/mcp catalog add <slug> [args]` / `/mcp install <slug> [args]` — pre-fill → shared gate. */
-async function handleCatalogAdd(ctx: SlashCommandContext, slug: string, extraArgs: string[]): Promise<void> {
+async function handleCatalogAdd(
+  ctx: SlashCommandContext,
+  slug: string,
+  extraArgs: string[],
+  opts: { chained?: boolean } = {},
+): Promise<void> {
   const { display } = ctx;
   if (!slug) {
     display.printError('Usage: /mcp catalog add <slug> [args]', 'Run /mcp catalog to see slugs.');
@@ -299,7 +311,7 @@ async function handleCatalogAdd(ctx: SlashCommandContext, slug: string, extraArg
       display.dim(`(--client-id ignored — '${entry.slug}' is not an OAuth server)`);
     }
   }
-  await addServer(ctx, entry.slug, raw, { authType: entry.auth });
+  await addServer(ctx, entry.slug, raw, { authType: entry.auth, chained: opts.chained });
 }
 
 /** Pull `--client-id <id>` (or `--client-id=<id>`) out of a catalog-add arg list. */
@@ -548,6 +560,102 @@ async function handleAuth(ctx: SlashCommandContext): Promise<void> {
   }
 }
 
+/**
+ * `/mcp connect <name> [--client-id <id>]` — the ONE-TAP wrapper. Collapses the
+ * 3-step connect (catalog add → auth → device-code) into a single command for a
+ * PROVEN catalog entry: add it (if not already) → authorize via device flow
+ * (shows the URL + user code) → connected. If a device-flow entry needs a
+ * public client id that isn't stored yet, it's prompted for ONCE (or taken from
+ * --client-id) and PERSISTED — the user is NEVER sent to set an env var.
+ *
+ * A thin, friendly shortcut OVER the existing commands (catalog add / auth all
+ * still work), not a replacement. Honest catalog: only offered for entries
+ * `isConnectable` marks proven; unverified oauth entries are pointed at the
+ * manual add + auth path, never advertised as one-tap.
+ */
+async function handleConnect(ctx: SlashCommandContext, slug: string, extraArgs: string[]): Promise<void> {
+  const { display } = ctx;
+  if (!ctx.mcpClient) { display.warn('MCP client is not available in this session.'); return; }
+  if (!ctx.config)    { display.printError('Cannot persist — config is not available in this context.'); return; }
+  if (!slug) {
+    display.printError('Usage: /mcp connect <name> [--client-id <id>]', 'Run /mcp catalog to see servers.');
+    return;
+  }
+  const entry = findCatalogEntry(slug);
+  if (!entry) {
+    display.printError(`No catalog entry '${slug}'.`, 'Run /mcp catalog to see available servers.');
+    return;
+  }
+
+  // Honest catalog — never advertise a connect that isn't proven end-to-end.
+  if (!isConnectable(entry)) {
+    display.printError(
+      `'${entry.slug}' isn't verified for one-tap connect yet.`,
+      `Its OAuth flow isn't proven end-to-end — add it manually: /mcp catalog add ${entry.slug} · /mcp auth ${entry.slug}.`,
+    );
+    return;
+  }
+
+  // Already connected? Nothing to do.
+  const live = ctx.mcpClient.get(entry.slug);
+  if (live && (live.status === 'ready' || (live.tools?.length ?? 0) > 0)) {
+    display.success(`'${entry.slug}' is already connected — ${toolCountLabel(live.tools?.length ?? 0)} available.`);
+    return;
+  }
+
+  const { clientId: providedClientId, rest } = extractClientIdFlag(extraArgs);
+  const servers = ctx.config.getValue<Record<string, { http?: { oauth?: { clientId?: string } } }>>('mcp.servers') ?? {};
+  const alreadyAdded = Object.prototype.hasOwnProperty.call(servers, entry.slug);
+  const storedClientId = servers[entry.slug]?.http?.oauth?.clientId?.trim();
+
+  // A device-flow entry that ships no client id needs the user's public one.
+  const needsClientId = entry.auth === 'oauth'
+    && Boolean(entry.oauth?.deviceAuthorizationEndpoint)
+    && !entry.oauth?.clientId;
+
+  let clientId = providedClientId;
+  if (needsClientId && !clientId && !storedClientId) {
+    // Prompt inline ONCE — never an env var. Persisted via the add below.
+    if (!ctx.prompt) {
+      display.printError(
+        `'${entry.slug}' needs a public OAuth client id to connect.`,
+        `Re-run with it: /mcp connect ${entry.slug} --client-id <id>`,
+      );
+      return;
+    }
+    display.info(`One-tap connect for ${entry.name}.`);
+    display.dim(`Needs your registered app's PUBLIC client id (device flow — no secret, safe to store). Asked once, then persisted.`);
+    clientId = (await ctx.prompt(`${entry.name} client id`)).trim();
+    if (!clientId) {
+      display.printError('No client id entered — aborting.', `Re-run: /mcp connect ${entry.slug} --client-id <id>`);
+      return;
+    }
+  }
+
+  // ── Step 1 — ADD (if not already configured). The confirm gate + security
+  //    notes live in addServer; a declined confirm leaves nothing in config.
+  if (!alreadyAdded) {
+    const addArgs = clientId ? ['--client-id', clientId, ...rest] : rest;
+    await handleCatalogAdd(ctx, entry.slug, addArgs, { chained: true });
+    if (!ctx.config.getValue(`mcp.servers.${entry.slug}`)) return; // declined/failed → addServer already spoke
+  } else {
+    display.dim(`Added '${entry.slug}' ✓ (already configured)`);
+    // A --client-id supplied for an already-added entry updates the stored id.
+    if (clientId && clientId !== storedClientId) {
+      const cur = ctx.config.getValue<{ http?: { oauth?: Record<string, unknown> } }>(`mcp.servers.${entry.slug}`);
+      if (cur?.http?.oauth) {
+        cur.http.oauth = { ...cur.http.oauth, clientId };
+        ctx.config.set(`mcp.servers.${entry.slug}`, cur);
+        await ctx.config.save();
+      }
+    }
+  }
+
+  // ── Step 2 — AUTHORIZE (device flow prints the URL + code, waits) → connect.
+  //    handleAuth reads the server name from ctx.args[1] (= slug here).
+  await handleAuth(ctx);
+}
+
 export const mcp: SlashCommand = {
   name: 'mcp',
   description: 'List connected MCP servers and their tools (read-only).',
@@ -600,6 +708,9 @@ export const mcp: SlashCommand = {
       return {};
     }
     if (sub === 'install') { await handleCatalogAdd(ctx, ctx.args[1] ?? '', ctx.args.slice(2)); return {}; }
+
+    // v4.14 — one-tap wrapper: add → auth → device-code in a single command.
+    if (sub === 'connect') { await handleConnect(ctx, ctx.args[1] ?? '', ctx.args.slice(2)); return {}; }
 
     if (sub && sub !== 'list') {
       ctx.display.printError(`Unknown subcommand '${sub}'.`, 'Try `/mcp` or `/mcp status [name]`.');

@@ -162,14 +162,18 @@ export const MCP_CATALOG: readonly CatalogEntry[] = [
     // GitHub's authorization server has NO Dynamic Client Registration, so we
     // use the RFC 8628 device flow with a pre-registered public client id. The
     // device endpoint isn't in GitHub's metadata, so it's carried here. The
-    // client id ships empty until Aiden registers an official OAuth App; supply
-    // your own registered app via AIDEN_MCP_GITHUB_CLIENT_ID to try it now.
+    // client id ships empty until Aiden registers an official OAuth App; the
+    // user supplies their own app's PUBLIC client id (device flow — no secret)
+    // once via `/mcp connect github` (prompted, then persisted) or --client-id.
     oauth: {
       clientId: '',
       deviceAuthorizationEndpoint: 'https://github.com/login/device/code',
       scopes: ['repo', 'read:org', 'read:user'],
     },
-    oauthVerified: false, // not proven end-to-end yet — never advertised as working
+    // Device flow proven end-to-end against real GitHub (live connect, tools
+    // listed) — so one-tap `/mcp connect github` is offered. The user still
+    // supplies their own public client id (no official Aiden OAuth app ships).
+    oauthVerified: true,
     sourceUrl: 'https://github.com/github/github-mcp-server',
     securityNotes: 'Browser device-code OAuth (no PAT, no secret). Grants access to your GitHub per the scopes you approve. After adding, run `/mcp auth github`.',
   },
@@ -179,6 +183,18 @@ export const MCP_CATALOG: readonly CatalogEntry[] = [
 export function findCatalogEntry(slug: string): CatalogEntry | undefined {
   const s = slug.toLowerCase();
   return MCP_CATALOG.find((e) => e.slug === s);
+}
+
+/**
+ * Honest catalog — one-tap `/mcp connect` is offered ONLY for entries whose
+ * connect path is PROVEN. Non-oauth entries connect directly; an oauth entry
+ * must be `oauthVerified` (its device/loopback flow demonstrated end-to-end
+ * against the real server). An unverified oauth entry is never advertised as
+ * one-tap-connectable — the user is pointed at the manual add + auth path.
+ */
+export function isConnectable(entry: CatalogEntry): boolean {
+  if (entry.auth !== 'oauth') return true;
+  return entry.oauthVerified === true;
 }
 
 /** Static OAuth client config persisted under `mcp.servers.<name>.http.oauth`. */
