@@ -43,13 +43,13 @@
  *
  */
 
-import { promises as fs } from 'node:fs';
-import path from 'node:path';
-
 import type { AidenPaths } from './paths';
 import type { MemoryProvider, MemorySnapshot } from './memoryProvider';
 // v4.9.0 Slice 11 — namespace registry generalizes 'memory'|'user' to N.
 import { getNamespace, hasNamespace, listNamespaces } from './memory/namespaceRegistry';
+// v4.14.x — the shared UTF-8 doorway: all memory I/O goes through here so the
+// encoding can never drift (write is atomic + read-back verified).
+import { readMemoryFile, writeMemoryFile } from './memory/io';
 // v4.14.x — provenance source tags (Option A: model-visible). Matching always
 // compares on the bare text; tagging is opt-in per call via `source`.
 import {
@@ -386,17 +386,8 @@ function limitFor(file: string): number {
 }
 
 async function readFileOrEmpty(p: string): Promise<string> {
-  try {
-    return await fs.readFile(p, 'utf8');
-  } catch (err: unknown) {
-    if (
-      err instanceof Error &&
-      (err as NodeJS.ErrnoException).code === 'ENOENT'
-    ) {
-      return '';
-    }
-    throw err;
-  }
+  // Routed through the shared UTF-8 doorway (same ENOENT → '' contract).
+  return readMemoryFile(p);
 }
 
 async function readEntries(p: string): Promise<string[]> {
@@ -409,22 +400,10 @@ async function readEntries(p: string): Promise<string[]> {
 }
 
 /**
- * Write to a temp sibling and rename — gives us atomic replacement on
- * NTFS / ext4 / APFS. Failure paths leave the temp file behind (cleaned
- * up best-effort) without corrupting the original.
+ * Atomic, UTF-8, read-back-verified write via the shared memory doorway
+ * (`writeMemoryFile` → `writeFileVerified`). Kept as a thin alias so the
+ * add/replace/remove call sites are unchanged.
  */
 async function atomicWrite(targetPath: string, content: string): Promise<void> {
-  await fs.mkdir(path.dirname(targetPath), { recursive: true });
-  const tmpPath = `${targetPath}.${process.pid}.${Date.now()}.tmp`;
-  try {
-    await fs.writeFile(tmpPath, content, 'utf8');
-    await fs.rename(tmpPath, targetPath);
-  } catch (err) {
-    try {
-      await fs.unlink(tmpPath);
-    } catch {
-      // ignore — rename may have already moved the temp away on success
-    }
-    throw err;
-  }
+  await writeMemoryFile(targetPath, content);
 }

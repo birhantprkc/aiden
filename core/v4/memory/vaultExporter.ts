@@ -59,6 +59,9 @@
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+// v4.14.x — memory-content reads/writes route through the shared UTF-8 doorway
+// (fs stays for vault directory listing / cleanup + distillation JSON reads).
+import { readMemoryFile, writeMemoryFile } from './io';
 import crypto from 'node:crypto';
 
 import type { AidenPaths } from '../paths';
@@ -352,11 +355,7 @@ function relativeFromHome(paths: AidenPaths, abs: string): string {
 }
 
 async function readFileOrEmpty(p: string): Promise<string> {
-  try { return await fs.readFile(p, 'utf8'); }
-  catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return '';
-    throw err;
-  }
+  return readMemoryFile(p);
 }
 
 async function safeMkdir(dir: string): Promise<void> {
@@ -452,16 +451,9 @@ async function writeNote(
   fm:       Record<string, string | boolean>,
   body:     string,
 ): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
   const content = `${serialiseFrontmatter(fm)}\n\n${body.trimEnd()}\n`;
-  const tmp     = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  try {
-    await fs.writeFile(tmp, content, 'utf8');
-    await fs.rename(tmp, filePath);
-  } catch (err) {
-    try { await fs.unlink(tmp); } catch { /* swallow */ }
-    throw err;
-  }
+  // Atomic + UTF-8 + read-back verified via the shared memory doorway.
+  await writeMemoryFile(filePath, content);
 }
 
 /**

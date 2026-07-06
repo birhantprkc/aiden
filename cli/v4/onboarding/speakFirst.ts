@@ -34,6 +34,8 @@ import { createInterface } from 'node:readline/promises';
 
 import { c } from '../../../core/v4/ui/theme';
 import type { AidenPaths } from '../../../core/v4/paths';
+// v4.14.x — USER.md reads route through the shared UTF-8 memory doorway.
+import { readMemoryFile } from '../../../core/v4/memory/io';
 
 const MARKER_NAME = '.onboarding-shown';
 /** Keep a captured name short — it's a call-name, not a bio. */
@@ -83,12 +85,12 @@ export async function isOnboardingShown(paths: AidenPaths, fsImpl: typeof fs = f
 }
 
 /** USER.md empty or missing → the user has no stored profile yet. */
-async function isUserProfileEmpty(paths: AidenPaths, fsImpl: typeof fs = fs): Promise<boolean> {
+async function isUserProfileEmpty(paths: AidenPaths, _fsImpl: typeof fs = fs): Promise<boolean> {
   try {
-    const txt = await fsImpl.readFile(paths.userMd, 'utf8');
+    const txt = await readMemoryFile(paths.userMd);   // ENOENT → '' via the doorway
     return txt.trim().length === 0;
   } catch {
-    return true;   // missing file = empty profile
+    return true;   // unreadable = treat as empty profile
   }
 }
 
@@ -143,9 +145,9 @@ export function parseUserName(userMdContent: string): string | null {
 }
 
 /** Read the stored user name from USER.md. Never throws; null when unset. */
-export async function readUserName(userMdPath: string, fsImpl: typeof fs = fs): Promise<string | null> {
+export async function readUserName(userMdPath: string, _fsImpl: typeof fs = fs): Promise<string | null> {
   try {
-    return parseUserName(await fsImpl.readFile(userMdPath, 'utf8'));
+    return parseUserName(await readMemoryFile(userMdPath));   // UTF-8 doorway
   } catch {
     return null;
   }

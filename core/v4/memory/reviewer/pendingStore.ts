@@ -21,11 +21,11 @@
  * appends one ## Pending review block per call (idempotent on no-op).
  */
 
-import { promises as fs } from 'node:fs';
-import path from 'node:path';
 import { newMemoryId } from '../../identity';
 import type { MemoryFile } from '../../memoryManager';
 import { ENTRY_SEPARATOR } from '../../memoryManager';
+// v4.14.x — all memory-file I/O goes through the shared UTF-8 doorway.
+import { readMemoryFile, writeMemoryFile } from '../io';
 
 export interface PendingCandidate {
   memId:     string;
@@ -38,10 +38,9 @@ export interface PendingCandidate {
 const PENDING_HEADER_RE = /^## Pending review/m;
 const CANDIDATE_LINE_RE = /^- \[ \] (mem_[0-9a-f]{32})\s*\|\s*([^|]+?)\s*\|\s*(.+)$/;
 
-/** Read the file (or empty string) without throwing on ENOENT. */
-async function readOrEmpty(path: string): Promise<string> {
-  try { return await fs.readFile(path, 'utf8'); }
-  catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw e; }
+/** Read the file (or empty string) without throwing on ENOENT — via the doorway. */
+async function readOrEmpty(filePath: string): Promise<string> {
+  return readMemoryFile(filePath);
 }
 
 /**
@@ -73,12 +72,9 @@ export async function appendCandidates(
   const next = existing.endsWith('\n') || existing.length === 0
     ? existing + block
     : existing + '\n' + block;
-  // Atomic write: ensure parent dir exists (first-run case where
-  // memories/ hasn't been created yet), then tmp + rename.
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(tmp, next, 'utf8');
-  await fs.rename(tmp, filePath);
+  // Atomic + UTF-8 + read-back verified via the shared doorway (handles the
+  // first-run mkdir + tmp/rename internally).
+  await writeMemoryFile(filePath, next);
   return stamped;
 }
 
@@ -122,9 +118,7 @@ export async function dropCandidate(filePath: string, memId: string): Promise<bo
     .join('\n');
   // Clean up orphan `## Pending review (...)` headers whose lines are gone.
   const cleaned = next.replace(/## Pending review \([^)]*\)\s*\n(?=\n*## |\n*§|\n*$)/g, '');
-  const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(tmp, cleaned, 'utf8');
-  await fs.rename(tmp, filePath);
+  await writeMemoryFile(filePath, cleaned);
   return true;
 }
 

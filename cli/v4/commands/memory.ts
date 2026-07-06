@@ -26,6 +26,9 @@
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+// v4.14.x — all memory-content reads/writes go through the shared UTF-8 doorway
+// (fs stays only for dir/access + the JSON backup manifest, not md content).
+import { readMemoryFile, writeMemoryFile } from '../../../core/v4/memory/io';
 import { createHash } from 'node:crypto';
 
 import { resolveAidenPaths } from '../../../core/v4/paths';
@@ -318,9 +321,7 @@ async function cmdShow(
   let target: string;
   try { target = getNamespace(file).resolve(paths, findProjectRoot(process.cwd())); }
   catch (e) { err(`${file}: ${e instanceof Error ? e.message : String(e)}\n`); return 1; }
-  let text = '';
-  try { text = await fs.readFile(target, 'utf8'); }
-  catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+  const text = await readMemoryFile(target);
   if (json) { out(JSON.stringify({ file, path: target, content: text }, null, 2) + '\n'); return 0; }
   out(`# ${target}\n`);
   text.split('\n').forEach((line, i) => out(`${String(i + 1).padStart(4, ' ')} | ${line}\n`));
@@ -404,9 +405,8 @@ async function cmdEdit(
   let target: string;
   try { target = getNamespace(file).resolve(paths, findProjectRoot(process.cwd())); }
   catch (e) { err(`${file}: ${e instanceof Error ? e.message : String(e)}\n`); return 1; }
-  await fs.mkdir(path.dirname(target), { recursive: true });
   try { await fs.access(target); }
-  catch { await fs.writeFile(target, '', 'utf8'); }
+  catch { await writeMemoryFile(target, ''); }
   out(`${target}\n`);
   return 0;
 }
@@ -447,9 +447,9 @@ async function cmdBackup(
       let srcPath: string;
       try { srcPath = ns.resolve(paths, projectRoot); }
       catch { continue;  /* requiresProject + no root → skip */ }
-      const text = await fs.readFile(srcPath, 'utf8').catch(() => '');
+      const text = await readMemoryFile(srcPath).catch(() => '');
       const outName = `${ns.name}.md`;
-      await fs.writeFile(path.join(dir, outName), text, 'utf8');
+      await writeMemoryFile(path.join(dir, outName), text);
       snapshots.push({ name: outName, bytes: Buffer.byteLength(text, 'utf8'), sha256: sha256(text) });
     }
     return null;
@@ -495,10 +495,11 @@ async function cmdRestore(
       try { destPath = ns.resolve(paths, projectRoot); }
       catch { continue;  /* requiresProject + no root → skip */ }
       const src = path.join(dir, `${ns.name}.md`);
-      const text = await fs.readFile(src, 'utf8').catch(() => null);
-      if (text === null) continue;
-      await fs.mkdir(path.dirname(destPath), { recursive: true });
-      await fs.writeFile(destPath, text, 'utf8');
+      // Skip namespace files absent from the backup (older snapshots may
+      // pre-date the namespace) — a missing file is not an error.
+      try { await fs.access(src); } catch { continue; }
+      const text = await readMemoryFile(src);
+      await writeMemoryFile(destPath, text);
       restored.push({ name: ns.name, chars: text.length });
     }
     return null;
@@ -524,10 +525,10 @@ async function cmdDiff(
   if (sorted.length === 0) { err('diff: no backups found\n'); return 1; }
   const latest = sorted[sorted.length - 1];
   const dir = path.join(paths.memoryBackupsDir, latest);
-  const memBefore = await fs.readFile(path.join(dir, 'memory.md'), 'utf8').catch(() => '');
-  const usrBefore = await fs.readFile(path.join(dir, 'user.md'),   'utf8').catch(() => '');
-  const memNow    = await fs.readFile(paths.memoryMd, 'utf8').catch(() => '');
-  const usrNow    = await fs.readFile(paths.userMd,   'utf8').catch(() => '');
+  const memBefore = await readMemoryFile(path.join(dir, 'memory.md')).catch(() => '');
+  const usrBefore = await readMemoryFile(path.join(dir, 'user.md')).catch(() => '');
+  const memNow    = await readMemoryFile(paths.memoryMd).catch(() => '');
+  const usrNow    = await readMemoryFile(paths.userMd).catch(() => '');
   out(`diff vs backup ${latest}\n`);
   out(diffSummary('memory.md', memBefore, memNow));
   out(diffSummary('user.md',   usrBefore, usrNow));
@@ -692,8 +693,8 @@ async function cmdReview(
     ? await opts.reviewerRecentTurns()
     : [];
 
-  const liveMemoryRaw = await import('node:fs').then((m) => m.promises.readFile(paths.memoryMd, 'utf8').catch(() => ''));
-  const liveUserRaw   = await import('node:fs').then((m) => m.promises.readFile(paths.userMd,   'utf8').catch(() => ''));
+  const liveMemoryRaw = await readMemoryFile(paths.memoryMd).catch(() => '');
+  const liveUserRaw   = await readMemoryFile(paths.userMd).catch(() => '');
 
   // Wrap the review in a memory span so doctor / spans table track it.
   const ctx = buildCliCtx('memory_review');
