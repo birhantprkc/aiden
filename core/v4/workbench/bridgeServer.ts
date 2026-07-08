@@ -26,6 +26,8 @@
  */
 
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { RunEventRich, ListEventsScopedOptions } from '../daemon/runStore';
 import { WORKBENCH_DASHBOARD_HTML } from './dashboardHtml';
 
@@ -95,6 +97,11 @@ export interface WorkbenchBridgeOptions {
    *  writes are refused. Injected into the served page so only the local
    *  dashboard has it. Read-only GET endpoints ignore it. */
   token?:      string;
+  /** Optional directory of a BUILT static dashboard (dashboard-next/out). When
+   *  set, the bridge serves that React app at `/` (with the token injected into
+   *  index.html) plus its assets, and moves the built-in page to `/plain`. When
+   *  absent, `/` serves the built-in page. Same origin as /api/* — no CORS. */
+  staticDir?:  string;
   /** Loopback port. Default 4280. Pass 0 for an ephemeral port (tests). */
   port?:       number;
   /** Bind host. Default 127.0.0.1 — this phase never binds off-box. */
@@ -157,6 +164,60 @@ function sendJson(res: http.ServerResponse, code: number, body: unknown): void {
   res.end(s);
 }
 
+// ── static dashboard serving (the built React app) ─────────────────────────────
+
+const STATIC_MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif', '.webp': 'image/webp', '.ico': 'image/x-icon', '.txt': 'text/plain; charset=utf-8',
+  '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.map': 'application/json; charset=utf-8',
+};
+
+/** Inject the per-launch write token into a served HTML page so only the locally
+ *  served dashboard can perform writes. */
+function injectToken(html: string, token: string): string {
+  const tag = `<script>window.__WB_TOKEN__=${JSON.stringify(token)}</script>`;
+  return html.includes('</head>') ? html.replace('</head>', `${tag}</head>`) : `${tag}${html}`;
+}
+
+/**
+ * Serve a file from the built static dashboard. Confines every path to
+ * `staticDir` (no traversal), injects the token into HTML, and falls back to
+ * index.html for extensionless routes (SPA). Returns true when it wrote a
+ * response; false when nothing matched (caller falls through to 404 / plain).
+ */
+async function serveStatic(res: http.ServerResponse, staticDir: string, urlPath: string, token: string): Promise<boolean> {
+  const rootAbs = path.resolve(staticDir);
+  let rel = urlPath.split('?')[0];
+  try { rel = decodeURIComponent(rel); } catch { /* keep raw */ }
+  if (rel === '/' || rel === '') rel = '/index.html';
+  const full = path.resolve(rootAbs, '.' + rel);
+  if (full !== rootAbs && !full.startsWith(rootAbs + path.sep)) { sendJson(res, 403, { error: 'forbidden' }); return true; }
+
+  const ext = path.extname(full).toLowerCase();
+  const writeFile = (buf: Buffer, type: string): void => {
+    res.writeHead(200, { 'Content-Type': type, 'Content-Length': buf.length });
+    res.end(buf);
+  };
+  try {
+    const buf = await fs.promises.readFile(full);
+    if (ext === '.html') { writeFile(Buffer.from(injectToken(buf.toString('utf8'), token), 'utf8'), STATIC_MIME['.html']); return true; }
+    writeFile(buf, STATIC_MIME[ext] ?? 'application/octet-stream');
+    return true;
+  } catch {
+    // Not a file. Extensionless request → the SPA's index.html (client routes).
+    if (!ext) {
+      try {
+        const idx = await fs.promises.readFile(path.join(rootAbs, 'index.html'));
+        writeFile(Buffer.from(injectToken(idx.toString('utf8'), token), 'utf8'), STATIC_MIME['.html']);
+        return true;
+      } catch { return false; }
+    }
+    return false;
+  }
+}
+
 /** Read + parse a bounded JSON request body. Rejects on oversize or bad JSON. */
 function readJsonBody(req: http.IncomingMessage, maxBytes: number): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
@@ -199,13 +260,21 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
     if (req.method === 'POST' && cancelMatch) { handleCancelTask(req, res, cancelMatch[1]); return; }
     if (req.method !== 'GET') { sendJson(res, 405, { error: 'method not allowed' }); return; }
 
-    // The dashboard page — a single self-contained dark view. The per-launch
-    // write token is injected here so only the locally-served page holds it.
-    if (url.pathname === '/' || url.pathname === '/index.html') {
+    // The built-in self-contained dark page. The per-launch write token is
+    // injected so only the locally-served page holds it. Always reachable at
+    // /plain (the fallback for the primary React dashboard).
+    const servePlainPage = (): void => {
       const page = WORKBENCH_DASHBOARD_HTML.replace('__WORKBENCH_TOKEN__', () => opts.token ?? '');
       const body = Buffer.from(page, 'utf8');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': body.length });
       res.end(body);
+    };
+    if (url.pathname === '/plain' || url.pathname === '/plain.html') { servePlainPage(); return; }
+
+    // `/` — the primary dashboard. With a built static app wired, `/` and its
+    // assets are served by the static catch-all below; otherwise the built-in page.
+    if ((url.pathname === '/' || url.pathname === '/index.html') && !opts.staticDir) {
+      servePlainPage();
       return;
     }
 
@@ -246,9 +315,18 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       return;
     }
 
+    // Anything else that isn't an /api path → the built static dashboard (its
+    // `/`, assets, and client routes). Missing files fall back to the built-in page.
+    if (opts.staticDir && !url.pathname.startsWith('/api/')) {
+      void serveStatic(res, opts.staticDir, url.pathname, opts.token ?? '')
+        .then((served) => { if (!served) servePlainPage(); })
+        .catch((e) => { log(`static serve failed: ${(e as Error).message}`); servePlainPage(); });
+      return;
+    }
+
     sendJson(res, 404, {
       error: 'not found',
-      endpoints: ['GET /', 'GET /api/health', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'POST /api/tasks', 'POST /api/tasks/:runId/cancel'],
+      endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'POST /api/tasks', 'POST /api/tasks/:runId/cancel'],
     });
   });
 

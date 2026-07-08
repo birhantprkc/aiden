@@ -508,13 +508,23 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
           return { accepted: true, runId };
         },
       };
+      // Primary UI: the built React dashboard (dashboard-next/out) if present;
+      // otherwise the built-in page (still reachable at /plain either way).
+      const nodePath = await import('node:path');
+      const { existsSync } = await import('node:fs');
+      const staticCandidates = [
+        process.env.AIDEN_WEB_STATIC,
+        nodePath.resolve(process.cwd(), 'dashboard-next', 'out'),
+      ].filter((d): d is string => Boolean(d));
+      const staticDir = staticCandidates.find((d) => existsSync(nodePath.join(d, 'index.html')));
       const port     = cmdOpts.port ?? Number(process.env.WORKBENCH_BRIDGE_PORT ?? 4280);
-      const bridge   = await startWorkbenchBridge({ reader: runStore, sessions, enqueue, cancel, token, port });
+      const bridge   = await startWorkbenchBridge({ reader: runStore, sessions, enqueue, cancel, token, staticDir, port });
       const dashUrl  = `http://${bridge.host}:${bridge.port}/`;
       const daemonUp = process.env.AIDEN_DAEMON === '1';
       process.stdout.write(
         `\n  Aiden Workbench — live dashboard\n` +
         `    open:   ${dashUrl}\n` +
+        `    ui:     ${staticDir ? 'React dashboard' : 'built-in page (build the React app: npm --prefix dashboard-next run build)'}\n` +
         `    chat:   enabled (local token — only this browser can send tasks)\n` +
         `    tasks:  run under safe-mode; risky actions are auto-denied from web\n` +
         (daemonUp ? '' : `    note:   start the daemon (AIDEN_DAEMON=1) for sent tasks to execute\n`) +

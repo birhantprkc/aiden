@@ -1,27 +1,28 @@
 import type { Metadata } from 'next'
-import { JetBrains_Mono, Inter } from 'next/font/google'
+import { DM_Mono, Outfit } from 'next/font/google'
 import './globals.css'
 
-const jetbrainsMono = JetBrains_Mono({
+// Taracod design system: Outfit for display/body, DM Mono for numbers.
+const dmMono = DM_Mono({
   subsets: ['latin'],
   variable: '--font-mono',
-  weight: ['300', '400', '500', '600'],
+  weight: ['400', '500'],
 })
 
-const inter = Inter({
+const outfit = Outfit({
   subsets: ['latin'],
   variable: '--font-sans',
-  weight: ['400', '500', '600', '700', '800'],
+  weight: ['400', '500', '600', '700'],
 })
 
 export const metadata: Metadata = {
-  title: 'DevOS · Aiden',
-  description: 'Personal AI OS by Shiva Deore · Taracod',
+  title: 'Aiden Workbench',
+  description: 'Aiden — local-first agent · Taracod',
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${jetbrainsMono.variable} ${inter.variable}`}>
+    <html lang="en" className={`${dmMono.variable} ${outfit.variable}`}>
       <body>{children}</body>
     </html>
   )

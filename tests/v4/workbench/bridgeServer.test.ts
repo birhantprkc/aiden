@@ -14,6 +14,9 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import http from 'node:http';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../../../core/v4/daemon/db/migrations';
 import { createRunStore } from '../../../core/v4/daemon/runStore';
@@ -393,5 +396,70 @@ describe('Workbench steer — token-gated POST /api/tasks/:runId/cancel', () => 
     expect(body).toContain('id="composer-stop"');
     expect(body).toContain("'/api/tasks/' + encodeURIComponent(id) + '/cancel'");
     expect(body).toContain('task_cancelled');                // the feed renders the stop
+  });
+});
+
+// ── Serving the built React dashboard (dashboard-next/out) ────────────────────
+
+describe('Workbench bridge — static React dashboard', () => {
+  const TOKEN = 'static-token-xyz';
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-static-'));
+    fs.writeFileSync(path.join(dir, 'index.html'),
+      '<!doctype html><html><head><title>React</title></head><body>Aiden React Dashboard</body></html>');
+    fs.writeFileSync(path.join(dir, 'app.js'), 'console.log("aiden")');
+  });
+  afterEach(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* noop */ } });
+
+  it('★ serves the built index.html at / with the write token injected', async () => {
+    const b = await startWorkbenchBridge({ reader: runStore, token: TOKEN, staticDir: dir, port: 0 });
+    const { status, contentType, body } = await httpGet(b.port, '/');
+    expect(status).toBe(200);
+    expect(contentType).toMatch(/text\/html/);
+    expect(body).toContain('Aiden React Dashboard');
+    expect(body).toContain('window.__WB_TOKEN__="' + TOKEN + '"');   // only the served page holds the token
+    await b.close();
+  });
+
+  it('serves static assets with the right content-type', async () => {
+    const b = await startWorkbenchBridge({ reader: runStore, token: TOKEN, staticDir: dir, port: 0 });
+    const { status, contentType, body } = await httpGet(b.port, '/app.js');
+    expect(status).toBe(200);
+    expect(contentType).toMatch(/javascript/);
+    expect(body).toContain('console.log');
+    await b.close();
+  });
+
+  it('★ falls back to index.html for client-side routes (SPA)', async () => {
+    const b = await startWorkbenchBridge({ reader: runStore, token: TOKEN, staticDir: dir, port: 0 });
+    const { status, body } = await httpGet(b.port, '/some/client/route');
+    expect(status).toBe(200);
+    expect(body).toContain('Aiden React Dashboard');
+    await b.close();
+  });
+
+  it('refuses encoded path traversal out of the static dir (403)', async () => {
+    const b = await startWorkbenchBridge({ reader: runStore, token: TOKEN, staticDir: dir, port: 0 });
+    const { status } = await httpGet(b.port, '/..%2f..%2fpackage.json');
+    expect(status).toBe(403);
+    await b.close();
+  });
+
+  it('keeps the built-in page reachable at /plain', async () => {
+    const b = await startWorkbenchBridge({ reader: runStore, token: TOKEN, staticDir: dir, port: 0 });
+    const { status, body } = await httpGet(b.port, '/plain');
+    expect(status).toBe(200);
+    expect(body).toContain('class="sidebar"');             // the built-in page, not React
+    expect(body).not.toContain('Aiden React Dashboard');
+    await b.close();
+  });
+
+  it('without a staticDir, / still serves the built-in page (unchanged)', async () => {
+    const { status, body } = await httpGet(bridge.port, '/');   // beforeEach bridge has no staticDir
+    expect(status).toBe(200);
+    expect(body).toContain('class="sidebar"');
+    expect(body).not.toContain('Aiden React Dashboard');
   });
 });
