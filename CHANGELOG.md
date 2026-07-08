@@ -1,8 +1,13 @@
-## v4.15.0 — 2026-07-07
+## v4.14.5 — 2026-07-08
 
-One safety net across every provider call, and two display fixes.
+A reliability release — every provider call guarded, every channel send sealed, every subagent claim checked. (v4.15 is reserved for the web-dashboard release.)
 
 - **Unified provider preflight — one gate every model call passes through.** Main turn, fallback, vision, distiller, merger, sub-agent, compression, auxiliary: every call now runs through a single message check before it leaves for the provider, and no caller can skip it. It repairs structure without ever inventing a fact — a tool call that never got a result gets an honest "result unavailable" stub (never a fake success), orphaned or duplicate tool results are dropped, malformed tool arguments are repaired. Two sharp cases it closes for good: if Aiden was killed mid-tool, the dangling call is stripped on resume so it can't loop forever re-issuing a destructive command; and a tool blocked by the approval layer still gets a "blocked" result, so the next turn stays valid instead of erroring out.
+- **Honest provider decisions.** A boot-time decision trace records which provider was chosen and why. A provider that fails to resolve is reported with the real reason and the fix command — and an explicitly-requested `--provider` that fails is never silently mislabelled as a "default".
+- **Codex failures say why.** A Codex stream error now surfaces the real cause (rate limit, timeout, …) instead of a bare, doubled "failed: failed".
+- **Delivery isolation — every channel send carries its own sealed address.** All nine channels (Telegram, Discord, Slack, Signal, iMessage, email, SMS, WhatsApp, webhook) route replies through a frozen per-turn destination, so two conversations running at once can never cross-wire. A permanently-dead target (bot blocked, chat deleted) is remembered and skipped instead of retried forever, and revived the moment it messages again. A transient hiccup partway through a long reply no longer drops the rest of it.
+- **Subagents must show their work.** Helper-agent results are re-checked against real evidence — stub or empty files, output leaking between parallel agents, and unverifiable remote claims are caught before Aiden trusts them.
+- **Cleaner internals.** Removed retired v3 modules and stale scaffolding comments, and fixed a background cache timer that had been forcing every command to hard-quit instead of exiting cleanly once its work was done.
 - **The steering-bar hint stays in the bar.** During a fast multi-tool burst the busy hint ("Enter → …") could bleed into the tool-activity rows. The bottom row now has a single owner — only the live row repaints — so the hint stays put no matter how fast tools fire.
 - **Windows paths render with real colons.** A path in inline code (`` `C:\Users\…` ``) was showing an internal escape token in place of the colon. Inline code now decodes it, so `` `C:\Users\shiva` `` reads correctly.
 
