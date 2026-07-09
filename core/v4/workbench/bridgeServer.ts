@@ -31,6 +31,18 @@ import path from 'node:path';
 import type { RunEventRich, ListEventsScopedOptions } from '../daemon/runStore';
 import { WORKBENCH_DASHBOARD_HTML } from './dashboardHtml';
 
+/**
+ * Strip bracketed-paste markers at the workbench INGEST boundary. A pasted
+ * message can arrive carrying ESC[200~ / ESC[201~ (or their ESC-stripped
+ * `[200~` / `200~` leftovers). Stripping them HERE — the one place browser text
+ * enters the daemon — keeps the stored message AND its derived session label
+ * clean, and preserves multi-line content, instead of leaving every downstream
+ * consumer to strip (which the raw stored message never did).
+ */
+export function stripPasteMarkers(s: string): string {
+  return s.replace(/\x1b?\[?20[01]~/g, '');
+}
+
 /** The one capability the bridge needs — a narrow read port over the run store. */
 export interface RunEventReader {
   listEventsScoped(opts: ListEventsScopedOptions): RunEventRich[];
@@ -412,7 +424,7 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
   function handlePostTask(req: http.IncomingMessage, res: http.ServerResponse): void {
     if (!passesWriteGate(req, res)) return;
     readJsonBody(req, 64 * 1024).then((body) => {
-      const message = typeof body?.message === 'string' ? body.message.trim() : '';
+      const message = typeof body?.message === 'string' ? stripPasteMarkers(body.message).trim() : '';
       if (!message) { sendJson(res, 400, { error: 'body requires a non-empty "message"' }); return; }
       if (!opts.enqueue) { sendJson(res, 503, { error: 'task execution unavailable (daemon not wired)' }); return; }
       const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : undefined;

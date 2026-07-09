@@ -302,6 +302,20 @@ describe('Workbench write path — token-gated POST /api/tasks', () => {
     await b.close();
   });
 
+  it('★ strips bracketed-paste markers at the ingest boundary; multi-line preserved (B4)', async () => {
+    const sent: Array<{ message: string; sessionId?: string }> = []; const b = await withWrite(sent);
+    // A pasted, MULTI-LINE message carrying ESC[200~ / ESC[201~ plus an
+    // ESC-stripped `[200~` leftover — the exact shape that leaked into stored
+    // session labels.
+    const pasted = '\x1b[200~line one\nline two\x1b[201~[200~ tail';
+    const r = await httpPost(b.port, '/api/tasks', { message: pasted }, { 'x-workbench-token': TOKEN });
+    expect(r.status).toBe(202);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].message).toBe('line one\nline two tail');   // markers gone, BOTH lines kept
+    expect(sent[0].message).not.toMatch(/20[01]~/);
+    await b.close();
+  });
+
   it('rejects a cross-origin write even WITH the token (403)', async () => {
     const sent: Array<{ message: string }> = []; const b = await withWrite(sent);
     const r = await httpPost(b.port, '/api/tasks', { message: 'x' }, { 'x-workbench-token': TOKEN, Origin: 'http://evil.example.com' });

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { ToolRegistry, type ToolHandler } from '../../core/v4/toolRegistry';
+import { ToolRegistry, validateToolArgs, type ToolHandler } from '../../core/v4/toolRegistry';
 import { ApprovalEngine } from '../../moat/approvalEngine';
 import { SSRFProtection } from '../../moat/ssrfProtection';
 import { TirithScanner } from '../../moat/tirithScanner';
@@ -265,5 +265,76 @@ describe('ToolRegistry security wiring', () => {
     // ★ The SSRF check resolves DNS — a network touch. Approval ran FIRST, so a
     // denied tool never reached it: no hostname resolved, no socket opened.
     expect(checkSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ── B1 — argument-shape guard: prose must not bleed into structured fields ──
+
+const planLikeHandler: ToolHandler = {
+  schema: {
+    name: 'noop_plan',
+    description: 'noop plan (a plan_approval-shaped structured arg)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title:      { type: 'string' },
+        operations: { type: 'array', items: { type: 'object' } },
+        mode:       { enum: ['dry', 'live'] },
+      },
+      required: ['title', 'operations'],
+    },
+  },
+  category: 'read',
+  mutates: false,
+  toolset: 'noop',
+  async execute() { return { success: true, ran: true }; },
+};
+
+describe('validateToolArgs — argument-shape guard (B1)', () => {
+  const schema = planLikeHandler.schema.inputSchema;
+
+  it('rejects plan PROSE in a field declared `array`', () => {
+    expect(validateToolArgs(schema, { title: 'x', operations: 'first delete dupes, then move config' }))
+      .toMatch(/"operations" must be an array/);
+  });
+  it('rejects prose in a field declared `object`', () => {
+    expect(validateToolArgs({ properties: { args: { type: 'object' } } }, { args: 'some prose' }))
+      .toMatch(/"args" must be an object/);
+  });
+  it('rejects a value outside a declared `enum`', () => {
+    expect(validateToolArgs(schema, { title: 'x', operations: [], mode: 'yolo' }))
+      .toMatch(/"mode" must be one of/);
+  });
+  it('passes a well-formed call, and leaves string fields alone (no over-fire)', () => {
+    expect(validateToolArgs(schema, {
+      title: 'x',
+      operations: [{ tool: 'file_delete', args: {}, reason: 'dup' }],
+      mode: 'dry',
+    })).toBeNull();
+    expect(validateToolArgs({ properties: { q: { type: 'string' } } }, { q: 'a long prose query is fine' })).toBeNull();
+  });
+});
+
+describe('ToolRegistry dispatch rejects mis-shaped arguments (B1)', () => {
+  it('★ prose in a declared-`array` field is rejected before the tool executes', async () => {
+    const registry = new ToolRegistry();
+    let ran = false;
+    registry.register({ ...planLikeHandler, async execute() { ran = true; return { success: true }; } });
+    const exec = registry.buildExecutor(baseCtx());
+    const r = await exec({ id: '1', name: 'noop_plan',
+      arguments: { title: 'clean up', operations: 'delete the dupes then move the config' } });
+    expect(r.error).toMatch(/Invalid arguments for noop_plan/);
+    expect(r.error).toMatch(/"operations" must be an array/);
+    expect(ran).toBe(false);                         // never executed on garbage semantics
+  });
+
+  it('a well-formed call runs normally', async () => {
+    const registry = new ToolRegistry();
+    registry.register(planLikeHandler);
+    const exec = registry.buildExecutor(baseCtx());
+    const r = await exec({ id: '1', name: 'noop_plan',
+      arguments: { title: 'clean up', operations: [{ tool: 'file_delete', args: {}, reason: 'dup' }] } });
+    expect(r.error).toBeUndefined();
+    expect((r.result as { ran?: boolean }).ran).toBe(true);
   });
 });

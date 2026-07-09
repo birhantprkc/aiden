@@ -236,6 +236,48 @@ export interface ToolHandler {
   ): Promise<import('./dryRun').WouldExecute> | import('./dryRun').WouldExecute;
 }
 
+function jsTypeOf(v: unknown): string {
+  return Array.isArray(v) ? 'array' : v === null ? 'null' : typeof v;
+}
+
+/**
+ * Content-level guard for tool arguments. JSON that PARSES can still carry
+ * garbage semantics — plan prose dropped into a field the schema declares an
+ * `array` / `object`, or a value outside a declared `enum`. `parseToolArgs`
+ * (the provider adapters) only checks that the JSON is well-formed; nothing
+ * checks the CONTENTS against the declared shape, so a structured field
+ * silently receives prose.
+ *
+ * Returns an honest, model-actionable message for the FIRST violation, or null
+ * when the args satisfy the declared shapes. It NEVER guesses a repair, and is
+ * conservative by construction — it fires only on unambiguous mismatches:
+ *   - a field declared `array`  that received a non-array
+ *   - a field declared `object` that received a non-object
+ *   - a value outside a declared `enum`
+ * String / number / boolean fields are left alone (free text and coercion are
+ * legitimate there), so a well-formed call never trips it.
+ */
+export function validateToolArgs(inputSchema: unknown, args: Record<string, unknown>): string | null {
+  const props = (inputSchema as { properties?: Record<string, unknown> } | null | undefined)?.properties;
+  if (!props || typeof props !== 'object') return null;
+  for (const [key, rawSpec] of Object.entries(props)) {
+    if (!(key in args)) continue;                         // absent field — not this guard's concern
+    const value = args[key];
+    if (value === undefined || value === null) continue;
+    const spec = rawSpec as { type?: unknown; enum?: unknown[] };
+    if (spec.type === 'array' && !Array.isArray(value)) {
+      return `argument "${key}" must be an array (a list of items), but received a ${jsTypeOf(value)}. Emit the items as JSON, not prose.`;
+    }
+    if (spec.type === 'object' && (typeof value !== 'object' || Array.isArray(value))) {
+      return `argument "${key}" must be an object, but received a ${jsTypeOf(value)}. Emit a JSON object, not prose.`;
+    }
+    if (Array.isArray(spec.enum) && spec.enum.length > 0 && !spec.enum.includes(value)) {
+      return `argument "${key}" must be one of ${JSON.stringify(spec.enum)}, but received ${JSON.stringify(value)}.`;
+    }
+  }
+  return null;
+}
+
 export class ToolRegistry {
   private readonly handlers = new Map<string, ToolHandler>();
 
@@ -350,6 +392,22 @@ export class ToolRegistry {
       }
 
       const args = call.arguments ?? {};
+
+      // ── Argument-shape guard — JSON that PARSES can still be garbage ───
+      // A well-formed argument can carry prose where the schema declares a
+      // structured field (array/object) or an enum value. Nothing else checks
+      // the CONTENTS, so reject the clearest violations with an honest message
+      // the model can act on — before approval, the cache, or execution trusts
+      // it. Never guesses a repair.
+      const argShapeError = validateToolArgs(handler.schema.inputSchema, args);
+      if (argShapeError) {
+        return {
+          id: call.id,
+          name: call.name,
+          result: null,
+          error: `Invalid arguments for ${call.name}: ${argShapeError}`,
+        };
+      }
 
       // ── Gate 1 — approval engine for mutating tools (runs FIRST) ───
       // Fail-open ORDERING fix: approval MUST precede the SSRF check and the

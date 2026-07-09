@@ -42,6 +42,20 @@ export const webSearchTool: ToolHandler = {
     if (!query) {
       return { success: false, error: 'No query provided' };
     }
-    return reliableWebSearch(query);
+    const result = await reliableWebSearch(query);
+    // A search that RAN but returned nothing is not a silent success. An empty
+    // result must be an honest negative so the agent never proceeds as though it
+    // learned something. (The verifier flags empty as `low_signal` but `ok:true`,
+    // which nothing downstream treats as a non-result for a read-only tool — so
+    // the honest signal has to originate here, at the tool boundary.)
+    if (result.success && !String(result.output ?? '').trim()) {
+      return {
+        success: false,
+        error:
+          `web_search returned no results for "${query}" — the search ran but ` +
+          `found nothing. Try a different query, or web_fetch a known URL.`,
+      };
+    }
+    return result;
   },
 };

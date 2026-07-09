@@ -57,6 +57,37 @@ describe('web tools', () => {
     expect(result.error).toMatch(/no query/i);
   });
 
+  it('3b. ★ web_search: an EMPTY result is an honest non-success, not a silent success (B6)', async () => {
+    // A backend returned truthy-but-empty output → the search RAN but found
+    // nothing. It must not read as success, or the agent proceeds as though it
+    // learned something from a search that returned nothing.
+    (reliableWebSearch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      success: true,
+      output: '   ',
+    });
+    const result = (await webSearchTool.execute({ query: 'obscure query xyz' }, ctx)) as {
+      success: boolean;
+      error?: string;
+    };
+    expect(reliableWebSearch).toHaveBeenCalledWith('obscure query xyz');
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/no results/i);
+    expect(result.error).toMatch(/found nothing/i);
+  });
+
+  it('3c. web_search: a NON-empty result still passes through as success (no over-fire)', async () => {
+    (reliableWebSearch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      success: true,
+      output: 'a real answer with content',
+    });
+    const result = (await webSearchTool.execute({ query: 'aiden' }, ctx)) as {
+      success: boolean;
+      output: string;
+    };
+    expect(result.success).toBe(true);
+    expect(result.output).toBe('a real answer with content');
+  });
+
   it('4. fetch_url returns stripped HTML body and HTTP status', async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({
       status: 200,
