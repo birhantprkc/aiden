@@ -7,7 +7,7 @@
 /**
  * core/v4/workbench/dashboardHtml.ts — the Workbench dashboard page (Phase 3).
  *
- * One self-contained dark page (inline CSS + JS, no framework). The Claude-style
+ * One self-contained dark page (inline CSS + JS, no framework). A single-column
  * shell: a left sidebar (recent sessions with readable labels + a "Live — all"
  * item + placeholder nav), a header (brand + selected view + live dot), and the
  * center live activity feed. Selecting a session swaps the feed's SSE stream;

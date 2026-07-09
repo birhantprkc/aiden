@@ -593,7 +593,7 @@ function getToolSummary(steps: StepLike[]): string {
   return parts.length ? parts.join(', ') : `ran ${steps.length} steps`
 }
 
-// ── ToolExecutionCard — collapsible Claude Code-style card ────
+// ── ToolExecutionCard — collapsible tool-execution card ────
 function ToolExecutionCard({ phases }: { phases: Phase[] }) {
   const [open, setOpen] = useState(false)
 
@@ -777,7 +777,7 @@ function ChatMessage({ message }: { message: Message }) {
         </div>
       )}
 
-      {/* Tool execution card — Claude Code style */}
+      {/* Tool execution card */}
       {!isUser && message.phases && message.phases.length > 0 && (
         <ToolExecutionCard phases={message.phases} />
       )}

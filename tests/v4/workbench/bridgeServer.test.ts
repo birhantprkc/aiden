@@ -221,7 +221,7 @@ describe('Workbench dashboard shell + feed', () => {
     expect(contentType).toMatch(/text\/html/);
     expect(body).toContain('<title>Aiden Workbench');
     expect(body).toContain('#FF6B35');                      // the orange identity
-    expect(body).toContain('class="sidebar"');              // the Claude-style shell
+    expect(body).toContain('class="sidebar"');              // the single-column shell
     expect(body).toContain('id="sessions"');                // recent-sessions list
     expect(body).toContain("fetch('/api/sessions')");       // sidebar data source
     expect(body).toContain("connect('/api/events'");        // live feed wired
