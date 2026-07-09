@@ -240,7 +240,17 @@ export class ToolRegistry {
   private readonly handlers = new Map<string, ToolHandler>();
 
   register(handler: ToolHandler): void {
-    this.handlers.set(handler.schema.name, handler);
+    // Fail closed at the single registration chokepoint. `mutates` is a
+    // compile-time-required field, but a runtime-loaded plugin whose compiled
+    // JS dropped it (types are erased at runtime) reaches here with
+    // `mutates === undefined`. Treat that as MUTATING, never read-only, so a
+    // forgotten declaration can never bypass the approval gate at dispatch —
+    // and so EVERY downstream reader (the gate, side-effect classifier,
+    // resolveMutates, the parallel read-only hoister) sees the safe value.
+    // A tool opts into the read fast-path by explicitly declaring `mutates:false`.
+    const normalized: ToolHandler =
+      typeof handler.mutates === 'boolean' ? handler : { ...handler, mutates: true };
+    this.handlers.set(normalized.schema.name, normalized);
   }
 
   unregister(name: string): void {
@@ -341,46 +351,12 @@ export class ToolRegistry {
 
       const args = call.arguments ?? {};
 
-      // ── Phase 9 layer A: SSRF check for network tools ─────────
-      if (handler.category === 'network' && context.ssrfProtection) {
-        const url =
-          typeof args.url === 'string'
-            ? args.url
-            : typeof args.query === 'string'
-            ? args.query
-            : '';
-        if (url && /^https?:/i.test(url)) {
-          const ssrf = await context.ssrfProtection.check(url);
-          if (ssrf.blocked) {
-            return {
-              id: call.id,
-              name: call.name,
-              result: null,
-              error: `URL blocked: ${ssrf.reason}`,
-            };
-          }
-        }
-      }
-
-      // ── Phase 9 layer B: tirith scan for shell_exec ───────────
-      if (call.name === 'shell_exec' && context.tirithScanner) {
-        const command =
-          typeof args.command === 'string' ? args.command : '';
-        if (command) {
-          const findings = context.tirithScanner.scanCommand(command);
-          const dangerous = findings.find((f) => f.severity === 'dangerous');
-          if (dangerous) {
-            return {
-              id: call.id,
-              name: call.name,
-              result: null,
-              error: `Tirith blocked: ${dangerous.description}`,
-            };
-          }
-        }
-      }
-
-      // ── Phase 9 layer C: approval engine for mutating tools ───
+      // ── Gate 1 — approval engine for mutating tools (runs FIRST) ───
+      // Fail-open ORDERING fix: approval MUST precede the SSRF check and the
+      // tirith scan (both moved below). An unapproved URL-bearing tool has to be
+      // DENIED before ssrfProtection.check() resolves its DNS — otherwise a tool
+      // the user never approved still touches the network. Approve first, THEN
+      // probe/scan.
       // v4.14.6 — a verified read-only shell command (rg/grep/ls/cat/… with no
       // redirection, chaining, substitution, or dangerous pattern) is treated as
       // a read: it skips the approval gate exactly like file_read, so safe
@@ -390,7 +366,12 @@ export class ToolRegistry {
         call.name === 'shell_exec' &&
         typeof args.command === 'string' &&
         isReadOnlyCommand(args.command);
-      if (handler.mutates && context.approvalEngine && !readOnlyShell) {
+      // Fail closed: a tool must EXPLICITLY declare `mutates: false` to skip the
+      // approval gate. An unknown / undeclared `mutates` (e.g. a dynamically
+      // registered tool that never set it) is ASSUMED to mutate and is gated —
+      // a forgotten declaration must not become a silent bypass.
+      const assumeMutates = handler.mutates ?? true;
+      if (assumeMutates && context.approvalEngine && !readOnlyShell) {
         // Pre-classify shell_exec commands so smart-mode has a tier.
         let riskTier: 'safe' | 'caution' | 'dangerous' | undefined;
         let reason: string | undefined;
@@ -472,6 +453,47 @@ export class ToolRegistry {
             result: null,
             error: `Tool execution denied by approval engine — ${why}`,
           };
+        }
+      }
+
+      // ── Gate 2 — SSRF check for network tools (AFTER approval) ───
+      // Only reached once the tool is approved, so a denied network tool never
+      // resolves a hostname or opens a socket.
+      if (handler.category === 'network' && context.ssrfProtection) {
+        const url =
+          typeof args.url === 'string'
+            ? args.url
+            : typeof args.query === 'string'
+            ? args.query
+            : '';
+        if (url && /^https?:/i.test(url)) {
+          const ssrf = await context.ssrfProtection.check(url);
+          if (ssrf.blocked) {
+            return {
+              id: call.id,
+              name: call.name,
+              result: null,
+              error: `URL blocked: ${ssrf.reason}`,
+            };
+          }
+        }
+      }
+
+      // ── Gate 3 — tirith scan for shell_exec (AFTER approval) ───
+      if (call.name === 'shell_exec' && context.tirithScanner) {
+        const command =
+          typeof args.command === 'string' ? args.command : '';
+        if (command) {
+          const findings = context.tirithScanner.scanCommand(command);
+          const dangerous = findings.find((f) => f.severity === 'dangerous');
+          if (dangerous) {
+            return {
+              id: call.id,
+              name: call.name,
+              result: null,
+              error: `Tirith blocked: ${dangerous.description}`,
+            };
+          }
         }
       }
 
@@ -591,7 +613,10 @@ function classifySideEffectForHandler(h: ToolHandler): 'read' | 'write' | 'mutat
   if (h.riskTier === 'dangerous') return 'destructive';
   if (h.mutates === false)        return 'read';
   if (h.mutates === true)         return 'mutating';
-  return 'read';
+  // Fail closed: an undeclared `mutates` is assumed to mutate, never treated as
+  // a read. A tool must EXPLICITLY declare `mutates: false` to be classified
+  // read-only — a forgotten declaration must not silently read as safe.
+  return 'mutating';
 }
 
 interface ToolSpanShim {

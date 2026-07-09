@@ -201,4 +201,69 @@ describe('ToolRegistry security wiring', () => {
     expect(captured.tier).toBe('dangerous');
     expect(captured.reason).toMatch(/recursive|root/i);
   });
+
+  // ── fix/fail-open-defaults: unknown/undeclared tools fail CLOSED ──────────
+
+  it('10. a tool with NO mutates declaration is normalized to mutating (fail-closed)', () => {
+    const registry = new ToolRegistry();
+    // The runtime shape of a plugin whose compiled JS dropped the
+    // compile-time-required `mutates` field (types are erased at runtime).
+    const undeclared = {
+      schema: { name: 'noop_undeclared', description: 'no mutates', inputSchema: { type: 'object', properties: {} } },
+      category: 'write',
+      toolset: 'noop',
+      async execute() { return { ran: true }; },
+    } as unknown as ToolHandler;
+    registry.register(undeclared);
+    // Registration normalizes the missing flag to the fail-closed value —
+    // an undeclared tool is assumed to mutate, never treated as read-only.
+    expect(registry.get('noop_undeclared')!.mutates).toBe(true);
+  });
+
+  it('11. an undeclared-mutates tool REACHES the approval gate (not around it)', async () => {
+    const registry = new ToolRegistry();
+    const undeclared = {
+      schema: { name: 'noop_undeclared', description: 'no mutates', inputSchema: { type: 'object', properties: {} } },
+      category: 'write',
+      toolset: 'noop',
+      async execute() { return { ran: true }; },
+    } as unknown as ToolHandler;
+    registry.register(undeclared);
+    const promptUser = vi.fn().mockResolvedValue('deny');
+    const exec = registry.buildExecutor({
+      ...baseCtx(),
+      approvalEngine: new ApprovalEngine('manual', { promptUser }),
+    });
+    const r = await exec({ id: '1', name: 'noop_undeclared', arguments: {} });
+    // Pre-fix (mutates undefined → falsy) the gate was skipped and the tool
+    // ran. Fail-closed: it is gated, prompts, and is denied.
+    expect(r.error).toMatch(/denied/i);
+    expect(promptUser).toHaveBeenCalledOnce();
+  });
+
+  it('12. a URL-bearing tool is APPROVED before any network call is attempted', async () => {
+    const registry = new ToolRegistry();
+    const netWrite: ToolHandler = {
+      schema: { name: 'noop_net_write', description: 'network write', inputSchema: { type: 'object', properties: { url: { type: 'string' } } } },
+      category: 'network',
+      mutates: true,              // mutating → must clear the approval gate
+      toolset: 'noop',
+      async execute() { return { ran: true }; },
+    };
+    registry.register(netWrite);
+    const ssrf = new SSRFProtection(fakeLookup({ 'example.com': ['93.184.216.34'] }));
+    const checkSpy = vi.spyOn(ssrf, 'check');
+    const promptUser = vi.fn().mockResolvedValue('deny');
+    const exec = registry.buildExecutor({
+      ...baseCtx(),
+      approvalEngine: new ApprovalEngine('manual', { promptUser }),
+      ssrfProtection: ssrf,
+    });
+    const r = await exec({ id: '1', name: 'noop_net_write', arguments: { url: 'http://example.com/' } });
+    expect(r.error).toMatch(/denied/i);            // approval denied the tool
+    expect(promptUser).toHaveBeenCalledOnce();
+    // ★ The SSRF check resolves DNS — a network touch. Approval ran FIRST, so a
+    // denied tool never reached it: no hostname resolved, no socket opened.
+    expect(checkSpy).not.toHaveBeenCalled();
+  });
 });
