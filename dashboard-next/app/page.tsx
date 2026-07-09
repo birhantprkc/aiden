@@ -11,6 +11,7 @@ import PricingModal from '../components/PricingModal'
 import ChatHeader from '../components/ChatHeader'
 import Sidebar from '../components/Sidebar'
 import WorkflowView from '../components/WorkflowView'
+import * as aiden from '../lib/aidenClient'
 
 // ── Version ───────────────────────────────────────────────────
 // Single source of truth for display version in the dashboard.
@@ -66,6 +67,37 @@ interface ActivityLog {
   style?:    'ok' | 'err' | 'active' | 'default'
   rawTool?:  string
   rawInput?: Record<string, any>
+}
+
+// ── Activity view ─────────────────────────────────────────────
+// Tool calls + verified/unverified verdicts live here, OUT of the chat
+// conversation. The chat shows the written reply; this shows what ran to
+// produce it. Fed from the v4 event stream (see lib/aidenClient.ts).
+function ActivityView({ logs }: { logs: ActivityLog[] }) {
+  const color = (s?: string) =>
+    s === 'ok' ? 'var(--green)' : s === 'err' ? 'var(--red)' : s === 'active' ? 'var(--orange)' : 'var(--muted3)'
+  return (
+    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '18px 22px' }}>
+      {logs.length === 0 ? (
+        <div style={{ padding: '64px 0', textAlign: 'center', color: 'var(--muted2)', fontSize: 13 }}>
+          No activity yet — tools, verification and progress from a run appear here.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxWidth: 760, margin: '0 auto' }}>
+          {logs.map((l, i) => (
+            <div key={i} style={{
+              display: 'grid', gridTemplateColumns: '20px 1fr auto', gap: 12, alignItems: 'center',
+              padding: '9px 13px', background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10,
+            }}>
+              <span style={{ color: color(l.style), textAlign: 'center', fontWeight: 700 }}>{l.icon}</span>
+              <span style={{ color: 'var(--text2)', fontSize: 13.5, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{l.message}</span>
+              <span style={{ color: 'var(--muted2)', fontSize: 11, fontFamily: 'var(--mono)', whiteSpace: 'nowrap' }}>{l.time}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 interface MiniPromptConfig { type: 'websearch' | 'research' | 'stocks'; placeholder: string }
@@ -4668,7 +4700,7 @@ export default function Home() {
   // ── UI Mode ─────────────────────────────────────────────────
   const [uiMode,         setUIMode]         = useState<UIMode>('focus')
   const [execMode,       setExecMode]       = useState<ExecMode>('auto')
-  const [historyOpen,    setHistoryOpen]    = useState(false)
+  const [historyOpen,    setHistoryOpen]    = useState(true)
   const [liveViewOpen,   setLiveViewOpen]   = useState(false)
   const [activityOpen,   setActivityOpen]   = useState(false)
   const [settingsOpen,   setSettingsOpen]   = useState(false)
@@ -4688,6 +4720,9 @@ export default function Home() {
   // ── Activity / screenshot ───────────────────────────────────
   const [activityLogs,   setActivityLogs]   = useState<ActivityLog[]>([])
   const [screenshot,     setScreenshot]     = useState<string | null>(null)
+  // ── Main view (chat | activity) + the run currently attached to the chat ──
+  const [mainView,       setMainView]       = useState<'chat' | 'activity'>('chat')
+  const activeRunIdRef = useRef<number | null>(null)
 
   // ── Plus menu state ─────────────────────────────────────────
   const [plusMenuOpen,      setPlusMenuOpen]      = useState(false)
@@ -4845,15 +4880,14 @@ export default function Home() {
       if (saved) setConversations(JSON.parse(saved))
     } catch {}
     // Fetch backend sessions and merge in any not already in localStorage
-    fetch('http://localhost:4200/api/sessions')
-      .then(r => r.ok ? r.json() : [])
-      .then((sessions: Array<{id: string; title: string; timestamp: number; messageCount: number; preview: string; channels?: string[]; depth?: number}>) => {
+    aiden.listSessions()
+      .then((sessions) => {
         if (!sessions.length) return
         setConversations(prev => {
           const existingIds = new Set(prev.map((c: Conversation) => c.id))
           const fromBackend = sessions
             .filter(s => !existingIds.has(s.id))
-            .map(s => ({ id: s.id, title: s.title || 'Untitled', timestamp: s.timestamp, messages: [] as Message[], channels: s.channels, depth: s.depth }))
+            .map(s => ({ id: s.id, title: s.label || 'Untitled', timestamp: s.lastActive, messages: [] as Message[] }))
           return fromBackend.length > 0
             ? [...prev, ...fromBackend].sort((a: Conversation, b: Conversation) => b.timestamp - a.timestamp)
             : prev
@@ -4996,7 +5030,8 @@ export default function Home() {
 
   // ── Stop execution ───────────────────────────────────────────
   const stopExecution = useCallback(() => {
-    fetch('http://localhost:4200/api/stop', { method: 'POST' }).catch(() => {})
+    const rid = activeRunIdRef.current
+    if (rid != null) aiden.cancelTask(rid).catch(() => {})
     setIsStreaming(false)
     setThinking(null)
     setIsExecuting(false)
@@ -5016,213 +5051,55 @@ export default function Home() {
     if (!overrideText) setInput('')
     if (!overrideText && inputRef.current) inputRef.current.style.height = 'auto'
     setIsStreaming(true)
-    setThinking({ stage: 'understanding', message: 'Understanding...' })
+    setIsExecuting(true)
+    setThinking({ stage: 'understanding', message: 'Understanding…' })
 
     const thinkingId = `thinking_${Date.now()}`
     setMessages(m => [...m, { id: thinkingId, role: 'assistant', content: '', timestamp: Date.now(), isStreaming: true }])
 
     let fullReply = ''
-    let provider  = ''
+    activeRunIdRef.current = null
 
-    // ── Tool execution tracking for ToolExecutionCard ────────
-    type LiveStep = { tool: string; status: 'running' | 'done' | 'failed'; duration?: number; startTs: number }
-    const liveSteps: LiveStep[] = []
-    let   currentStepIdx = -1
+    const nowTime = () => new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    const pushActivity = (icon: string, message: string, style: ActivityLog['style']) =>
+      setActivityLogs(prev => [...prev.slice(-199), { time: nowTime(), icon, agent: 'Aiden', message, style }])
 
-    const buildPhases = (finalStatus: 'running' | 'done'): Phase[] => {
-      if (liveSteps.length === 0) return []
-      return [{
-        name:   'Executing',
-        index:  1,
-        total:  1,
-        status: finalStatus === 'done' ? 'done' : 'running',
-        steps:  liveSteps.map(s => ({
-          tool:     s.tool,
-          status:   finalStatus === 'done' && s.status === 'running' ? 'done' : s.status,
-          duration: s.duration,
-        })),
-      }]
-    }
-
-    try {
-      const resp = await fetch('http://localhost:4200/api/chat', {
-        method:  'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept':        'text/event-stream',
-        },
-        body: JSON.stringify({
-          message:  userMsg.content,
-          history:  newMessages.slice(-10).map(m => ({ role: m.role, content: m.content })),
-          mode:     execMode,
-          sessionId,
-        }),
-      })
-
-      if (!resp.body) throw new Error('No response body')
-      const reader  = resp.body.getReader()
-      const decoder = new TextDecoder()
-      let   buf     = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buf += decoder.decode(value, { stream: true })
-        const lines = buf.split('\n')
-        buf = lines.pop() ?? ''
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          try {
-            const data = JSON.parse(line.slice(6))
-
-            // Activity events
-            if (data.activity) {
-              if (!isExecuting) setIsExecuting(true)
-              const log: ActivityLog = {
-                time:     new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-                icon:     data.activity.icon    || '▸',
-                agent:    data.activity.agent   || 'Aiden',
-                message:  data.activity.message || '',
-                style:    data.activity.style === 'done'    ? 'ok'     :
-                          data.activity.style === 'error'   ? 'err'    :
-                          data.activity.style === 'act' || data.activity.style === 'tool' ? 'active' : 'default',
-                rawTool:  data.activity.rawTool  || undefined,
-                rawInput: data.activity.rawInput || undefined,
-              }
-              setActivityLogs(prev => [...prev.slice(-99), log])
-
-              // ── Tool card tracking ──────────────────────────────
-              if (data.activity.rawTool) {
-                // New tool starting
-                liveSteps.push({ tool: data.activity.rawTool, status: 'running', startTs: Date.now() })
-                currentStepIdx = liveSteps.length - 1
-                // Live update — show running step in card
-                const phases = buildPhases('running')
-                setMessages(m => m.map(msg =>
-                  msg.id === thinkingId ? { ...msg, phases } : msg
-                ))
-              } else if (
-                (data.activity.style === 'done' || data.activity.style === 'error') &&
-                currentStepIdx >= 0 && liveSteps[currentStepIdx]?.status === 'running'
-              ) {
-                // Previous tool completed
-                const step = liveSteps[currentStepIdx]
-                step.status   = data.activity.style === 'error' ? 'failed' : 'done'
-                step.duration = Date.now() - step.startTs
-                const phases = buildPhases('running')
-                setMessages(m => m.map(msg =>
-                  msg.id === thinkingId ? { ...msg, phases } : msg
-                ))
-              }
-            }
-
-            // Budget turn counter
-            if (data.budget) {
-              setBudget(data.budget)
-            }
-
-            // Thinking stage updates
-            if (data.thinking) {
-              setThinking(data.thinking)
-            }
-
-            // Token
-            if (data.token) {
-              setThinking(null)
-              fullReply += data.token
-              setMessages(m => m.map(msg =>
-                msg.id === thinkingId ? { ...msg, content: fullReply, isStreaming: true } : msg
-              ))
-            }
-
-            // Provider
-            if (data.provider) provider = data.provider
-
-            // Done
-            if (data.done) {
-              setThinking(null)
-              setBudget(null)
-              setIsExecuting(false)
-              setIsStreaming(false)
-              const finalPhases = buildPhases('done')
-              const finalMsg: Message = {
-                id: thinkingId, role: 'assistant',
-                content: fullReply, provider,
-                timestamp: Date.now(), isStreaming: false,
-                phases: finalPhases.length > 0 ? finalPhases : undefined,
-              }
-              setMessages(prev => {
-                const updated = prev.map(m => m.id === thinkingId ? finalMsg : m)
-                saveToConversation(updated)
-                return updated
-              })
-              // Update header model badge to show the provider that actually responded
-              if (provider) setActiveModel(provider)
-            }
-
-            // ── Async task complete — browser notification + in-chat card ──────
-            if (data.event === 'async_complete') {
-              const taskId = data.taskId || '?'
-              const preview = (data.preview || '').slice(0, 120)
-              const elapsed = data.elapsed
-                ? (() => {
-                    const s = Math.floor(data.elapsed / 1000)
-                    const m = Math.floor(s / 60)
-                    return m > 0 ? `${m}m ${s % 60}s` : `${s}s`
-                  })()
-                : ''
-              // In-chat notification message
-              const notifContent = `**⬡ Async task complete${elapsed ? ` (${elapsed})` : ''}**\n${preview}${preview.length >= 120 ? '…' : ''}\n\n*View full result: \`GET /api/async/${taskId}\`*`
-              setMessages(prev => [...prev, {
-                id:        `async_notif_${taskId}`,
-                role:      'assistant' as const,
-                content:   notifContent,
-                timestamp: Date.now(),
-              }])
-              // Browser notification (if permission granted)
-              if (typeof window !== 'undefined' && 'Notification' in window) {
-                if (Notification.permission === 'granted') {
-                  new Notification('Aiden — async task complete', {
-                    body: preview || 'Task finished.',
-                    icon: '/favicon.ico',
-                  })
-                } else if (Notification.permission !== 'denied') {
-                  Notification.requestPermission().then(p => {
-                    if (p === 'granted') {
-                      new Notification('Aiden — async task complete', {
-                        body: preview || 'Task finished.',
-                        icon: '/favicon.ico',
-                      })
-                    }
-                  })
-                }
-              }
-            }
-          } catch {}
-        }
-      }
-    } catch (e: any) {
-      setThinking(null)
-      setIsExecuting(false)
-      setIsStreaming(false)
-      setMessages(m => m.map(msg =>
-        msg.id === thinkingId
-          ? { ...msg, content: fullReply || 'Something went wrong. Please try again.', isStreaming: false }
-          : msg
-      ))
-    } finally {
-      // Guarantee cleanup — if the stream closes without a `done` event, clear state
-      setThinking(null)
-      setIsStreaming(false)
-      setIsExecuting(false)
-      setMessages(m => m.map(msg =>
-        msg.id === thinkingId && msg.isStreaming
-          ? { ...msg, isStreaming: false }
-          : msg
-      ))
-    }
-  }, [input, isStreaming, messages, execMode, sessionId, saveToConversation])
+    // Send onto the v4 safe job path; stream the reply + activity back. Tool calls
+    // and verified/unverified verdicts go to the Activity view, NOT the chat.
+    await aiden.runTask(userMsg.content, {
+      onRunId:    (rid) => { activeRunIdRef.current = rid },
+      onThinking: (stage, message) => setThinking({ stage, message }),
+      onReply:    (chunk) => {
+        setThinking(null)
+        fullReply += chunk
+        setMessages(m => m.map(msg => msg.id === thinkingId ? { ...msg, content: fullReply, isStreaming: true } : msg))
+      },
+      onActivity: (a) => {
+        const style: ActivityLog['style'] =
+          a.status === 'ok' ? 'ok' : (a.status === 'failed' || a.status === 'warn') ? 'err' : 'active'
+        const icon = a.kind === 'verify'
+          ? (a.status === 'ok' ? '✓' : '⚠')
+          : a.status === 'failed' ? '✗' : a.status === 'running' ? '▸' : '✓'
+        pushActivity(icon, a.label + (a.detail ? ` · ${a.detail}` : ''), style)
+      },
+      onTokens: (total) => setBudget({ current: total, max: 0, remaining: 0 }),
+      onDone: (info) => {
+        setThinking(null); setBudget(null); setIsExecuting(false); setIsStreaming(false)
+        const finalContent = fullReply
+          || (info.stopped
+            ? '_Stopped._'
+            : '_Task completed — no written reply was emitted. Open the **Activity** tab to see what ran._')
+        const finalMsg: Message = { id: thinkingId, role: 'assistant', content: finalContent, timestamp: Date.now(), isStreaming: false }
+        setMessages(prev => { const updated = prev.map(m => m.id === thinkingId ? finalMsg : m); saveToConversation(updated); return updated })
+      },
+      onError: (message) => {
+        setThinking(null); setBudget(null); setIsExecuting(false); setIsStreaming(false)
+        setMessages(m => m.map(msg => msg.id === thinkingId
+          ? { ...msg, content: fullReply || `⚠ ${message}`, isStreaming: false }
+          : msg))
+      },
+    })
+  }, [input, isStreaming, messages, saveToConversation])
 
   // ── Quick upload (chat + button) ────────────────────────────
   const handleQuickUpload = useCallback(async (e: ChangeEvent<HTMLInputElement>) => {
@@ -5554,7 +5431,30 @@ export default function Home() {
           transition: 'grid-template-columns 0.3s cubic-bezier(0.22,1,0.36,1)',
         }}>
           <HistorySidebar />
-          <ChatPanel />
+          <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden' }}>
+            {/* Chat | Activity — the conversation stays clean; tools live in Activity */}
+            <div style={{ display: 'flex', gap: 4, padding: '8px 14px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+              {(['chat', 'activity'] as const).map(v => (
+                <button
+                  key={v}
+                  onClick={() => setMainView(v)}
+                  className="nav-btn"
+                  style={{
+                    background: mainView === v ? 'var(--orange2)' : 'transparent',
+                    color: mainView === v ? 'var(--orange)' : 'var(--muted3)',
+                    border: '1px solid ' + (mainView === v ? 'rgba(255,107,53,0.34)' : 'transparent'),
+                    borderRadius: 8, padding: '5px 14px', cursor: 'pointer',
+                    fontFamily: 'var(--sans)', fontSize: 13, fontWeight: 600, textTransform: 'capitalize',
+                  }}>
+                  {v}{v === 'activity' && activityLogs.length ? ` (${activityLogs.length})` : ''}
+                </button>
+              ))}
+            </div>
+            <div style={{ flex: 1, minHeight: 0, display: mainView === 'chat' ? 'flex' : 'none', flexDirection: 'column' }}>
+              <ChatPanel />
+            </div>
+            {mainView === 'activity' && <ActivityView logs={activityLogs} />}
+          </div>
         </div>
         <StatusBar />
         {settingsOpen && <SettingsDrawer />}

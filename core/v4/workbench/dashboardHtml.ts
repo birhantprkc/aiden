@@ -77,6 +77,21 @@ export const WORKBENCH_DASHBOARD_HTML = `<!doctype html>
   .time{color:var(--dim);font-size:11px;white-space:nowrap}
   .empty{padding:64px 20px;text-align:center;color:var(--muted)}
   .empty .k{color:var(--accent)}
+  /* chat composer (write path) */
+  .composer{display:flex;gap:9px;padding:12px 20px;border-top:1px solid var(--line);background:var(--panel)}
+  .composer.hidden{display:none}
+  .composer-input{flex:1;min-width:0;background:#0f0f13;border:1px solid var(--line);color:var(--text);
+    border-radius:8px;padding:9px 12px;font:inherit;outline:none}
+  .composer-input:focus{border-color:var(--accent)}
+  .composer-send{background:var(--accent);color:#180a03;border:none;border-radius:8px;padding:9px 17px;
+    font:inherit;font-weight:600;cursor:pointer}
+  .composer-send:hover{filter:brightness(1.08)}
+  .composer-send:disabled{opacity:.5;cursor:default}
+  .composer-stop{background:transparent;color:var(--err);border:1px solid var(--err);border-radius:8px;
+    padding:9px 15px;font:inherit;font-weight:600;cursor:pointer}
+  .composer-stop:hover{background:rgba(248,113,113,.12)}
+  .composer-stop:disabled{opacity:.5;cursor:default}
+  .composer-stop[hidden]{display:none}
 
   /* ── responsive: sidebar becomes an off-canvas drawer ── */
   .backdrop{display:none}
@@ -91,6 +106,7 @@ export const WORKBENCH_DASHBOARD_HTML = `<!doctype html>
     .hamburger{display:inline-block}
   }
 </style>
+<script>window.__WB_TOKEN__ = '__WORKBENCH_TOKEN__';</script>
 </head>
 <body>
 <div class="app" id="app">
@@ -124,6 +140,11 @@ export const WORKBENCH_DASHBOARD_HTML = `<!doctype html>
       <div class="empty" id="empty">Waiting for activity — run a task in the <span class="k">aiden</span> CLI and it streams here live.</div>
       <ul id="feed"></ul>
     </div>
+    <form class="composer" id="composer" autocomplete="off">
+      <input class="composer-input" id="composer-input" type="text" placeholder="Send a task to Aiden…  (runs safely — risky actions are auto-denied from web)" />
+      <button class="composer-stop" id="composer-stop" type="button" hidden>Stop</button>
+      <button class="composer-send" id="composer-send" type="submit">Send</button>
+    </form>
   </div>
 </div>
 <script>
@@ -136,6 +157,10 @@ export const WORKBENCH_DASHBOARD_HTML = `<!doctype html>
   var viewEl = document.getElementById('view');
   var liveAll = document.getElementById('live-all');
   var sessionsHost = document.getElementById('sessions');
+  // Steer state: the run id of the browser-sent job we can stop, and whether a
+  // just-sent task is still waiting for its run to appear in the feed.
+  var stopBtn = null, activeRunId = null, awaitingRun = false;
+  function showStop(on){ if (stopBtn) stopBtn.hidden = !on; }
 
   function setStatus(txt, live){
     statusEl.className = 'status' + (live ? ' live' : '');
@@ -166,18 +191,32 @@ export const WORKBENCH_DASHBOARD_HTML = `<!doctype html>
                detail:(ok?'done':'failed') + (ev.durationMs!=null ? ' \\u00b7 ' + ev.durationMs + 'ms' : '') };
     }
     if (n === 'ui_task_done')   return { g:'\\u2713', c:'ok',    label:'task done', detail:(pget(ev,'status')||'') };
+    if (n === 'task_cancelled') return { g:'\\u25a0', c:'warn',  label:'job stopped', detail:(pget(ev,'reason')||'cancelled from dashboard') };
     if (n === 'ui_task_update') return { g:'\\u2022', c:'muted', label:'task', detail:(pget(ev,'text')||pget(ev,'step')||'') };
     if (n === 'cost_updated')   return { g:'\\u2211', c:'muted', label:'tokens', detail:((pget(ev,'totalTokens')||0)) + ' total' };
-    if (n === 'needs_confirmation') return { g:'\\u23f8', c:'warn', label:'needs approval', detail:((pget(ev,'tool')||'') + ' ' + (pget(ev,'reason')||'')).trim() };
+    if (n === 'needs_confirmation') return { g:'\\u23f8', c:'warn', label:'needs approval — not available from web yet', detail:((pget(ev,'tool')||'') + ' ' + (pget(ev,'reason')||'')).trim() };
     if (n === 'approval_decision'){
-      var denied = ev.status === 'denied';
-      return { g:denied?'\\u2298':'\\u2713', c:denied?'err':'ok', label:'approval', detail:(pget(ev,'toolName')||'') + ' \\u2192 ' + (ev.status||'') };
+      if (ev.status === 'denied') return { g:'\\u2298', c:'err', label:'needs approval — auto-denied', detail:(pget(ev,'toolName')||'') + ' \\u00b7 safe mode (approvals not available from web yet)' };
+      return { g:'\\u2713', c:'ok', label:'approval', detail:(pget(ev,'toolName')||'') + ' \\u2192 ' + (ev.status||'allowed') };
     }
     if (n.indexOf('ui_approval') === 0) return { g:'\\u23f8', c:'warn', label:'approval request', detail:(pget(ev,'tool')||'') };
     return { g:'\\u00b7', c:'muted', label:(n||'event'), detail:(ev.summary||'') };
   }
+  // Bind the Stop button to the browser-sent job: once a task is sent we watch
+  // the feed for its run to start (any event carrying a runId), then reveal Stop
+  // for that run; a terminal event (done/cancelled) for it hides Stop again.
+  function trackRun(ev){
+    if (!stopBtn || ev.runId == null) return;
+    var n = ev.name || ev.kind || '';
+    if (n === 'ui_task_done' || n === 'task_cancelled'){
+      if (ev.runId === activeRunId){ activeRunId = null; awaitingRun = false; showStop(false); }
+      return;
+    }
+    if (awaitingRun){ activeRunId = ev.runId; showStop(true); }
+  }
   function addEvent(ev){
     empty.style.display = 'none';
+    trackRun(ev);
     var d = describe(ev);
     var li = document.createElement('li'); li.className = 'row';
     var g = document.createElement('span'); g.className = 'glyph ' + d.c; g.textContent = d.g;
@@ -239,6 +278,68 @@ export const WORKBENCH_DASHBOARD_HTML = `<!doctype html>
         sessionsHost.appendChild(li);
       });
     }).catch(function(){ /* keep whatever is shown */ });
+  }
+
+  // ── chat composer (the write path) ──
+  function flashRow(g, c, label, detail){
+    empty.style.display = 'none';
+    var li = document.createElement('li'); li.className = 'row';
+    var gi = document.createElement('span'); gi.className = 'glyph ' + c; gi.textContent = g;
+    var mid = document.createElement('span'); mid.className = 'mid';
+    var nm = document.createElement('span'); nm.className = 'name'; nm.textContent = label;
+    var det = document.createElement('span'); det.className = 'detail'; det.textContent = detail || '';
+    mid.appendChild(nm); mid.appendChild(det);
+    var t = document.createElement('span'); t.className = 'time'; t.textContent = fmtTime(Date.now());
+    li.appendChild(gi); li.appendChild(mid); li.appendChild(t);
+    feed.appendChild(li);
+    feedwrap.scrollTop = feedwrap.scrollHeight;
+  }
+  var token = window.__WB_TOKEN__ || '';
+  var composer = document.getElementById('composer');
+  var composerInput = document.getElementById('composer-input');
+  var composerSend = document.getElementById('composer-send');
+  stopBtn = document.getElementById('composer-stop');
+  function readJson(r){ return r.json().then(function(j){ return { ok:r.ok, status:r.status, j:j }; }, function(){ return { ok:r.ok, status:r.status, j:{} }; }); }
+  if (!token) {
+    composer.classList.add('hidden');   // no token → read-only, no send box + no stop
+  } else {
+    composer.addEventListener('submit', function(e){
+      e.preventDefault();
+      var msg = composerInput.value.trim();
+      if (!msg) return;
+      composerInput.value = '';
+      composerSend.disabled = true;
+      fetch('/api/tasks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-workbench-token': token },
+        body: JSON.stringify({ message: msg }),
+      }).then(readJson).then(function(res){
+        composerSend.disabled = false;
+        if (res.ok) { awaitingRun = true; flashRow('\\u2197', 'run', 'task sent', msg); }
+        else flashRow('\\u2717', 'err', 'send rejected', (res.j && res.j.error) || ('HTTP ' + res.status));
+      }).catch(function(){
+        composerSend.disabled = false;
+        flashRow('\\u2717', 'err', 'send failed', 'network error');
+      });
+    });
+    // Stop the running browser job (token-gated). Minimal steer: one durable
+    // cancel of the run currently attached to the composer.
+    stopBtn.addEventListener('click', function(){
+      if (activeRunId == null) return;
+      var id = activeRunId;
+      stopBtn.disabled = true;
+      fetch('/api/tasks/' + encodeURIComponent(id) + '/cancel', {
+        method: 'POST',
+        headers: { 'x-workbench-token': token },
+      }).then(readJson).then(function(res){
+        stopBtn.disabled = false;
+        if (res.ok) { showStop(false); activeRunId = null; awaitingRun = false; flashRow('\\u25a0', 'warn', 'stop requested', 'run #' + id); }
+        else flashRow('\\u2717', 'err', 'stop rejected', (res.j && res.j.error) || ('HTTP ' + res.status));
+      }).catch(function(){
+        stopBtn.disabled = false;
+        flashRow('\\u2717', 'err', 'stop failed', 'network error');
+      });
+    });
   }
 
   // ── responsive drawer ──

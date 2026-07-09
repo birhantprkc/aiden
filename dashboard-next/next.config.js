@@ -2,13 +2,15 @@
 const path = require('path')
 
 const nextConfig = {
-  // Standalone mode: produces a self-contained server.js in .next/standalone
-  // Required for Electron packaging — no `next start` needed, just `node server.js`
-  output: 'standalone',
+  // Static export: produces a self-contained `out/` of HTML/JS/CSS that the
+  // Aiden workbench bridge serves directly (single origin, alongside /api/*).
+  // No Node server for the dashboard — `aiden web` serves the files.
+  output: 'export',
 
-  // Pin tracing root to this directory so Next.js does NOT nest the output under
-  // a monorepo subdirectory (e.g. standalone/dashboard-next/server.js).
-  // With this set, server.js lands directly at .next/standalone/server.js.
+  // No image optimization server in a static export.
+  images: { unoptimized: true },
+
+  // Pin tracing root to this directory (harmless for export; kept for parity).
   outputFileTracingRoot: path.join(__dirname),
 }
 

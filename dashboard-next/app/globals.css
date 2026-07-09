@@ -19,21 +19,21 @@
   --muted2:  #6e6e6e;
   --muted3:  #9a9a9a;
 
-  /* Accent */
-  --orange:  #f97316;
-  --orange2: rgba(249,115,22,0.10);
-  --orange3: rgba(249,115,22,0.05);
+  /* Accent — Taracod #FF6B35 */
+  --orange:  #FF6B35;
+  --orange2: rgba(255,107,53,0.10);
+  --orange3: rgba(255,107,53,0.05);
   --green:   #22c55e;
   --red:     #ef4444;
   --blue:    #3b82f6;
   --purple:  #8b5cf6;
 
-  /* Fonts */
-  --mono:    var(--font-mono, 'JetBrains Mono', 'Menlo', monospace);
-  --sans:    var(--font-sans, 'Inter', system-ui, sans-serif);
+  /* Fonts — Outfit (display) + DM Mono (numbers) */
+  --mono:    var(--font-mono, 'DM Mono', 'Menlo', monospace);
+  --sans:    var(--font-sans, 'Outfit', system-ui, sans-serif);
 
   /* Legacy compat */
-  --odim:    rgba(249,115,22,0.08);
+  --odim:    rgba(255,107,53,0.08);
 
   /* Effects */
   --glass:        rgba(255,255,255,0.025);

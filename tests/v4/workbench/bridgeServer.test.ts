@@ -14,6 +14,9 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import http from 'node:http';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../../../core/v4/daemon/db/migrations';
 import { createRunStore } from '../../../core/v4/daemon/runStore';
@@ -249,5 +252,214 @@ describe('Workbench dashboard shell + feed', () => {
     const { status, body } = await httpGet(bridge.port, '/api/sessions');
     expect(status).toBe(200);
     expect(JSON.parse(body)).toEqual([]);
+  });
+});
+
+// ── The write path — token-gated POST /api/tasks ─────────────────────────────
+
+function httpPost(port: number, path: string, body: unknown, headers: Record<string, string> = {}): Promise<{ status: number; body: string }> {
+  return new Promise((resolve) => {
+    const data = JSON.stringify(body);
+    const req = http.request(
+      { host: '127.0.0.1', port, path, method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), ...headers } },
+      (res) => { let b = ''; res.setEncoding('utf8'); res.on('data', (c) => (b += c)); res.on('end', () => resolve({ status: res.statusCode ?? 0, body: b })); },
+    );
+    req.write(data); req.end();
+  });
+}
+
+describe('Workbench write path — token-gated POST /api/tasks', () => {
+  const TOKEN = 'secret-token-abc123';
+  function withWrite(sent: Array<{ message: string; sessionId?: string }>) {
+    const enqueue = { enqueue: (t: { message: string; sessionId?: string }) => { sent.push(t); return { accepted: true, triggerEventId: 7 }; } };
+    return startWorkbenchBridge({ reader: runStore, enqueue, token: TOKEN, port: 0, pollMs: 30 });
+  }
+
+  it('★ rejects a write with NO token (401); enqueue NOT called', async () => {
+    const sent: Array<{ message: string }> = []; const b = await withWrite(sent);
+    const r = await httpPost(b.port, '/api/tasks', { message: 'do a thing' });
+    expect(r.status).toBe(401);
+    expect(sent).toHaveLength(0);
+    await b.close();
+  });
+
+  it('rejects a write with a WRONG token (401)', async () => {
+    const sent: Array<{ message: string }> = []; const b = await withWrite(sent);
+    const r = await httpPost(b.port, '/api/tasks', { message: 'x' }, { 'x-workbench-token': 'nope' });
+    expect(r.status).toBe(401);
+    expect(sent).toHaveLength(0);
+    await b.close();
+  });
+
+  it('★ WITH the token, enqueues the task onto the job path (202)', async () => {
+    const sent: Array<{ message: string; sessionId?: string }> = []; const b = await withWrite(sent);
+    const r = await httpPost(b.port, '/api/tasks', { message: 'read the readme' }, { 'x-workbench-token': TOKEN });
+    expect(r.status).toBe(202);
+    expect(JSON.parse(r.body)).toMatchObject({ accepted: true, triggerEventId: 7 });
+    expect(sent).toEqual([{ message: 'read the readme', sessionId: undefined }]);
+    await b.close();
+  });
+
+  it('rejects a cross-origin write even WITH the token (403)', async () => {
+    const sent: Array<{ message: string }> = []; const b = await withWrite(sent);
+    const r = await httpPost(b.port, '/api/tasks', { message: 'x' }, { 'x-workbench-token': TOKEN, Origin: 'http://evil.example.com' });
+    expect(r.status).toBe(403);
+    expect(sent).toHaveLength(0);
+    await b.close();
+  });
+
+  it('write is DISABLED when no token is configured (503)', async () => {
+    const r = await httpPost(bridge.port, '/api/tasks', { message: 'x' }, { 'x-workbench-token': 'anything' });
+    expect(r.status).toBe(503);                              // beforeEach bridge has no token
+  });
+
+  it('the token is injected into the served page (placeholder replaced)', async () => {
+    const b = await startWorkbenchBridge({ reader: runStore, token: TOKEN, port: 0 });
+    const { body } = await httpGet(b.port, '/');
+    expect(body).toContain("window.__WB_TOKEN__ = '" + TOKEN + "'");
+    expect(body).not.toContain('__WORKBENCH_TOKEN__');       // placeholder gone
+    await b.close();
+  });
+
+  it('the page has the chat composer, posts to /api/tasks, and surfaces auto-denial', async () => {
+    const { body } = await httpGet(bridge.port, '/');
+    expect(body).toContain('id="composer"');
+    expect(body).toContain("fetch('/api/tasks'");
+    expect(body).toContain('x-workbench-token');
+    expect(body).toContain('auto-denied');                   // clear "needs approval — auto-denied" surfacing
+  });
+});
+
+// ── The steer path — token-gated POST /api/tasks/:runId/cancel ────────────────
+
+describe('Workbench steer — token-gated POST /api/tasks/:runId/cancel', () => {
+  const TOKEN = 'secret-token-abc123';
+  const enq = { enqueue: () => ({ accepted: true, triggerEventId: 1 }) };
+  function withCancel(calls: number[]) {
+    const cancel = { cancel: (id: number) => { calls.push(id); return { accepted: true, runId: id }; } };
+    return startWorkbenchBridge({ reader: runStore, enqueue: enq, cancel, token: TOKEN, port: 0, pollMs: 30 });
+  }
+
+  it('★ rejects a stop with NO token (401); canceller NOT called', async () => {
+    const calls: number[] = []; const b = await withCancel(calls);
+    const r = await httpPost(b.port, `/api/tasks/${runId}/cancel`, {});
+    expect(r.status).toBe(401);
+    expect(calls).toHaveLength(0);
+    await b.close();
+  });
+
+  it('★ WITH the token, stops the run (202) and calls the canceller with the runId', async () => {
+    const calls: number[] = []; const b = await withCancel(calls);
+    const r = await httpPost(b.port, `/api/tasks/${runId}/cancel`, {}, { 'x-workbench-token': TOKEN });
+    expect(r.status).toBe(202);
+    expect(JSON.parse(r.body)).toMatchObject({ accepted: true, runId });
+    expect(calls).toEqual([runId]);
+    await b.close();
+  });
+
+  it('rejects a cross-origin stop even WITH the token (403)', async () => {
+    const calls: number[] = []; const b = await withCancel(calls);
+    const r = await httpPost(b.port, `/api/tasks/${runId}/cancel`, {}, { 'x-workbench-token': TOKEN, Origin: 'http://evil.example.com' });
+    expect(r.status).toBe(403);
+    expect(calls).toHaveLength(0);
+    await b.close();
+  });
+
+  it('stop is DISABLED when no canceller is wired (503)', async () => {
+    const b = await startWorkbenchBridge({ reader: runStore, enqueue: enq, token: TOKEN, port: 0 });
+    const r = await httpPost(b.port, `/api/tasks/${runId}/cancel`, {}, { 'x-workbench-token': TOKEN });
+    expect(r.status).toBe(503);
+    await b.close();
+  });
+
+  it('★ a real runStore-backed stop marks the run cancelled + surfaces task_cancelled in the feed', async () => {
+    // The exact port `aiden web` wires: setStatus('cancelled') + a feed event.
+    const canceller = {
+      cancel: (id: number) => {
+        runStore.setStatus(id, 'cancelled', { finishReason: 'stopped from workbench web' });
+        runStore.emitEvent(id, 'task_cancelled', { source: 'workbench-web', reason: 'stopped from dashboard' });
+        return { accepted: true, runId: id };
+      },
+    };
+    const b = await startWorkbenchBridge({ reader: runStore, enqueue: enq, cancel: canceller, token: TOKEN, port: 0 });
+    const r = await httpPost(b.port, `/api/tasks/${runId}/cancel`, {}, { 'x-workbench-token': TOKEN });
+    expect(r.status).toBe(202);
+    expect(runStore.get(runId)?.status).toBe('cancelled');   // durably stopped
+    const evs = runStore.listEventsScoped({ scope: 'run_id', runId, limit: 100 });
+    expect(evs.some((e) => e.kind === 'task_cancelled')).toBe(true);   // shown in the live feed
+    await b.close();
+  });
+
+  it('the page has a Stop control that posts to /cancel', async () => {
+    const { body } = await httpGet(bridge.port, '/');
+    expect(body).toContain('id="composer-stop"');
+    expect(body).toContain("'/api/tasks/' + encodeURIComponent(id) + '/cancel'");
+    expect(body).toContain('task_cancelled');                // the feed renders the stop
+  });
+});
+
+// ── Serving the built React dashboard (dashboard-next/out) ────────────────────
+
+describe('Workbench bridge — static React dashboard', () => {
+  const TOKEN = 'static-token-xyz';
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wb-static-'));
+    fs.writeFileSync(path.join(dir, 'index.html'),
+      '<!doctype html><html><head><title>React</title></head><body>Aiden React Dashboard</body></html>');
+    fs.writeFileSync(path.join(dir, 'app.js'), 'console.log("aiden")');
+  });
+  afterEach(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* noop */ } });
+
+  it('★ serves the built index.html at / with the write token injected', async () => {
+    const b = await startWorkbenchBridge({ reader: runStore, token: TOKEN, staticDir: dir, port: 0 });
+    const { status, contentType, body } = await httpGet(b.port, '/');
+    expect(status).toBe(200);
+    expect(contentType).toMatch(/text\/html/);
+    expect(body).toContain('Aiden React Dashboard');
+    expect(body).toContain('window.__WB_TOKEN__="' + TOKEN + '"');   // only the served page holds the token
+    await b.close();
+  });
+
+  it('serves static assets with the right content-type', async () => {
+    const b = await startWorkbenchBridge({ reader: runStore, token: TOKEN, staticDir: dir, port: 0 });
+    const { status, contentType, body } = await httpGet(b.port, '/app.js');
+    expect(status).toBe(200);
+    expect(contentType).toMatch(/javascript/);
+    expect(body).toContain('console.log');
+    await b.close();
+  });
+
+  it('★ falls back to index.html for client-side routes (SPA)', async () => {
+    const b = await startWorkbenchBridge({ reader: runStore, token: TOKEN, staticDir: dir, port: 0 });
+    const { status, body } = await httpGet(b.port, '/some/client/route');
+    expect(status).toBe(200);
+    expect(body).toContain('Aiden React Dashboard');
+    await b.close();
+  });
+
+  it('refuses encoded path traversal out of the static dir (403)', async () => {
+    const b = await startWorkbenchBridge({ reader: runStore, token: TOKEN, staticDir: dir, port: 0 });
+    const { status } = await httpGet(b.port, '/..%2f..%2fpackage.json');
+    expect(status).toBe(403);
+    await b.close();
+  });
+
+  it('keeps the built-in page reachable at /plain', async () => {
+    const b = await startWorkbenchBridge({ reader: runStore, token: TOKEN, staticDir: dir, port: 0 });
+    const { status, body } = await httpGet(b.port, '/plain');
+    expect(status).toBe(200);
+    expect(body).toContain('class="sidebar"');             // the built-in page, not React
+    expect(body).not.toContain('Aiden React Dashboard');
+    await b.close();
+  });
+
+  it('without a staticDir, / still serves the built-in page (unchanged)', async () => {
+    const { status, body } = await httpGet(bridge.port, '/');   // beforeEach bridge has no staticDir
+    expect(status).toBe(200);
+    expect(body).toContain('class="sidebar"');
+    expect(body).not.toContain('Aiden React Dashboard');
   });
 });
