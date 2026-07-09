@@ -1,28 +1,49 @@
 # Aiden Contributor License Agreement
 
-By contributing to the Aiden skills library (taracodlabs/aiden-skills,
-when public), you agree to the following:
+By contributing to **Aiden** (the `taracodlabs/aiden` repository), you agree to
+the following terms for each contribution you submit (a "Contribution").
 
-1. You grant Taracod a perpetual, worldwide, non-exclusive, royalty-free,
-   irrevocable license to use, reproduce, modify, display, perform,
-   sublicense, and distribute your Contribution and such derivative
-   works.
+## 1. License grant
 
-2. You certify that:
-   - You have authority to make the Contribution
-   - The Contribution is your original work, OR you have sufficient
-     rights to submit it under Apache-2.0
-   - Your Contribution does not violate any third party's intellectual
-     property rights
+Contributor grants Taracod Labs / Shiva Deore a perpetual, worldwide,
+irrevocable license to use, reproduce, modify, sublicense, and distribute the
+Contribution, including the right to license it under AGPL-3.0 and any other
+license, including proprietary or commercial terms.
 
-3. Your Contribution will be distributed under the Apache-2.0 license.
+This grant is non-exclusive: you retain all rights to use your own Contribution
+for any purpose.
 
-4. You understand that the Aiden core (outside the skills library) is
-   proprietary and closed-source, and that your CLA does not grant
-   you rights to the core product.
+## 2. Licensing of the project
 
-5. You understand that this CLA does not change your employment status,
-   compensation arrangements, or any other relationship with Taracod.
+The Aiden core is licensed under the **GNU Affero General Public License,
+version 3 (AGPL-3.0)** — it is free and open-source software (see
+[LICENSE](../LICENSE)). Contributions to the core are accepted under AGPL-3.0
+together with the grant in Section 1 above.
 
-To sign: comment "I have read and agree to the Aiden CLA" on any
-PR you submit. The CLA bot will record your agreement.
+Skill contributions under `skills/` are licensed under **Apache-2.0** (see
+[LICENSE-SKILLS.md](../LICENSE-SKILLS.md)); by submitting a skill you agree to
+license it under Apache-2.0 in addition to the grant in Section 1.
+
+## 3. Your representations
+
+You certify that:
+
+- You have the authority to make the Contribution.
+- The Contribution is your original work, or you have sufficient rights to
+  submit it under the licenses in Section 2.
+- The Contribution does not violate any third party's intellectual property
+  rights.
+
+## 4. No change to your relationship
+
+This CLA does not change your employment status, compensation, or any other
+relationship with Taracod Labs.
+
+## How to sign
+
+Comment the following on any pull request you open:
+
+> I have read and agree to the Aiden CLA
+
+The CLA Assistant bot records your agreement. Signing is a one-time step per
+contributor.

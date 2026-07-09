@@ -127,7 +127,7 @@ Skills ship under **Apache-2.0** (see [LICENSE-SKILLS.md](LICENSE-SKILLS.md)), w
 1. Fork the repo, create your branch, commit your changes
 2. Push to your fork and open a PR against `master`
 3. Fill in the PR template — especially **how you tested** and whether there are **breaking changes**
-4. The [CLA Assistant bot](https://cla-assistant.io) will prompt you to sign the Contributor License Agreement on your first PR — this is a one-time step
+4. The [CLA Assistant bot](https://cla-assistant.io) will prompt you to sign the [Contributor License Agreement](.github/CLA.md) on your first PR — this is a one-time step
 5. A maintainer will review within **3–7 business days** (Aiden is solo-maintained; please be patient)
 6. Address review feedback with new commits (don't force-push during review)
 7. Once approved, the maintainer will squash-merge

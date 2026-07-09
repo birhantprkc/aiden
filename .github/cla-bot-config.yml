@@ -1,10 +1,17 @@
 # Configuration for CLA Assistant (https://cla-assistant.io)
-# User installs the GitHub app on taracodlabs/aiden-skills when ready
+# Repository: taracodlabs/aiden
 name: Aiden CLA
 path: /.github/CLA.md
-# Users comment "I have read and agree to the Aiden CLA"
-signaturePath: null  # CLA bot tracks signatures internally
-# Whitelist users who don't need to re-sign (maintainers, bots)
+# Contributors sign by commenting "I have read and agree to the Aiden CLA" on
+# their pull request.
+signaturePath: null  # CLA Assistant tracks signatures internally
+# Contributors who do not need to sign (the maintainer + automation bots).
 allowlist:
+  - shivadeore111-design
+  - shivayxa
   - dependabot[bot]
   - github-actions[bot]
+# NOTE: this file is documentary. CLA Assistant is configured in its own
+# dashboard; enforcement on taracodlabs/aiden requires the maintainer to
+# authorize the CLA Assistant GitHub App on the repository (a manual, one-time
+# step). Confirm the maintainer's GitHub username in the allowlist above.
