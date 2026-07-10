@@ -73,6 +73,7 @@ import type { PromptCaching } from './promptCaching';
 // AIDEN_TCE=0 to disable. Zero
 // behavioral change when unset. See core/v4/turnState.ts.
 import { TurnState, type RecoveryDecision } from './turnState';
+import { handlerMutatesForCall } from './handlerMutates';
 import {
   decideRecoveryAction,
   resolveRetryPolicyConfig,
@@ -1836,7 +1837,7 @@ export class AidenAgent {
             // only tools that error are surfaced via the tool-trail
             // row already; the verifier deliberately stays quiet
             // about them.
-            handlerMutates: this.resolveMutates?.(call.name) ?? false,
+            handlerMutates: handlerMutatesForCall(call, this.resolveMutates),
             // v4.2 Phase 1 — verification surfaces alongside the trace
             // entry for downstream callers (chatSession, loopTrace,
             // future RecoveryReport). Undefined when TCE is off.

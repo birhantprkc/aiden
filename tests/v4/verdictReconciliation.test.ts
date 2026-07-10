@@ -16,22 +16,23 @@ const V_OK   = { ok: true,  confidence: 1, code: 'ok' as const };
 const V_FAIL = { ok: false, confidence: 1, code: 'failed' as const, reason: 'output overflow — result truncated' };
 const mk = (o: Partial<HonestyTraceEntry>): HonestyTraceEntry => ({ name: 'x', result: {}, ...o });
 
-describe('verdict reconciliation — a retried mutating call redeems its earlier failure', () => {
-  // shell_exec #1 fails, shell_exec #2 succeeds at the SAME target (the claimed
-  // artifact), ui_task_done claims success.
-  const trace: HonestyTraceEntry[] = [
-    mk({ name: 'shell_exec', result: { path: 'temp-files-recursive.txt', exitCode: 1 }, handlerMutates: true, verification: V_FAIL }),
-    mk({ name: 'shell_exec', result: { path: 'temp-files-recursive.txt', bytesWritten: 2470915, exitCode: 0 }, handlerMutates: true, verification: V_OK }),
-  ];
-  const uiClaims = [{ name: 'ui_task_done', args: { status: 'success' } }];
-
-  it('decideTaskVerdict → completed (later success at the same target redeems the earlier failure)', () => {
+describe('verdict reconciliation — a retried WRITE redeems its earlier failure', () => {
+  // A failed file_write to X (it DID carry its target path), then a successful
+  // write to the SAME X — the retry lands the claim, so same-target
+  // reconciliation redeems the earlier failure. Unlike shell_exec, a failed
+  // file_write carries a path, so this scenario is actually REACHABLE.
+  //
+  // (This replaced a fictional shell_exec case that handed BOTH calls
+  // path:'temp-files-recursive.txt' — a real failed shell command carries no
+  // path/to/id, so same-target reconciliation can never reach it. That real
+  // trace is covered by shellMutationClassification.test.ts, where the read-only
+  // listing is classified non-mutating per-call instead of being reconciled.)
+  it('decideTaskVerdict → completed (later write success at the same target redeems the earlier failure)', () => {
+    const trace: HonestyTraceEntry[] = [
+      mk({ name: 'file_write', result: { success: false, path: 'report.txt', bytesWritten: 0 },  handlerMutates: true, verification: V_FAIL }),
+      mk({ name: 'file_write', result: { success: true,  path: 'report.txt', bytesWritten: 512 }, handlerMutates: true, verification: V_OK }),
+    ];
     expect(decideTaskVerdict(trace).verdict).toBe('completed');
-  });
-
-  it('recordOutcomes → no claim_contradicted (a superseded shell_exec failure does not contradict a success claim)', () => {
-    const events = new HonestyEnforcement('detect').recordOutcomes(trace, uiClaims);
-    expect(events.some((e) => e.kind === 'claim_contradicted')).toBe(false);
   });
 });
 
