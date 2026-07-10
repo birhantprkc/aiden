@@ -25,6 +25,7 @@ const TerminalRenderer: new (opts?: unknown) => unknown = require('marked-termin
 import { SkinEngine, getSkinEngine, type ColorKind } from './skinEngine';
 import { visibleLength, truncateVisible } from './box';
 import { glyphs } from './design/tokens';
+import { clearLinesUpSeq } from './display/cursorSeq';
 import {
   iconForTool as trailIconForTool,
   padVerb,
@@ -2262,9 +2263,10 @@ export class Display {
     if (!hasStructure) return;
 
     try {
-      // \x1b[<n>F = cursor-up-and-to-column-0 N times.
-      // \x1b[J   = erase from cursor to end of screen.
-      this.out.write(`\x1b[${lines}F\x1b[J`);
+      // BOUNDED rerender erase: move up `lines` to the block start and clear
+      // EXACTLY those lines — never `\x1b[J` (erase-to-end-of-screen), so a
+      // re-render can't wipe anything parked below the stream's footprint.
+      this.out.write(clearLinesUpSeq(lines));
       const formatted = this.markdown(buffered).trimEnd();
       // v4.1.4 reply-quality polish: same detect-and-skip indent + wrap
       // as agentTurn so streamed and one-shot replies share the visible
@@ -2354,9 +2356,10 @@ export class Display {
     const rerenderableLines = countNewlines(split.rerenderable);
     const carryLines        = this.streamLineCount - rerenderableLines;
     if (this.out.isTTY && this.streamLineCount > 0) {
-      // \x1b[<n>F = cursor-up-and-to-column-0 N times.
-      // \x1b[J   = erase from cursor to end of screen.
-      this.out.write(`\x1b[${this.streamLineCount}F\x1b[J`);
+      // BOUNDED rerender erase (see clearLinesUpSeq): clears EXACTLY the
+      // streamLineCount lines this chunk wrote, never `\x1b[J`, so nothing
+      // parked below the stream is wiped.
+      this.out.write(clearLinesUpSeq(this.streamLineCount));
     }
     // Rerender the closed prefix (handles its own heuristic gate
     // internally — a prefix without structure stays raw, which is

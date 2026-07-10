@@ -526,7 +526,7 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     d.streamComplete();
     const total = chunks.join('');
     // Eraser ANSI fires (\x1b[<n>F\x1b[J).
-    expect(total).toMatch(/\x1b\[\d+F\x1b\[J/);
+    expect(total).toMatch(/\x1b\[\d+F\x1b\[2K/);
     // Rerendered output contains the formatted body (indented per the
     // streamComplete pattern). The exact format depends on marked but
     // the heading text must survive.
@@ -548,7 +548,7 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     d.toolRow('web_search', { query: 'q' });
     const total = chunks.join('');
     // Eraser fired (chunk got rerendered).
-    expect(total).toMatch(/\x1b\[\d+F\x1b\[J/);
+    expect(total).toMatch(/\x1b\[\d+F\x1b\[2K/);
     // Rerendered markdown survives. Heading uppercased by the renderer.
     const stripped = stripAnsi(total);
     expect(stripped.toLowerCase()).toContain('plan');
@@ -578,7 +578,7 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     d.streamComplete();
     // Final chunk rerendered too — eraser ANSI present in the streamComplete output.
     const totalAtCompletion = chunks.join('');
-    expect(totalAtCompletion).toMatch(/\x1b\[\d+F\x1b\[J/);
+    expect(totalAtCompletion).toMatch(/\x1b\[\d+F\x1b\[2K/);
     // Heading uppercased by renderer; match case-insensitively.
     expect(stripAnsi(totalAtCompletion).toLowerCase()).toContain('chunk 3');
   });
@@ -591,7 +591,7 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     d.toolRow('web_search', { query: 'q' });
     // No eraser fired for the chunk — saves a flicker on short replies.
     const afterToolRow = chunks.join('');
-    expect(afterToolRow).not.toMatch(/\x1b\[\d+F\x1b\[J/);
+    expect(afterToolRow).not.toMatch(/\x1b\[\d+F\x1b\[2K/);
     // But the trail row still printed (interrupt path still fenced
     // the chunk with a newline so the row landed cleanly).
     expect(stripAnsi(afterToolRow)).toMatch(/┊/);
@@ -612,7 +612,7 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     d.streamComplete();
     const total = chunks.join('');
     // Rerender fired (eraser ANSI present).
-    expect(total).toMatch(/\x1b\[\d+F\x1b\[J/);
+    expect(total).toMatch(/\x1b\[\d+F\x1b\[2K/);
     // v4.5 TUI polish — paintEmphasis emits bold-on (\x1b[1m) and
     // bold-off (\x1b[22m) only. Underline was dropped (was making
     // bulleted list items look like clickable links per v4.5 polish
@@ -634,7 +634,7 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     d.streamComplete();
     const total = chunks.join('');
     // Rerender fired.
-    expect(total).toMatch(/\x1b\[\d+F\x1b\[J/);
+    expect(total).toMatch(/\x1b\[\d+F\x1b\[2K/);
     // `npm test` content survives the rerender (renderer wraps it in
     // accent-colored backticks but the inner text is preserved).
     expect(stripAnsi(total)).toContain('npm test');
@@ -652,7 +652,7 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     d.streamComplete();
     const completionOnly = chunks.slice(beforeComplete).join('');
     // streamComplete should write nothing extra — no rerender fired.
-    expect(completionOnly).not.toMatch(/\x1b\[\d+F\x1b\[J/);
+    expect(completionOnly).not.toMatch(/\x1b\[\d+F\x1b\[2K/);
     // Original prose, including the literal `**`, present in the
     // streamPartial output that came before.
     expect(stripAnsi(chunks.join(''))).toContain('2 ** 3');
@@ -664,7 +664,7 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     chunks.length = 0;
     d.streamComplete();
     const total = chunks.join('');
-    expect(total).not.toMatch(/\x1b\[\d+F\x1b\[J/);
+    expect(total).not.toMatch(/\x1b\[\d+F\x1b\[2K/);
   });
 
   it('triple-backtick fence (existing pattern) takes precedence over inline-code: no double-trigger', () => {
@@ -676,7 +676,7 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     chunks.length = 0;
     d.streamComplete();
     const total = chunks.join('');
-    expect(total).toMatch(/\x1b\[\d+F\x1b\[J/);
+    expect(total).toMatch(/\x1b\[\d+F\x1b\[2K/);
   });
 
   it('markdown parse failure: raw text fallback prevents body from vanishing', () => {
@@ -714,7 +714,7 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     // empty or at most a trailing newline cleanup — definitely no
     // eraser sequence.
     const total = chunks.join('');
-    expect(total).not.toMatch(/\x1b\[\d+F\x1b\[J/);
+    expect(total).not.toMatch(/\x1b\[\d+F\x1b\[2K/);
   });
 
   it('non-TTY: commitStreamChunk never fires the eraser even with structure', () => {
@@ -724,7 +724,7 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     d.toolRow('web_search', { query: 'q' });
     // tryRerenderInPlace early-returns on !isTTY — no eraser written
     // and the raw streamed text stays as the only output for that chunk.
-    expect(chunks.join('')).not.toMatch(/\x1b\[\d+F\x1b\[J/);
+    expect(chunks.join('')).not.toMatch(/\x1b\[\d+F\x1b\[2K/);
   });
 
   // ── Fail row ────────────────────────────────────────────────────────
@@ -1152,7 +1152,7 @@ describe('Display v4.1.4 F-B1 wrap-aware row counter', () => {
 
   function findEraserCount(s: string): number | null {
     // eslint-disable-next-line no-control-regex
-    const m = s.match(/\x1b\[(\d+)F\x1b\[J/);
+    const m = s.match(/\x1b\[(\d+)F\x1b\[2K/);
     return m ? parseInt(m[1]!, 10) : null;
   }
 
