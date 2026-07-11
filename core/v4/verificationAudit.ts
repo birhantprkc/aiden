@@ -30,9 +30,10 @@ import { createHash, randomBytes } from 'node:crypto';
 import path from 'node:path';
 
 import type { AidenPaths } from './paths';
-import type { TaskVerificationFailure } from './taskVerification';
-import type { ShadowClaimDetail } from './claimVerifier';
+import { computeTaskFinalization, type TaskVerificationFailure } from './taskVerification';
+import { runShadowClaimVerifierDetailed, type ShadowClaimDetail } from './claimVerifier';
 import type { SnapshotPair } from './temporalEvidence';
+import type { HonestyTraceEntry } from '../../moat/honestyEnforcement';
 import {
   compareVerifiers,
   makeResourceDigester,
@@ -117,6 +118,75 @@ export function recordVerifierDivergence(args: {
     return record;
   } catch {
     return null; // a comparison fault must never break the turn
+  }
+}
+
+/** The authoritative finalization output shape (from computeTaskFinalization). */
+type FinalizationOutput = ReturnType<typeof computeTaskFinalization>;
+
+/**
+ * Project the AUTHORITATIVE finalization output to the comparator's legacy view.
+ * The single projection both seams use — so the recorded legacy verdict is
+ * exactly the finalization the user was shown, never a phantom.
+ */
+export function projectLegacy(fin: FinalizationOutput): LegacyFinalizationView {
+  return {
+    status: fin.status,
+    failures: fin.evidence.failures,
+    handleCodes: fin.evidence.handles.map((h) => h.code).filter((c): c is string => !!c),
+  };
+}
+
+/** Inputs to compute a legacy verdict fresh from the trace (headless path). */
+export interface TurnFinalizeInputs {
+  finishReason: string;
+  declaredStatus?: string | null;
+  approvalMode?: string;
+  fileExists?: (p: string) => boolean;
+}
+
+/**
+ * The ONE shared divergence-recording path both finalize seams call. Given a
+ * turn's trace it (1) obtains the legacy verdict — either a precomputed
+ * `legacyView` (the interactive seam passes the AUTHORITATIVE fin the user saw)
+ * or by computing `computeTaskFinalization` fresh from the trace (the headless
+ * one-shot, which surfaces no task verdict, so a fresh computation is the honest
+ * legacy verdict, not a phantom) — (2) runs the shadow claim verifier over the
+ * same trace, and (3) records the classified divergence locally. ONE
+ * implementation, so the two seams cannot drift. Fault-isolated: returns null,
+ * never throws, never blocks the turn.
+ */
+export function recordTurnDivergence(args: {
+  paths: AidenPaths;
+  cwd: string;
+  now: number;
+  turnId: string;
+  taskId?: string;
+  trace: HonestyTraceEntry[];
+  /** The interactive seam passes this (projected from its authoritative fin). */
+  legacyView?: LegacyFinalizationView;
+  /** The headless seam passes these; the helper computes the legacy verdict. */
+  finalize?: TurnFinalizeInputs;
+}): DivergenceComparisonRecord | null {
+  try {
+    let legacy: LegacyFinalizationView;
+    if (args.legacyView) {
+      legacy = args.legacyView;
+    } else if (args.finalize) {
+      const fin = computeTaskFinalization(
+        { finishReason: args.finalize.finishReason, toolCallTrace: args.trace, declaredStatus: args.finalize.declaredStatus ?? null },
+        { approvalMode: args.finalize.approvalMode, fileExists: args.finalize.fileExists, now: args.now },
+      );
+      legacy = projectLegacy(fin);
+    } else {
+      return null; // neither a view nor inputs — nothing to compare against
+    }
+    const detail = runShadowClaimVerifierDetailed(args.trace);
+    return recordVerifierDivergence({
+      paths: args.paths, cwd: args.cwd, now: args.now, turnId: args.turnId, taskId: args.taskId, legacy, detail,
+    });
+  } catch {
+    return null; // a finalize-comparison fault must never break the turn
   }
 }
 

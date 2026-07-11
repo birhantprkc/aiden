@@ -28,7 +28,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { Command } from 'commander';
-import { promises as fs, watch as fsWatch } from 'node:fs';
+import { promises as fs, watch as fsWatch, existsSync } from 'node:fs';
 import path from 'node:path';
 
 import { ChatSession } from './chatSession';
@@ -57,6 +57,7 @@ import {
   ensureAidenDirsExist,
   type AidenPaths,
 } from '../../core/v4/paths';
+import { recordTurnDivergence } from '../../core/v4/verificationAudit';
 import { ensureSoulMdSeeded } from '../../core/v4/soulSeed';
 import { setVisionProvider } from '../../core/v4/visionClient';
 import { ConfigManager, resolveConfiguredAutonomyLevel } from '../../core/v4/config';
@@ -116,6 +117,7 @@ import {
 import {
   HonestyEnforcement,
   type HonestyMode,
+  type HonestyTraceEntry,
 } from '../../moat/honestyEnforcement';
 import {
   SkillTeacher,
@@ -3716,12 +3718,14 @@ export interface AgentRuntime {
 // agent.runConversation([userTurn]) — without booting the REPL/TUI, the
 // greeter, the paste interceptor, watchers, or channel polling.
 
-/** Loose structural shape of the one turn we need — lets tests pass a mock. */
+/** Loose structural shape of the one turn we need — lets tests pass a mock.
+ *  `toolCallTrace` carries the REAL HonestyTraceEntry[] (previously under-typed
+ *  to `{ error? }[]`) so the divergence audit can finalize + compare over it. */
 interface OneShotAgent {
   runConversation(history: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>): Promise<{
     finalContent?:  string;
     finishReason?:  string;
-    toolCallTrace?: Array<{ error?: string }>;
+    toolCallTrace?: HonestyTraceEntry[];
   }>;
 }
 
@@ -3734,6 +3738,11 @@ export interface OneShotDeps {
   writeErr?: (s: string) => void;
   /** Best-effort resource cleanup, always awaited (finally). */
   teardown?: () => Promise<void>;
+  /** When set, the shadow verdict-divergence audit runs after the turn (same
+   *  local JSONL as the interactive seam). Absent ⇒ no audit, no I/O. */
+  paths?:    AidenPaths;
+  /** Working dir for path minimization + the on-disk artifact check. */
+  cwd?:      string;
 }
 
 /**
@@ -3752,6 +3761,28 @@ export async function executeOneShotTurn(deps: OneShotDeps): Promise<number> {
     const answer = result.finalContent ?? '';
     // stdout carries ONLY the answer (newline-terminated for pipe hygiene).
     out(answer.endsWith('\n') ? answer : `${answer}\n`);
+
+    // Dual-run Slice 1 — the headless one-shot runs the SAME shadow verdict-
+    // divergence audit the interactive seam does, via the ONE shared helper.
+    // Headless surfaces no task verdict, so the legacy verdict is computed fresh
+    // from the trace (never a phantom). Fault-isolated — never affects the turn.
+    if (deps.paths) {
+      const cwd = deps.cwd ?? process.cwd();
+      recordTurnDivergence({
+        paths:  deps.paths,
+        cwd,
+        now:    Date.now(),
+        turnId: 'oneshot',
+        trace:  result.toolCallTrace ?? [],
+        finalize: {
+          finishReason: result.finishReason ?? 'stop',
+          fileExists: (p) => {
+            try { return existsSync(path.isAbsolute(p) ? p : path.resolve(cwd, p)); }
+            catch { return false; }
+          },
+        },
+      });
+    }
 
     // Surface tools denied by the auto-deny policy so the output isn't
     // silently incomplete. Matches the executor's denial marker
@@ -3808,6 +3839,10 @@ export async function runQuery(
   return executeOneShotTurn({
     agent:  runtime.agent as unknown as OneShotAgent,
     prompt,
+    // Dual-run Slice 1 — enable the shadow divergence audit on the headless
+    // seam (the interactive REPL wires it via ChatSession). Same local JSONL.
+    paths:  runtime.paths,
+    cwd:    process.cwd(),
     teardown: async () => {
       // Same discipline as runInteractiveChat's shutdown, plus process.exit
       // in the caller guarantees no lingering-handle hang (memory #29).

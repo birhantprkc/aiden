@@ -22,8 +22,7 @@
 import type { AidenAgent } from '../../core/v4/aidenAgent';
 import { buildTurnRuntimeContext } from '../../core/v4/turnRuntimeContext';
 import { computeTaskFinalization } from '../../core/v4/taskVerification';
-import { runShadowClaimVerifierDetailed, type TaskEvaluation } from '../../core/v4/claimVerifier';
-import { recordVerifierDivergence } from '../../core/v4/verificationAudit';
+import { recordTurnDivergence, projectLegacy } from '../../core/v4/verificationAudit';
 import {
   emitArtifactVerified, emitCostUpdated, emitAutonomyChanged, type PillarEventSink,
 } from '../../core/v4/pillarEvents';
@@ -536,13 +535,6 @@ export class ChatSession implements ChatSessionLike {
   private totalUsage = { inputTokens: 0, outputTokens: 0 };
   private startedAt = Date.now();
   private queuedSystemPrompts: string[] = [];
-  /**
-   * P1B-1 shadow (NON-AUTHORITATIVE) — the last turn's claim-verifier
-   * evaluation, computed alongside the legacy verdict. Never persisted, never
-   * rendered, consumed by no production path; held only so the shadow pipeline
-   * is exercised on real turns (and inspectable for the eventual P1B flip).
-   */
-  private _shadowClaimEval?: TaskEvaluation;
   private modelMetadata: ModelMetadata;
   /**
    * Phase 22 Task 4: status-bar right-most segment state. `'ready'`
@@ -2288,33 +2280,43 @@ export class ChatSession implements ChatSessionLike {
       // A model-declared ui_task_done failure finalizes as `failed`
       // regardless of finishReason — a declared failure is never
       // upgraded. Non-`stop` finishes route to 'failed' as before.
-      if (replTaskStore && replTaskId !== null) {
+      // v4.13 Gap 4 — the REPL and the daemon runner share ONE finalization
+      // policy (computeTaskFinalization): status + evidence envelope + job-card.
+      // Computed ONCE here (pure) so the task-row persistence AND the dual-run
+      // divergence audit use the SAME verdict the user is shown — never a
+      // phantom legacy verdict the user didn't see.
+      const declaredStatus =
+        declaredTaskDone && typeof (declaredTaskDone as Record<string, unknown>).status === 'string'
+          ? String((declaredTaskDone as Record<string, unknown>).status)
+          : null;
+      let _fin: ReturnType<typeof computeTaskFinalization> | undefined;
+      try {
+        _fin = computeTaskFinalization(
+          {
+            finishReason:   result.finishReason,
+            toolCallTrace:  result.toolCallTrace,
+            declaredStatus,
+          },
+          {
+            approvalMode: this.opts.approvalEngine.getMode(),
+            // Part b — confirm a claimed written artifact is actually on disk
+            // before the verdict trusts it. Relative paths resolve against the
+            // session cwd, matching how the tool executor resolved them.
+            fileExists: (p) => {
+              try { return existsSync(path.isAbsolute(p) ? p : path.resolve(process.cwd(), p)); }
+              catch { return false; }
+            },
+          },
+        );
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[tasks] failed to compute finalization:',
+          err instanceof Error ? err.message : String(err));
+      }
+
+      if (replTaskStore && replTaskId !== null && _fin) {
+        const fin = _fin;
         try {
-          // v4.13 Gap 4 — the REPL and the daemon runner share ONE
-          // finalization policy (computeTaskFinalization): status +
-          // evidence envelope + job-card, all landing in a single
-          // finalize UPDATE. The REPL keeps its user-facing surfaces.
-          const declaredStatus =
-            declaredTaskDone && typeof (declaredTaskDone as Record<string, unknown>).status === 'string'
-              ? String((declaredTaskDone as Record<string, unknown>).status)
-              : null;
-          const fin = computeTaskFinalization(
-            {
-              finishReason:   result.finishReason,
-              toolCallTrace:  result.toolCallTrace,
-              declaredStatus,
-            },
-            {
-              approvalMode: this.opts.approvalEngine.getMode(),
-              // Part b — confirm a claimed written artifact is actually on disk
-              // before the verdict trusts it. Relative paths resolve against the
-              // session cwd, matching how the tool executor resolved them.
-              fileExists: (p) => {
-                try { return existsSync(path.isAbsolute(p) ? p : path.resolve(process.cwd(), p)); }
-                catch { return false; }
-              },
-            },
-          );
           // v4.14 Pillar 5 Slice C — artifact_verified: the Pillar-3 verdict +
           // evidence-handle count, onto the live + durable event stream.
           try {
@@ -2336,30 +2338,6 @@ export class ChatSession implements ChatSessionLike {
             replTaskStore.setStatus(replTaskId, 'pending_verification');
           }
           replTaskStore.finalizeVerification(replTaskId, fin.status, fin.evidence, fin.jobCard);
-          // P1B-1 shadow + Dual-run Slice 1 — run the claim verifier alongside
-          // the legacy verdict and CLASSIFY the divergence into a local audit
-          // record. NON-AUTHORITATIVE: legacy stays user-authoritative; the
-          // record is appended to a local JSONL, read by nobody, no network.
-          // Fault-isolated end-to-end — never breaks finalize.
-          try {
-            const shadow = runShadowClaimVerifierDetailed(result.toolCallTrace ?? []);
-            this._shadowClaimEval = shadow.evaluation;
-            if (this.opts.paths) {
-              recordVerifierDivergence({
-                paths:  this.opts.paths,
-                cwd:    process.cwd(),
-                now:    Date.now(),
-                turnId: String(replRunId ?? replTaskId ?? 'turn'),
-                taskId: replTaskId != null ? String(replTaskId) : undefined,
-                legacy: {
-                  status:      fin.status,
-                  failures:    fin.evidence.failures,
-                  handleCodes: fin.evidence.handles.map((h) => h.code).filter((c): c is string => !!c),
-                },
-                detail: shadow,
-              });
-            }
-          } catch { /* shadow comparison must never break the turn */ }
           if (result.finishReason === 'stop' && !(declaredStatus && declaredStatus !== 'success')) {
             if (fin.status === 'verification_failed') {
               const what = fin.evidence.failures
@@ -2380,6 +2358,24 @@ export class ChatSession implements ChatSessionLike {
           console.warn('[tasks] failed to finalize REPL task row:',
             err instanceof Error ? err.message : String(err));
         }
+      }
+
+      // Dual-run Slice 1 — shadow verdict-divergence audit. Gated on paths ONLY
+      // (DECOUPLED from the task store), so it fires on every finalized turn —
+      // including turns with no task-lite store, and matching the headless
+      // one-shot seam. Uses the SAME authoritative fin the user was shown
+      // (projectLegacy), classified + appended to a local JSONL by the ONE
+      // shared helper both seams call. Fault-isolated — never breaks the turn.
+      if (this.opts.paths && _fin) {
+        recordTurnDivergence({
+          paths:      this.opts.paths,
+          cwd:        process.cwd(),
+          now:        Date.now(),
+          turnId:     String(replRunId ?? replTaskId ?? 'turn'),
+          taskId:     replTaskId != null ? String(replTaskId) : undefined,
+          trace:      result.toolCallTrace ?? [],
+          legacyView: projectLegacy(_fin),
+        });
       }
       // Clear the shared ref so a subsequent turn (or stray
       // spawn/fanout dispatched between turns from a slash command
