@@ -47,7 +47,17 @@ export function resourcesOf(record: CommandRecord): ResourceRef[] {
 // resource wins) — it never erases the earlier temporal truth, which the ledger
 // retains in append order.
 
-export type EvidenceKind = 'resource_touch' | 'exit_code' | 'error' | 'denied' | 'interrupted';
+export type EvidenceKind =
+  | 'resource_touch' | 'exit_code' | 'error' | 'denied' | 'interrupted'
+  // P1B-2A — before/after state observations (temporalEvidence.ts populates them).
+  | 'snapshot_pre' | 'snapshot_post';
+
+/**
+ * Lifecycle phase of an observation. ADDITIVE: the original five kinds carry no
+ * `phase` and default to `'execution'` via `phaseOf` — so nothing the existing
+ * `buildEvidenceLedger` appends changed. Only the snapshot kinds set it.
+ */
+export type EvidencePhase = 'pre_state' | 'execution' | 'post_state' | 'verification';
 
 export interface EvidenceEntry {
   /** Monotonic append order — the temporal axis. */
@@ -55,6 +65,8 @@ export interface EvidenceEntry {
   /** Which command execution produced this observation. */
   readonly executionId: CommandId;
   readonly kind: EvidenceKind;
+  /** Lifecycle phase. Absent on the original five kinds ⇒ `'execution'` (phaseOf). */
+  readonly phase?: EvidencePhase;
   /** Absent for execution-only evidence (exit_code / interrupted). */
   readonly resource?: ResourceId;
   readonly interaction?: ResourceRef['interaction'];
@@ -64,6 +76,14 @@ export interface EvidenceEntry {
   /** Execution evidence — kept on the EXECUTION, never treated as a resource. */
   readonly exitCode?: number;
   readonly detail?: string;
+  /** Opaque snapshot payload for `snapshot_pre`/`snapshot_post` (a
+   *  `SnapshotObservation` from temporalEvidence; P1B-1 does not interpret it). */
+  readonly snapshot?: unknown;
+}
+
+/** The phase of an observation, defaulting the original five kinds to 'execution'. */
+export function phaseOf(e: EvidenceEntry): EvidencePhase {
+  return e.phase ?? 'execution';
 }
 
 /** Append-only ledger. Entries are frozen; nothing is ever removed or rewritten. */
