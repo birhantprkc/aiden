@@ -126,6 +126,12 @@ function tokenFile(paths: AidenPaths, provider: string): string {
   return path.join(authDir(paths), `${safe}.json`);
 }
 
+/** Public accessor for a provider's on-disk token path — for diagnostics and
+ *  cleanup messaging. Does not read or create the file. */
+export function tokenFilePath(paths: AidenPaths, provider: string): string {
+  return tokenFile(paths, provider);
+}
+
 /** Produce the encrypted on-disk record for a token bundle. */
 function encrypt(plain: string): OnDiskShape {
   const key = deriveKey();

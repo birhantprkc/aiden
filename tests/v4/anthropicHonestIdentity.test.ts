@@ -64,6 +64,24 @@ describe('Anthropic API-key requests carry an honest Aiden identity (no CLI impe
     expect(headers['x-app']).toBeUndefined();
   });
 
+  // Full wire-header capture — the deterministic half of the P0 smoke. Asserts
+  // exactly what goes on the wire, which a bundle string-grep cannot prove.
+  it('full header capture: exact honest identity + no impersonation fingerprint', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
+    );
+    await new AnthropicAdapter(apiKeyOpts).call({ messages: [userMsg('hi')], tools: [] });
+    const headers = fetchMock.mock.calls[0][1].headers as Record<string, string>;
+    expect(headers['user-agent']).toBe(`aiden/${VERSION}`);   // dynamic, from core/version
+    expect(headers['x-app']).toBeUndefined();                  // no billing fingerprint
+    expect(headers['anthropic-beta']).toBeUndefined();         // no OAuth beta flags
+    expect(headers['x-api-key']).toBe('sk-ant-test');          // API-key auth
+    expect(headers['Authorization']).toBeUndefined();          // never a bearer OAuth token
+    // No foreign-CLI fingerprint substring in ANY header value (explicit needle).
+    const allValues = Object.values(headers).join('\n').toLowerCase();
+    expect(allValues).not.toContain('claude-cli');
+  });
+
   it('does not inject a spoofed CLI identity block — system stays a flat string', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),

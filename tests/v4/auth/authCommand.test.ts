@@ -290,3 +290,43 @@ describe('formatRelativeExpiry', () => {
     );
   });
 });
+
+describe('/auth cleanup — purge a removed-provider orphan (scoped, never a delete-any path)', () => {
+  it('removes a leftover claude-pro token', async () => {
+    const { ctx, display } = await buildCtx();
+    await saveTokens(ctx.paths!, {
+      provider: 'claude-pro', accessToken: 'AT', expiresAtMs: Date.now() + 3600_000,
+    });
+    expect(await hasTokens(ctx.paths!, 'claude-pro')).toBe(true);
+    ctx.args = ['cleanup', 'claude-pro'];
+    await auth.handler(ctx);
+    expect(await hasTokens(ctx.paths!, 'claude-pro')).toBe(false);
+    expect(display.out.join('\n')).toMatch(/removed|cleaned/i);
+  });
+
+  it('HARD GUARD: refuses a live provider and leaves its token intact', async () => {
+    const { ctx, display } = await buildCtx();
+    await saveTokens(ctx.paths!, {
+      provider: 'chatgpt-plus', accessToken: 'AT', expiresAtMs: Date.now() + 3600_000,
+    });
+    ctx.args = ['cleanup', 'chatgpt-plus'];
+    await auth.handler(ctx);
+    expect(await hasTokens(ctx.paths!, 'chatgpt-plus')).toBe(true);
+    expect(display.errs.join('\n') + display.out.join('\n')).toMatch(/removed provider|not a removed|only applies/i);
+  });
+});
+
+describe('/auth status — surfaces removed-provider orphans distinctly', () => {
+  it('shows a "removed — run cleanup" line when a claude-pro orphan exists', async () => {
+    const { ctx, display } = await buildCtx();
+    await saveTokens(ctx.paths!, {
+      provider: 'claude-pro', accessToken: 'AT', expiresAtMs: Date.now() + 3600_000,
+    });
+    ctx.args = ['status'];
+    await auth.handler(ctx);
+    const text = display.out.join('\n');
+    expect(text).toContain('claude-pro');
+    expect(text).toMatch(/removed/i);
+    expect(text).toContain('cleanup');
+  });
+});

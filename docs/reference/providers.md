@@ -75,6 +75,19 @@ For Anthropic models, use the API-key `anthropic` provider above.
 | **Notes** | Subscription routing via OpenAI's Codex / Responses API. Refresh happens automatically. |
 | **Env var fallback** | None — OAuth-only. |
 
+### Removed: `claude-pro` (Claude subscription)
+
+The Claude Pro/Max subscription login was removed in 4.14.8 — it required
+impersonating another vendor's CLI. Use the API-key `anthropic` provider for
+Claude models. If you had signed in, Aiden surfaces the leftover token at
+startup and in `/auth status`; purge it with:
+
+```
+aiden auth cleanup claude-pro      # or, in the REPL: /auth cleanup claude-pro
+```
+
+Nothing is deleted without your explicit choice.
+
 ---
 
 ## Free-tier API key providers

@@ -137,6 +137,11 @@ import {
   type BillingTier,
   type PaidFallbackConsent,
 } from '../../core/v4/billingGuard';
+import {
+  REMOVED_OAUTH_PROVIDERS,
+  cleanupRemovedProviderToken,
+  announceRemovedProviderOrphans,
+} from '../../core/v4/auth/removedProviders';
 import { isMcpServeMode } from './uiBuild';
 import { MemoryGuard } from '../../moat/memoryGuard';
 import { SSRFProtection } from '../../moat/ssrfProtection';
@@ -595,6 +600,33 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       // (0 when healthy, 1 on failure) so scripts/CI can detect a failing
       // doctor. Mirrors the explicit exit trigger/cron/mcp/artifacts use.
       process.exit();
+    });
+
+  program
+    .command('auth <action> [provider]')
+    .description(
+      "Manage OAuth auth. Action 'cleanup <provider>' purges a removed provider's leftover credential.",
+    )
+    .action(async (action: string, provider: string | undefined) => {
+      const paths = resolveAidenPaths();
+      await ensureAidenDirsExist(paths);
+      if (action === 'cleanup') {
+        if (!provider) {
+          process.stderr.write(
+            `Usage: aiden auth cleanup <provider>\n` +
+              `Removed providers: ${REMOVED_OAUTH_PROVIDERS.join(', ')}\n`,
+          );
+          process.exit(1);
+        }
+        const r = await cleanupRemovedProviderToken(paths, provider);
+        (r.ok ? process.stdout : process.stderr).write(r.message + '\n');
+        process.exit(r.ok ? 0 : 1);
+      }
+      process.stderr.write(
+        `Unknown 'aiden auth' action '${action}'. Supported: cleanup <provider>.\n` +
+          `For login / logout / refresh / status, use /auth inside the interactive REPL.\n`,
+      );
+      process.exit(1);
     });
 
   program
@@ -1100,6 +1132,30 @@ export async function buildAgentRuntime(
   // clean pipeable answer, and approvals default to auto-DENY (no TUI to
   // prompt). See runQuery / executeOneShotTurn below.
   const headless = !!cliOpts?.headless;
+
+  // Slice 2 — surface (and, interactively, offer to purge) any orphaned
+  // credential left by a removed OAuth provider. hasTokens gates the work, so
+  // a clean install pays only one fs.access per removed provider. Headless /
+  // non-TTY: a stderr diagnostic naming the file + the cleanup command, never
+  // a prompt and never a delete — silence is not consent.
+  try {
+    const orphanInteractive = !headless && !!process.stdin.isTTY;
+    await announceRemovedProviderOrphans({
+      paths,
+      interactive: orphanInteractive,
+      write: (l) =>
+        (orphanInteractive ? process.stdout : process.stderr).write(l + '\n'),
+      confirm: orphanInteractive
+        ? async (q: string) => {
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const { confirm } = require('@inquirer/prompts');
+            return confirm({ message: q, default: false });
+          }
+        : undefined,
+    });
+  } catch {
+    // A startup notice must never block boot.
+  }
 
   // ── v4.6 Phase 1 — always-on runStore for spawn_sub_agent ──────────────
   //

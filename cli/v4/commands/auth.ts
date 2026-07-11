@@ -42,6 +42,11 @@ import {
   type OAuthTokens,
 } from '../../../core/v4/auth/tokenStore';
 import {
+  REMOVED_OAUTH_PROVIDERS,
+  findOrphanedRemovedTokens,
+  cleanupRemovedProviderToken,
+} from '../../../core/v4/auth/removedProviders';
+import {
   PRO_PROVIDER_IDS,
   PRO_PLUGIN_DIRS,
   loadOAuthProvider,
@@ -169,6 +174,16 @@ export const auth: SlashCommand = {
         });
         renderStatus(ctx, id, tokens);
       }
+      // Surface any orphaned credential from a removed OAuth provider on a
+      // distinct line — it is no longer resolvable and can only be purged via
+      // cleanup. (Only shown when a full status listing was requested.)
+      if (!targetId) {
+        for (const id of await findOrphanedRemovedTokens(ctx.paths)) {
+          ctx.display.warn(
+            `${id}: removed — run \`/auth cleanup ${id}\` to delete its leftover credential.`,
+          );
+        }
+      }
       // Encryption + multi-provider notes.
       ctx.display.write('\n');
       ctx.display.dim(
@@ -186,6 +201,26 @@ export const auth: SlashCommand = {
         `OAuth in beta — provider-side errors may require account state we cannot detect from this side. ` +
           `If signin fails, use API key auth instead.`,
       );
+      return {};
+    }
+
+    // ── cleanup (purge a removed-provider orphan) ─────────────────
+    // Deliberately BEFORE the PRO_PROVIDER_IDS gate — removed providers are not
+    // in that allowlist. The scope is enforced inside cleanupRemovedProviderToken
+    // (it refuses any live provider), so this is never a delete-any-token path.
+    if (sub === 'cleanup') {
+      const target = ctx.args[1];
+      if (!target) {
+        ctx.display.printError(
+          'Usage: /auth cleanup <provider>',
+          `Removed providers: ${REMOVED_OAUTH_PROVIDERS.join(', ')}`,
+        );
+        return {};
+      }
+      const r = await cleanupRemovedProviderToken(ctx.paths, target);
+      if (!r.ok) ctx.display.printError(r.message);
+      else if (r.removed) ctx.display.success(r.message);
+      else ctx.display.dim(r.message);
       return {};
     }
 
@@ -304,7 +339,7 @@ export const auth: SlashCommand = {
 
     ctx.display.printError(
       `Unknown subcommand: ${sub}`,
-      'Try: /auth status [provider] | login <provider> | logout <provider> | refresh <provider>',
+      'Try: /auth status [provider] | login <provider> | logout <provider> | refresh <provider> | cleanup <provider>',
     );
     return {};
   },
