@@ -22,6 +22,7 @@
 import type { AidenAgent } from '../../core/v4/aidenAgent';
 import { buildTurnRuntimeContext } from '../../core/v4/turnRuntimeContext';
 import { computeTaskFinalization } from '../../core/v4/taskVerification';
+import { runShadowClaimVerifier, type TaskEvaluation } from '../../core/v4/claimVerifier';
 import {
   emitArtifactVerified, emitCostUpdated, emitAutonomyChanged, type PillarEventSink,
 } from '../../core/v4/pillarEvents';
@@ -534,6 +535,13 @@ export class ChatSession implements ChatSessionLike {
   private totalUsage = { inputTokens: 0, outputTokens: 0 };
   private startedAt = Date.now();
   private queuedSystemPrompts: string[] = [];
+  /**
+   * P1B-1 shadow (NON-AUTHORITATIVE) — the last turn's claim-verifier
+   * evaluation, computed alongside the legacy verdict. Never persisted, never
+   * rendered, consumed by no production path; held only so the shadow pipeline
+   * is exercised on real turns (and inspectable for the eventual P1B flip).
+   */
+  private _shadowClaimEval?: TaskEvaluation;
   private modelMetadata: ModelMetadata;
   /**
    * Phase 22 Task 4: status-bar right-most segment state. `'ready'`
@@ -2327,6 +2335,13 @@ export class ChatSession implements ChatSessionLike {
             replTaskStore.setStatus(replTaskId, 'pending_verification');
           }
           replTaskStore.finalizeVerification(replTaskId, fin.status, fin.evidence, fin.jobCard);
+          // P1B-1 shadow (non-authoritative, tool-derived) — run the claim
+          // verifier alongside the legacy verdict so the pipeline is exercised
+          // on real turns. Consumed by nobody; not persisted, not rendered. A
+          // fault here must never break finalize.
+          try {
+            this._shadowClaimEval = runShadowClaimVerifier(result.toolCallTrace ?? []);
+          } catch { /* shadow claim verifier must never break the turn */ }
           if (result.finishReason === 'stop' && !(declaredStatus && declaredStatus !== 'success')) {
             if (fin.status === 'verification_failed') {
               const what = fin.evidence.failures
