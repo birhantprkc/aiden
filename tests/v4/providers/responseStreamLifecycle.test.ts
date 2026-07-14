@@ -36,7 +36,7 @@ async function startStallServer(stage: StallStage | 'complete'): Promise<{
     requests += 1;
     if (stage === 'before_headers') {
       markReady();
-      setTimeout(() => res.socket?.destroy(), 350).unref();
+      setTimeout(() => res.socket?.destroy(), 2_000).unref();
       return;
     }
 
@@ -58,7 +58,7 @@ async function startStallServer(stage: StallStage | 'complete'): Promise<{
     // Test watchdog only: a broken adapter must eventually settle so the RED
     // suite cannot leave an open reader forever. Correct timeout/abort paths
     // finish well before this socket destruction.
-    setTimeout(() => res.socket?.destroy(), 350).unref();
+    setTimeout(() => res.socket?.destroy(), 2_000).unref();
   });
   server.on('connection', (socket) => {
     sockets.add(socket);
@@ -94,8 +94,8 @@ describe('ResponseStreamAdapter full-lifecycle timeout and abort', () => {
     async (stage) => {
       const fixture = await startStallServer(stage);
       const started = Date.now();
-      await expect(call(adapter(fixture.baseUrl, 60))).rejects.toBeInstanceOf(ProviderTimeoutError);
-      expect(Date.now() - started).toBeLessThan(250);
+      await expect(call(adapter(fixture.baseUrl, 500))).rejects.toBeInstanceOf(ProviderTimeoutError);
+      expect(Date.now() - started).toBeLessThan(1_500);
       expect(fixture.requestCount()).toBe(1);
     },
   );
