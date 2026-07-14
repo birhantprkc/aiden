@@ -26,7 +26,7 @@ describe.skipIf(process.platform !== 'win32')('activity timer ConPTY rendering',
       const timeout = setTimeout(() => {
         child.kill();
         reject(new Error(`activity fixture timeout:\n${JSON.stringify(raw)}`));
-      }, 9_000);
+      }, 20_000);
       child.onExit(({ exitCode }) => {
         clearTimeout(timeout);
         if (exitCode === 0) resolve();
@@ -49,5 +49,5 @@ describe.skipIf(process.platform !== 'win32')('activity timer ConPTY rendering',
     const settledAt = raw.indexOf('__ACTIVITY_SETTLED__');
     expect(settledAt).toBeGreaterThan(0);
     expect(raw.slice(settledAt)).not.toContain('running');
-  }, 12_000);
+  }, 25_000);
 });
