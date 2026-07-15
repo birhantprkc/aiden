@@ -51,6 +51,7 @@ import { buildToolPreview } from './toolPreview';
 import { renderComposerBuffer } from './composerRow';
 import { ComposerLane, composerLaneEnabled, type LaneSink } from './composerLane';
 import { turnIdleDiagnostic } from './turnIdleDiagnostics';
+import type { ActivitySnapshot } from './activityRegistry';
 // v4.1.4 reply-quality polish: shared frame math for width + indent.
 // `cols()`, `rule()`, `agentTurn`, and `tryRerenderInPlace` all route
 // through frame helpers so the visible left edge / right margin / wrap
@@ -94,8 +95,8 @@ export interface SpinnerHandle {
  */
 export interface ActivityIndicatorHandle {
   /**
-   * Stop ticking and erase the indicator line. State preserved so a
-   * later `resume(verb?)` continues from the same elapsed counter.
+   * Stop ticking and erase the indicator line. Resuming the same verb keeps
+   * its phase clock; resuming with a new verb starts a new phase clock.
    * Idempotent.
    */
   pause(): void;
@@ -1144,10 +1145,8 @@ export class Display {
    *
    * Pause/resume semantics:
    *   - `pause()` erases the line + stops the tick + sets paused=true.
-   *     Elapsed time keeps accumulating wall-clock — when a later
-   *     `resume()` re-renders, the indicator shows the TOTAL elapsed
-   *     since the original `activityIndicator()` call, not just since
-   *     the last resume.
+   *     Resuming the same phase preserves its elapsed time; supplying a new
+   *     verb resets the phase clock so hidden tool time is not provider time.
    *   - `resume(verb?)` re-renders on a fresh line below the current
    *     cursor and restarts the tick. Optional `verb` swap is the
    *     supported way to transition phases ("thinking" → "drafting").
@@ -1185,7 +1184,7 @@ export class Display {
     const sk     = this.skin;
     const out    = this.out;
     const isTty  = !!out.isTTY;
-    const startTime = Date.now();
+    let phaseStartedAt = Date.now();
 
     let verb        = initialVerb;
     let dotFrame    = 0;
@@ -1275,7 +1274,7 @@ export class Display {
 
     const buildLine = (): string => {
       const dots = '.'.repeat(dotFrame); // 0..3 dots
-      const elapsedSec = Math.floor((Date.now() - startTime) / 1000);
+      const elapsedSec = Math.floor((Date.now() - phaseStartedAt) / 1000);
       const elapsedStr = elapsedSec >= 1
         ? ` ${sk.applyColors(`(${elapsedSec}s)`, 'muted')}`
         : '';
@@ -1408,7 +1407,10 @@ export class Display {
       },
       resume: (newVerb?: string) => {
         if (stopped) return;
-        if (typeof newVerb === 'string' && newVerb.length > 0) verb = newVerb;
+        if (typeof newVerb === 'string' && newVerb.length > 0 && newVerb !== verb) {
+          verb = newVerb;
+          phaseStartedAt = Date.now();
+        }
         if (!paused) return;
         paused = false;
         if (!isTty) return;
@@ -1431,7 +1433,10 @@ export class Display {
         this.setComposerRepaint(paintComposerNow);
       },
       setVerb: (newVerb: string) => {
-        if (typeof newVerb === 'string' && newVerb.length > 0) verb = newVerb;
+        if (typeof newVerb === 'string' && newVerb.length > 0 && newVerb !== verb) {
+          verb = newVerb;
+          phaseStartedAt = Date.now();
+        }
       },
       stop: () => {
         if (stopped) return;
@@ -1470,7 +1475,7 @@ export class Display {
   // completion so each line in the log carries the final state — no
   // ANSI cursor games on a dumb sink.
 
-  toolRow(name: string, args: unknown): ToolRowHandle {
+  toolRow(name: string, args: unknown, readActivity?: () => ActivitySnapshot): ToolRowHandle {
     // v4.1.5 Phase 1d (Q-Q2-a) — TRAIL_HIDE_TOOLS suppression.
     //
     // Some tools are pure agent plumbing — the model calls them to
@@ -1516,11 +1521,9 @@ export class Display {
     const mapped = buildToolPreview(name, args);
     const detail = truncDetail(mapped ?? previewToolArgs(args));
 
-    // v4.1.3-essentials: live tool indicator. Capture wall-clock start
-    // so the running-row renderer can append an elapsed-time suffix
-    // ("running 3s…") after the first second. Sub-second tools render
-    // without the suffix — no flash of `running 0s` for fast paths.
-    const startedAt = Date.now();
+    // Semantic elapsed time comes from ActivityRegistry. A compatibility row
+    // without a source advances only on its own repaint ticks.
+    let fallbackPhaseElapsedMs = 0;
 
     // Running row — muted pipe, raw icon, tool-colored verb, muted detail.
     // The optional `running Ns…` tail appears once the tool crosses the
@@ -1533,9 +1536,15 @@ export class Display {
     // by the emoji's right cell. Two spaces guarantees one visible gap
     // regardless of how the terminal measures the glyph.
     const runningRow = (): string => {
-      const elapsed = Date.now() - startedAt;
+      const snapshot = readActivity?.();
+      const elapsed = snapshot?.phaseElapsedMs ?? fallbackPhaseElapsedMs;
+      const phaseLabel = snapshot?.phase === 'awaiting_approval' ? 'awaiting approval'
+        : snapshot?.phase === 'verifying' ? 'verifying'
+        : snapshot?.phase === 'retrying' ? 'retrying'
+        : snapshot?.phase === 'queued' ? 'queued'
+        : 'running';
       const liveSuffix = elapsed >= 1000
-        ? `  ${sk.applyColors(`running ${formatToolDuration(elapsed)}…`, 'muted')}`
+        ? `  ${sk.applyColors(`${phaseLabel} ${formatToolDuration(elapsed)}…`, 'muted')}`
         : '';
       const prefix = `${sk.applyColors(TRAIL_PIPE, 'muted')} ${glyph}  ` +
         `${sk.applyColors(padVerb(verb), 'tool')} `;
@@ -1551,9 +1560,14 @@ export class Display {
 
     // Outcome row — entire line colored by outcome kind.
     const outcomeRow = (suffix: string, kind: ColorKindForBracket): string => {
-      const content =
-        `${TRAIL_PIPE} ${glyph}  ${padVerb(verb)} ${detail}` +
-        (suffix ? `  ${suffix}` : '');
+      const prefix = `${TRAIL_PIPE} ${glyph}  ${padVerb(verb)} `;
+      const suffixText = suffix ? `  ${suffix}` : '';
+      const availableDetail = terminalRowWidth === null
+        ? Number.POSITIVE_INFINITY
+        : Math.max(0, terminalRowWidth - visibleLength(prefix) - visibleLength(suffixText));
+      const content = `${prefix}${availableDetail === Number.POSITIVE_INFINITY
+        ? detail
+        : truncateVisible(detail, availableDetail)}${suffixText}`;
       return `${sk.applyColors(content, kind)}\n`;
     };
 
@@ -1659,6 +1673,7 @@ export class Display {
       // busy hint in its lane: composer content never bleeds into tool rows.
       repaintRunning = (): void => {
         if (printed && !pausedRow && this.composerRepaintIs(repaintRunning!)) {
+          if (!readActivity) fallbackPhaseElapsedMs += 1000;
           turnIdleDiagnostic('activity.row.timer', { name });
           replaceLast(runningRow());
         }
@@ -1674,6 +1689,44 @@ export class Display {
     // with the final state; live updates would be noise in scrollback.
 
     return {
+      refresh() {
+        if (settled || pausedRow || !isTty) return;
+        replaceLast(runningRow());
+      },
+      finish(snapshot: ActivitySnapshot) {
+        if (!beginSettle()) return;
+        const waited = snapshot.approvalWaitMs >= 1_000
+          ? ` · waited ${formatToolDuration(snapshot.approvalWaitMs)}`
+          : '';
+        const attempts = snapshot.attemptCount > 1 ? ` · ${snapshot.attemptCount} attempts` : '';
+        const backoff = snapshot.retryBackoffMs >= 1_000
+          ? ` · backoff ${formatToolDuration(snapshot.retryBackoffMs)}`
+          : '';
+        const execution = formatToolDuration(snapshot.executionDurationMs);
+        switch (snapshot.terminalClassification) {
+          case 'denied':
+            writeFinal(`denied${waited}`, 'warn');
+            break;
+          case 'cancelled':
+            writeFinal(snapshot.executionDurationMs > 0 ? `cancelled after ${execution}` : `cancelled${waited}`, 'muted');
+            break;
+          case 'timed_out':
+            writeFinal(snapshot.executionDurationMs > 0 ? `timed out after ${execution}` : `timed out${waited}`, 'error');
+            break;
+          case 'blocked':
+            writeFinal('blocked', 'warn');
+            break;
+          case 'failed':
+            writeFinal(snapshot.executionDurationMs > 0 ? `fail ${execution}${attempts}${waited}${backoff}` : `failed${waited}`, 'error');
+            break;
+          case 'degraded':
+            writeFinal(`partial ${execution}${waited}`, 'degraded');
+            break;
+          default:
+            writeFinal(`done ${execution}${attempts}${waited}${backoff}`, 'muted');
+            break;
+        }
+      },
       ok(durationMs: number, retries = 0) {
         if (!beginSettle()) return;
         stopTick();
@@ -2868,6 +2921,8 @@ export const TRAIL_HIDE_TOOLS: Set<string> = new Set([
  */
 export function makeNoOpToolRowHandle(): ToolRowHandle {
   return {
+    refresh:    () => { /* no-op: hidden from trail */ },
+    finish:     () => { /* no-op: hidden from trail */ },
     ok:         () => { /* no-op: hidden from trail */ },
     fail:       () => { /* no-op: hidden from trail */ },
     degraded:   () => { /* no-op: hidden from trail */ },
@@ -2896,19 +2951,21 @@ type ColorKindForBracket = 'success' | 'warn' | 'error' | 'degraded' | 'muted';
  * would double-print.
  */
 export interface ToolRowHandle {
-  ok(durationMs: number, retries?: number): void;
-  fail(durationMs: number, retries?: number): void;
+  refresh?(): void;
+  finish?(snapshot: ActivitySnapshot): void;
+  ok(durationMs: number, retries?: number, summary?: ActivitySnapshot): void;
+  fail(durationMs: number, retries?: number, summary?: ActivitySnapshot): void;
   /**
    * v4.1.3-repl-polish — tool completed but with a degraded / best-effort
    * result (e.g. recall_session returned cached data, app_launch fell back
    * to CLI). Row persists in degraded yellow.
    */
-  degraded(durationMs: number, reason?: string): void;
+  degraded(durationMs: number, reason?: string, summary?: ActivitySnapshot): void;
   retry(n: number, m: number): void;
   blocked(): void;
   emptyRetry(): void;
   emptyFail(): void;
-  cancel(durationMs: number): void;
+  cancel(durationMs: number, summary?: ActivitySnapshot): void;
   dismiss(): void;
   pause(): void;
   resume(): void;

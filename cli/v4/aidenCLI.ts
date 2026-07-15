@@ -2547,7 +2547,7 @@ export async function buildAgentRuntime(
           } else {
             const startedAt = replToolCallStartTimes.get(call.id) ?? Date.now();
             replToolCallStartTimes.delete(call.id);
-            const durationMs = Date.now() - startedAt;
+            const durationMs = result?.activityTiming?.executionDurationMs ?? (Date.now() - startedAt);
             const tags = categorizeEvent('tool_call_completed');
             replRunStore.emitEventRich({
               runId:      rid,
@@ -2573,6 +2573,7 @@ export async function buildAgentRuntime(
       }
       callbacks.onToolCall?.(call, phase, result);
     },
+    onToolActivity: callbacks.onToolActivity,
     onCompression: callbacks.onCompression,
     onBudgetWarning: callbacks.onBudgetWarning,
     onPlannerGuardDecision: callbacks.onPlannerGuardDecision,

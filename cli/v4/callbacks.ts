@@ -30,7 +30,12 @@ import type { SkillProposal } from '../../moat/skillTeacher';
 import type { PlannerGuardDecision } from '../../moat/plannerGuard';
 import type { CompressionResult } from '../../core/v4/contextCompressor';
 import type { AuxiliaryClient } from '../../core/v4/auxiliaryClient';
-import type { ToolCallRequest, ToolCallResult, CapabilityCardData } from '../../providers/v4/types';
+import type {
+  ToolActivityUpdate,
+  ToolCallRequest,
+  ToolCallResult,
+  CapabilityCardData,
+} from '../../providers/v4/types';
 // v4.3 Phase 3 — manual-blocker surface. The BlockerSurface type
 // lives in tools/v4/browser/browserBlocker.ts; we import the type
 // here for the renderer + the structural mapping helper below.
@@ -453,14 +458,19 @@ export class CliCallbacks {
     };
 
     let settled: boolean;
+    const timing = result?.activityTiming;
+    const terminal = timing?.terminalClassification;
     if (typeof err === 'string' && err.includes('URL provenance gate')) {
-      settled = this.activities.settle(call.id, { state: 'blocked' });
+      settled = this.activities.settle(call.id, { state: 'blocked', timing });
+    } else if (terminal === 'cancelled') {
+      settled = this.activities.settle(call.id, { state: 'cancelled', timing });
     } else if (err) {
-      settled = this.activities.settle(call.id, { state: 'failed' });
+      settled = this.activities.settle(call.id, { state: 'failed', timing });
     } else if (result?.degraded) {
       settled = this.activities.settle(call.id, {
         state: 'degraded',
         reason: result.degradedReason,
+        timing,
       });
     } else {
       const payload = result?.result;
@@ -469,8 +479,8 @@ export class CliCallbacks {
         : undefined;
       const dismiss = call.name === 'clarify' || call.name === 'plan_approval';
       settled = status === 'cancelled'
-        ? this.activities.settle(call.id, { state: 'cancelled', dismiss })
-        : this.activities.settle(call.id, { state: 'completed', dismiss });
+        ? this.activities.settle(call.id, { state: 'cancelled', dismiss, timing })
+        : this.activities.settle(call.id, { state: 'completed', dismiss, timing });
     }
 
     // Duplicate and stale terminal callbacks cannot repaint or re-arm rows.
@@ -483,6 +493,10 @@ export class CliCallbacks {
       }
     }
     fireAfter();
+  };
+
+  onToolActivity = (call: ToolCallRequest, update: ToolActivityUpdate): void => {
+    this.activities.observe(call.id, update);
   };
 
   /**

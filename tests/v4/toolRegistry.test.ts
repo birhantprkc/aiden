@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { ApprovalEngine } from '../../moat/approvalEngine';
 
 import {
   ToolRegistry,
@@ -50,6 +51,133 @@ describe('ToolRegistry', () => {
 
   beforeEach(() => {
     registry = new ToolRegistry();
+  });
+
+  it('records approval wait separately from actual handler execution', async () => {
+    let now = 1_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      registry.register(makeHandler('timed-write', {
+        category: 'write',
+        mutates: true,
+        async execute() {
+          now += 6_000;
+          return { ok: true };
+        },
+      }));
+      const approvalEngine = new ApprovalEngine('manual', {
+        promptUser: async () => {
+          now += 8_000;
+          return 'allow';
+        },
+      });
+      const exec = registry.buildExecutor({ ...makeContext(), approvalEngine });
+
+      const result = await exec(call('timed-write'));
+
+      expect(result.activityTiming?.approvalStartedAt).toBe(1_000);
+      expect(result.activityTiming?.approvalEndedAt).toBe(9_000);
+      expect(result.activityTiming?.executionAttempts).toEqual([{
+        attempt: 1,
+        startedAt: 9_000,
+        endedAt: 15_000,
+        terminalResult: 'completed',
+      }]);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('records a delayed denial without fabricating handler execution', async () => {
+    let now = 5_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const execute = vi.fn(async () => ({ ok: true }));
+    try {
+      registry.register(makeHandler('denied-write', { category: 'write', mutates: true, execute }));
+      const approvalEngine = new ApprovalEngine('manual', {
+        promptUser: async () => {
+          now += 8_000;
+          return 'deny';
+        },
+      });
+      const exec = registry.buildExecutor({ ...makeContext(), approvalEngine });
+
+      const result = await exec(call('denied-write'));
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(result.activityTiming?.approvalEndedAt! - result.activityTiming?.approvalStartedAt!).toBe(8_000);
+      expect(result.activityTiming?.executionAttempts).toEqual([]);
+      expect(result.activityTiming?.terminalClassification).toBe('denied');
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('cancellation during approval records no execution attempt', async () => {
+    const controller = new AbortController();
+    registry.register(makeHandler('cancelled-approval', { category: 'write', mutates: true }));
+    const approvalEngine = new ApprovalEngine('manual', {
+      promptUser: async () => {
+        controller.abort();
+        return 'interrupted';
+      },
+    });
+    const result = await registry.buildExecutor({ ...makeContext(), approvalEngine })(
+      call('cancelled-approval'), controller.signal,
+    );
+    expect(result.activityTiming?.executionAttempts).toEqual([]);
+    expect(result.activityTiming?.terminalClassification).toBe('cancelled');
+  });
+
+  it('cancellation during handler retains elapsed execution once', async () => {
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const controller = new AbortController();
+    try {
+      registry.register(makeHandler('cancelled-run', {
+        async execute() {
+          now = 2_500;
+          controller.abort();
+          throw new Error('interrupted');
+        },
+      }));
+      const result = await registry.buildExecutor(makeContext())(call('cancelled-run'), controller.signal);
+      expect(result.activityTiming?.executionDurationMs).toBe(2_500);
+      expect(result.activityTiming?.executionAttempts).toHaveLength(1);
+      expect(result.activityTiming?.terminalClassification).toBe('cancelled');
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('timeout before handler records no execution duration', async () => {
+    registry.register(makeHandler('approval-timeout', { category: 'write', mutates: true }));
+    const approvalEngine = new ApprovalEngine('manual', {
+      promptUser: async () => { throw new Error('approval timed out'); },
+    });
+    const result = await registry.buildExecutor({ ...makeContext(), approvalEngine })(call('approval-timeout'));
+    expect(result.activityTiming?.executionAttempts).toEqual([]);
+    expect(result.activityTiming?.executionDurationMs).toBe(0);
+    expect(result.activityTiming?.terminalClassification).toBe('timed_out');
+  });
+
+  it('timeout during handler retains execution duration and one settlement', async () => {
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      registry.register(makeHandler('handler-timeout', {
+        async execute() {
+          now = 3_000;
+          throw new Error('handler timeout');
+        },
+      }));
+      const result = await registry.buildExecutor(makeContext())(call('handler-timeout'));
+      expect(result.activityTiming?.executionDurationMs).toBe(3_000);
+      expect(result.activityTiming?.executionAttempts).toHaveLength(1);
+      expect(result.activityTiming?.terminalClassification).toBe('timed_out');
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it('1. register/get round-trip returns the same handler', () => {

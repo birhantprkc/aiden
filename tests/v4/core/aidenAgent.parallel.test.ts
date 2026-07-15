@@ -25,6 +25,7 @@ import {
   type ProviderCallInput,
   type ProviderCallOutput,
   type ToolCallRequest,
+  type ToolCallResult,
   type ToolSchema,
 } from '../../../providers/v4/types';
 
@@ -225,6 +226,37 @@ describe('AidenAgent — parallel pure-read tool dispatch (v4.11 perf)', () => {
       (m): m is Extract<Message, { role: 'tool' }> => m.role === 'tool',
     );
     expect(toolMsgs.map((m) => m.toolCallId)).toEqual(['a1', 'a2', 'a3']);
+  });
+
+  it('preserves real precomputed execution timing through ordered callbacks', async () => {
+    const adapter = new ScriptedAdapter([{
+      content: '',
+      toolCalls: [tc('slow', 'web_search'), tc('fast', 'web_search')],
+      usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'tool_calls',
+    }]);
+    const callbackResults: ToolCallResult[] = [];
+    const exec: ToolExecutor = async (call) => {
+      await new Promise((resolve) => setTimeout(resolve, call.id === 'slow' ? 80 : 25));
+      return { id: call.id, name: call.name, result: 'ok' };
+    };
+    const agent = new AidenAgent({
+      provider: adapter,
+      tools: NO_TOOLS,
+      toolExecutor: exec,
+      onToolCall: (_call, phase, result) => {
+        if (phase === 'after' && result) callbackResults.push(result);
+      },
+    });
+
+    await agent.runConversation([userMsg('time both')]);
+
+    expect(callbackResults.map((result) => result.id)).toEqual(['slow', 'fast']);
+    const durations = callbackResults.map((result) => {
+      const attempt = result.activityTiming?.executionAttempts[0];
+      return attempt && attempt.endedAt !== undefined ? attempt.endedAt - attempt.startedAt : 0;
+    });
+    expect(durations[0]).toBeGreaterThanOrEqual(60);
+    expect(durations[1]).toBeGreaterThanOrEqual(15);
   });
 
   it('solo read-only call does NOT enter parallel batch (live-execution path)', async () => {

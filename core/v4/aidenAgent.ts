@@ -45,6 +45,8 @@ import type {
   ToolSchema,
   ToolCallRequest,
   ToolCallResult,
+  ToolActivityTiming,
+  ToolActivityUpdate,
   ProviderAdapter,
   ProviderCallOutput,
 } from '../../providers/v4/types';
@@ -157,7 +159,87 @@ import { preArmIntent } from './agent/intentPreArm';
  * The loop catches throws defensively so a buggy executor still keeps
  * the conversation alive.
  */
-export type ToolExecutor = (call: ToolCallRequest, signal?: AbortSignal) => Promise<ToolCallResult>;
+export type ToolExecutor = (
+  call: ToolCallRequest,
+  signal?: AbortSignal,
+  onActivity?: (update: ToolActivityUpdate) => void,
+) => Promise<ToolCallResult>;
+
+async function invokeToolWithTiming(
+  executor: ToolExecutor,
+  call: ToolCallRequest,
+  signal: AbortSignal | undefined,
+  onActivity: ((update: ToolActivityUpdate) => void) | undefined,
+): Promise<ToolCallResult> {
+  const startedAt = Date.now();
+  let result: ToolCallResult;
+  try {
+    result = await executor(call, signal, onActivity);
+  } catch (error) {
+    result = {
+      id: call.id,
+      name: call.name,
+      result: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+  if (result.activityTiming) return result;
+  const endedAt = Date.now();
+  const terminalClassification = signal?.aborted
+    ? 'cancelled'
+    : result.error
+      ? (/timed?\s*out|timeout/i.test(result.error) ? 'timed_out' : 'failed')
+      : result.degraded ? 'degraded' : 'completed';
+  return {
+    ...result,
+    activityTiming: {
+      dispatchStartedAt: startedAt,
+      dispatchEndedAt: endedAt,
+      executionAttempts: [{
+        attempt: 1,
+        startedAt,
+        endedAt,
+        terminalResult: terminalClassification,
+      }],
+      executionDurationMs: Math.max(0, endedAt - startedAt),
+      approvalWaitMs: 0,
+      attemptCount: 1,
+      terminalClassification,
+    },
+  };
+}
+
+function mergeActivityTiming(
+  target: ToolActivityTiming | undefined,
+  source: ToolActivityTiming | undefined,
+): ToolActivityTiming | undefined {
+  if (!source) return target;
+  if (!target) {
+    return {
+      ...source,
+      executionAttempts: source.executionAttempts.map((attempt, index) => ({ ...attempt, attempt: index + 1 })),
+    };
+  }
+  const offset = target.executionAttempts.length;
+  const executionAttempts = [
+    ...target.executionAttempts,
+    ...source.executionAttempts.map((attempt, index) => ({ ...attempt, attempt: offset + index + 1 })),
+  ];
+  return {
+    ...target,
+    dispatchStartedAt: Math.min(target.dispatchStartedAt, source.dispatchStartedAt),
+    dispatchEndedAt: source.dispatchEndedAt ?? target.dispatchEndedAt,
+    approvalStartedAt: target.approvalStartedAt ?? source.approvalStartedAt,
+    approvalEndedAt: source.approvalEndedAt ?? target.approvalEndedAt,
+    approvalWaitMs: (target.approvalWaitMs ?? 0) + (source.approvalWaitMs ?? 0),
+    executionAttempts,
+    executionDurationMs: (target.executionDurationMs ?? 0) + (source.executionDurationMs ?? 0),
+    verificationDurationMs: (target.verificationDurationMs ?? 0) + (source.verificationDurationMs ?? 0),
+    retryBackoffMs: (target.retryBackoffMs ?? 0) + (source.retryBackoffMs ?? 0),
+    attemptCount: executionAttempts.length,
+    terminalClassification: source.terminalClassification ?? target.terminalClassification,
+  };
+}
 
 /**
  * Phase v4.1.2 alive-core: identity / memory files that can flip the
@@ -235,6 +317,8 @@ export interface AidenAgentOptions {
     phase:   'before' | 'after',
     result?: ToolCallResult,
   ) => void;
+  /** Optional live phase observer. It is observational and may be omitted. */
+  onToolActivity?: (call: ToolCallRequest, update: ToolActivityUpdate) => void;
   /**
    * Fires once at caution and once at warning. `kind` distinguishes the
    * iteration budget (turn/maxTurns) from the v4.12 BE.1 token budget
@@ -514,6 +598,7 @@ export class AidenAgent {
   private readonly modelMetadata = new ModelMetadata();
   private readonly fallback?:                   FallbackStrategy;
   private readonly onToolCall?:                 AidenAgentOptions['onToolCall'];
+  private readonly onToolActivity?:             AidenAgentOptions['onToolActivity'];
   private readonly onBudgetWarning?:            AidenAgentOptions['onBudgetWarning'];
   private readonly plannerGuard?:               PlannerGuard;
   private readonly onPlannerGuardDecision?:     AidenAgentOptions['onPlannerGuardDecision'];
@@ -615,6 +700,7 @@ export class AidenAgent {
     this.sessionTokenCap          = opts.sessionTokenCap;
     this.fallback                 = opts.fallback;
     this.onToolCall               = opts.onToolCall;
+    this.onToolActivity           = opts.onToolActivity;
     this.onBudgetWarning          = opts.onBudgetWarning;
     this.plannerGuard             = opts.plannerGuard;
     this.onPlannerGuardDecision   = opts.onPlannerGuardDecision;
@@ -1602,14 +1688,14 @@ export class AidenAgent {
           // its existing timing instrumentation can still observe it.
           if (batch.length > 1) {
             const batchResults = await Promise.all(
-              batch.map((c) =>
-                this.toolExecutor(c, this._currentSignal).catch((err: unknown): ToolCallResult => ({
-                  id:     c.id,
-                  name:   c.name,
-                  result: null,
-                  error:  err instanceof Error ? err.message : String(err),
-                })),
-              ),
+              batch.map((c) => invokeToolWithTiming(
+                this.toolExecutor,
+                c,
+                this._currentSignal,
+                (update) => {
+                  try { this.onToolActivity?.(c, update); } catch { /* observational */ }
+                },
+              )),
             );
             for (let k = 0; k < batch.length; k += 1) {
               preComputedResults.set(batch[k].id, batchResults[k]);
@@ -1718,6 +1804,7 @@ export class AidenAgent {
         let finalPolicyDecision: RecoveryActionDecision | null = null;
         let preRecordedRecovery: RecoveryDecision | null = null;
         let attemptNo = 0;
+        let aggregateTiming: ToolActivityTiming | undefined;
         let afterFired = false;
         try {
           for (;;) {
@@ -1736,27 +1823,27 @@ export class AidenAgent {
             } else if (attemptNo === 1 && _preComputed) {
               result = _preComputed;
             } else {
-              try {
-                p2aDiag('tool.executor.start', {
-                  iteration: turnCount, callId: call.id, tool: call.name,
-                  attempt: attemptNo, aborted: this._currentSignal?.aborted === true,
-                  pendingPromise: 'toolExecutor',
-                });
-                result = await this.toolExecutor(call, this._currentSignal);
-                p2aDiag('tool.executor.complete', {
-                  iteration: turnCount, callId: call.id, tool: call.name,
-                  attempt: attemptNo, hasError: result.error != null,
-                  aborted: this._currentSignal?.aborted === true,
-                });
-              } catch (err) {
-                result = {
-                  id:     call.id,
-                  name:   call.name,
-                  result: null,
-                  error:  err instanceof Error ? err.message : String(err),
-                };
-              }
+              p2aDiag('tool.executor.start', {
+                iteration: turnCount, callId: call.id, tool: call.name,
+                attempt: attemptNo, aborted: this._currentSignal?.aborted === true,
+                pendingPromise: 'toolExecutor',
+              });
+              result = await invokeToolWithTiming(
+                this.toolExecutor,
+                call,
+                this._currentSignal,
+                (update) => {
+                  try { this.onToolActivity?.(call, update); } catch { /* observational */ }
+                },
+              );
+              p2aDiag('tool.executor.complete', {
+                iteration: turnCount, callId: call.id, tool: call.name,
+                attempt: attemptNo, hasError: result.error != null,
+                aborted: this._currentSignal?.aborted === true,
+              });
             }
+            aggregateTiming = mergeActivityTiming(aggregateTiming, result.activityTiming);
+            if (aggregateTiming) result.activityTiming = aggregateTiming;
             if (_perfDiag) {
               const toolMs = Date.now() - _toolStartedAt;
               const ok = result.error == null;
@@ -1769,6 +1856,15 @@ export class AidenAgent {
             // per-tool verification ALWAYS (pure/synchronous) so the
             // post-loop honesty footer reflects real outcomes independent
             // of whether TCE/recovery is active.
+            const verificationStartedAt = Date.now();
+            if (aggregateTiming) {
+              aggregateTiming.verificationStartedAt = verificationStartedAt;
+              try {
+                this.onToolActivity?.(call, {
+                  phase: 'verifying', at: verificationStartedAt, attempt: attemptNo, timing: aggregateTiming,
+                });
+              } catch { /* observational */ }
+            }
             try {
               verification = verifierRegistry.resolve(call.name)(
                 call.name, call.arguments, result,
@@ -1776,6 +1872,14 @@ export class AidenAgent {
             } catch {
               // Defensive — a buggy verifier never breaks the agent loop.
               verification = undefined;
+            }
+            const verificationEndedAt = Date.now();
+            if (aggregateTiming) {
+              aggregateTiming.verificationEndedAt = verificationEndedAt;
+              aggregateTiming.verificationDurationMs =
+                (aggregateTiming.verificationDurationMs ?? 0) +
+                Math.max(0, verificationEndedAt - verificationStartedAt);
+              result.activityTiming = aggregateTiming;
             }
             classification = null;
             if (turnState.isEnabled() && verification && !verification.ok) {
@@ -1828,7 +1932,16 @@ export class AidenAgent {
               reason:    classification.reason,
               backoffMs: decision.backoffMs ?? 0,
             });
-            await sleepWithSignal(decision.backoffMs ?? 0, this._currentSignal);
+            const backoffMs = decision.backoffMs ?? 0;
+            if (aggregateTiming) {
+              aggregateTiming.retryBackoffMs = (aggregateTiming.retryBackoffMs ?? 0) + backoffMs;
+              try {
+                this.onToolActivity?.(call, {
+                  phase: 'retrying', at: Date.now(), attempt: attemptNo, timing: aggregateTiming,
+                });
+              } catch { /* observational */ }
+            }
+            await sleepWithSignal(backoffMs, this._currentSignal);
             if (this._currentSignal?.aborted) break;
           }
           toolCallCount += 1;
@@ -1969,6 +2082,34 @@ export class AidenAgent {
           const skillView = extractSkillViewRequiredTools(call.name, result.result);
           if (skillView) {
             trackers.skill.recordSkillView(skillView.skillName, skillView.requiredTools);
+          }
+          if (aggregateTiming) {
+            aggregateTiming.attemptCount = aggregateTiming.executionAttempts.length;
+            aggregateTiming.executionDurationMs = aggregateTiming.executionAttempts.reduce(
+              (total, attemptTiming) => total + Math.max(
+                0,
+                (attemptTiming.endedAt ?? Date.now()) - attemptTiming.startedAt,
+              ),
+              0,
+            );
+            if (this._currentSignal?.aborted) {
+              aggregateTiming.terminalClassification = 'cancelled';
+            } else if (classification?.category === 'timeout' || /timed?\s*out|timeout/i.test(result.error ?? '')) {
+              aggregateTiming.terminalClassification = 'timed_out';
+            } else if (result.error?.includes('denied by approval engine')) {
+              aggregateTiming.terminalClassification = 'denied';
+            } else if (result.degraded) {
+              aggregateTiming.terminalClassification = 'degraded';
+            } else if (verification && !verification.ok) {
+              aggregateTiming.terminalClassification = 'failed';
+            } else if (result.error) {
+              aggregateTiming.terminalClassification = aggregateTiming.terminalClassification === 'blocked'
+                ? 'blocked'
+                : 'failed';
+            } else {
+              aggregateTiming.terminalClassification = 'completed';
+            }
+            result.activityTiming = aggregateTiming;
           }
           this.onToolCall?.(call, 'after', result);
           afterFired = true;
