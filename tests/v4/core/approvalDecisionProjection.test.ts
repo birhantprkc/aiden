@@ -12,6 +12,43 @@ import { HonestyEnforcement } from '../../../moat/honestyEnforcement';
 import { resolveAidenPaths } from '../../../core/v4/paths';
 
 describe('approval decision projection', () => {
+  it('reconciles contradictory final prose from the existing trace without another provider call', async () => {
+    const execute = vi.fn(async () => ({ exitCode: 0, stdout: 'done' }));
+    const handler: ToolHandler = {
+      schema: {
+        name: 'shell_exec', description: 'Execute a command.',
+        inputSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
+      },
+      category: 'execute', mutates: true, execute,
+    };
+    const registry = new ToolRegistry();
+    registry.register(handler);
+    const registryExecutor = registry.buildExecutor({
+      cwd: process.cwd(),
+      paths: resolveAidenPaths({ rootOverride: process.cwd() }),
+      approvalEngine: new ApprovalEngine('manual', { promptUser: async () => 'allow' }),
+    });
+    const provider = new MockProviderAdapter([
+      MockProviderAdapter.toolUse([{ id: 'allow-shell', name: 'shell_exec', arguments: { command: 'run' } }]),
+      MockProviderAdapter.stop('No approval modal was triggered by the runtime.'),
+    ]);
+    const providerCall = vi.spyOn(provider, 'call');
+    const agent = new AidenAgent({
+      provider,
+      toolExecutor: async (...args) => ({ ...await registryExecutor(...args) }),
+      tools: [handler.schema],
+      resolveMutates: (name) => registry.get(name)?.mutates,
+    });
+
+    const result = await agent.runConversation([{ role: 'user', content: 'run the command' }]);
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(providerCall).toHaveBeenCalledTimes(2);
+    expect(result.finalContent).toBe('The command was approved and executed successfully.');
+    expect(result.messages.at(-1)?.content).toBe('The command was approved and executed successfully.');
+    expect(result.toolCallTrace[0].approvalDecision?.state).toBe('approved');
+  });
+
   it('preserves explicit denial through the live registry, trace, finalization, and presentation path', async () => {
     const execute = vi.fn(async () => ({ ok: true }));
     const handler: ToolHandler = {
@@ -82,6 +119,38 @@ describe('approval decision projection', () => {
       requiredFailedCount: 0,
     });
     expect(presentation).toMatchObject({ kind: 'denied', label: 'Denied' });
+  });
+
+  it('removes false execution success after an explicit denial', async () => {
+    const execute = vi.fn(async () => ({ ok: true }));
+    const handler: ToolHandler = {
+      schema: {
+        name: 'shell_exec', description: 'Execute a command.',
+        inputSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
+      },
+      category: 'execute', mutates: true, execute,
+    };
+    const registry = new ToolRegistry();
+    registry.register(handler);
+    const registryExecutor = registry.buildExecutor({
+      cwd: process.cwd(), paths: resolveAidenPaths({ rootOverride: process.cwd() }),
+      approvalEngine: new ApprovalEngine('manual', { promptUser: async () => 'deny' }),
+    });
+    const provider = new MockProviderAdapter([
+      MockProviderAdapter.toolUse([{ id: 'deny-shell-false-prose', name: 'shell_exec', arguments: { command: 'run' } }]),
+      MockProviderAdapter.stop('The user approved the command and it completed.'),
+    ]);
+    const agent = new AidenAgent({
+      provider,
+      toolExecutor: async (...args) => ({ ...await registryExecutor(...args) }),
+      tools: [handler.schema],
+      resolveMutates: (name) => registry.get(name)?.mutates,
+    });
+
+    const result = await agent.runConversation([{ role: 'user', content: 'run the command' }]);
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(result.finalContent).toBe('The command was denied and was not executed.');
   });
 
   it('ends an interrupted approval without a provider continuation', async () => {

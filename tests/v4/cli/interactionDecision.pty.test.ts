@@ -58,6 +58,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
 
     const interruptedPath = path.join(outside, 'interrupted.txt');
     const singleDeniedPath = path.join(outside, 'single-denied.txt');
+    const singleAllowedPath = path.join(outside, 'single-allowed.txt');
     const approvedPath = path.join(cwd, 'approved.txt');
     const declinedPath = path.join(cwd, 'declined.txt');
     const cancelledPath = path.join(cwd, 'cancelled.txt');
@@ -77,7 +78,14 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
             command: `Set-Content -LiteralPath '${singleDeniedPath.replace(/'/g, "''")}' -Value 'DENIED' -NoNewline`,
           },
         }] },
-        { content: 'SINGLE DENIAL COMPLETE' },
+        { content: 'The user approved the command and it completed. SINGLE DENIAL COMPLETE' },
+        { toolCalls: [{
+          id: 'single-allow', name: 'shell_exec',
+          arguments: {
+            command: `Set-Content -LiteralPath '${singleAllowedPath.replace(/'/g, "''")}' -Value 'ALLOWED' -NoNewline`,
+          },
+        }] },
+        { content: 'No approval modal was triggered by the runtime. SINGLE ALLOW COMPLETE' },
         { toolCalls: [{
           id: 'batch-valid', name: 'plan_approval',
           arguments: {
@@ -92,7 +100,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
           id: 'approved-write', name: 'file_write',
           arguments: { path: approvedPath, content: 'approved' },
         }] },
-        { content: 'BATCH RETRY COMPLETE' },
+        { content: 'All operations were approved and completed. BATCH RETRY COMPLETE' },
         { toolCalls: [{
           id: 'batch-cancel', name: 'plan_approval',
           arguments: {
@@ -185,9 +193,20 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
           }, 250);
         } else if (state === 'single-denial-settle' && plain.includes('SINGLE DENIAL COMPLETE') && readyCount >= 3) {
           settled.denial = plain.slice(turnStart);
+          state = 'clear-before-allow';
+          typeLine(child!, '/clear');
+        } else if (state === 'clear-before-allow' && plain.match(/History cleared\./g)?.length === 1 && readyCount >= 4) {
+          state = 'single-allow-prompt';
+          turnStart = plain.length;
+          typeLine(child!, 'request approved command');
+        } else if (state === 'single-allow-prompt' && plain.slice(turnStart).includes('Decision')) {
+          state = 'single-allow-settle';
+          setTimeout(() => child!.write('\r'), 250);
+        } else if (state === 'single-allow-settle' && plain.includes('SINGLE ALLOW COMPLETE') && readyCount >= 5) {
+          settled.allow = plain.slice(turnStart);
           state = 'clear-after-single';
           typeLine(child!, '/clear');
-        } else if (state === 'clear-after-single' && plain.includes('History cleared.') && readyCount >= 4) {
+        } else if (state === 'clear-after-single' && plain.match(/History cleared\./g)?.length === 2 && readyCount >= 6) {
           state = 'batch-valid-prompt';
           turnStart = plain.length;
           typeLine(child!, 'request partial batch');
@@ -197,29 +216,29 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
         } else if (state === 'batch-valid-retry' && plain.includes('Could not parse')) {
           state = 'batch-valid-settle';
           setTimeout(() => typeLine(child!, '1'), 200);
-        } else if (state === 'batch-valid-settle' && plain.includes('BATCH RETRY COMPLETE') && readyCount >= 5) {
+        } else if (state === 'batch-valid-settle' && plain.includes('BATCH RETRY COMPLETE') && readyCount >= 7) {
           settled.retry = plain.slice(turnStart);
           state = 'clear-after-retry';
           typeLine(child!, '/clear');
-        } else if (state === 'clear-after-retry' && plain.match(/History cleared\./g)?.length === 2 && readyCount >= 6) {
+        } else if (state === 'clear-after-retry' && plain.match(/History cleared\./g)?.length === 3 && readyCount >= 8) {
           state = 'batch-cancel-prompt';
           turnStart = plain.length;
           typeLine(child!, 'request cancelled batch');
         } else if (state === 'batch-cancel-prompt' && plain.includes('Cancel this write')) {
           state = 'batch-cancel-settle';
           setTimeout(() => child!.write('\x03'), 250);
-        } else if (state === 'batch-cancel-settle' && plain.includes('BATCH CANCELLATION COMPLETE') && readyCount >= 7) {
+        } else if (state === 'batch-cancel-settle' && plain.includes('BATCH CANCELLATION COMPLETE') && readyCount >= 9) {
           settled.cancel = plain.slice(turnStart);
           state = 'clear-after-cancel';
           typeLine(child!, '/clear');
-        } else if (state === 'clear-after-cancel' && plain.match(/History cleared\./g)?.length === 3 && readyCount >= 8) {
+        } else if (state === 'clear-after-cancel' && plain.match(/History cleared\./g)?.length === 4 && readyCount >= 10) {
           state = 'batch-none-prompt';
           turnStart = plain.length;
           typeLine(child!, 'request denied batch');
         } else if (state === 'batch-none-prompt' && plain.includes('Deny this write')) {
           state = 'batch-none-settle';
           setTimeout(() => typeLine(child!, 'none'), 200);
-        } else if (state === 'batch-none-settle' && plain.includes('BATCH NONE COMPLETE') && readyCount >= 9) {
+        } else if (state === 'batch-none-settle' && plain.includes('BATCH NONE COMPLETE') && readyCount >= 11) {
           settled.none = plain.slice(turnStart);
           state = 'queue';
           typeLine(child!, '/queue');
@@ -236,18 +255,25 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
       });
     });
 
-    expect(provider.callCount()).toBe(10);
+    expect(provider.callCount()).toBe(12);
     expect(settled.single).toContain('Cancelled');
     expect(settled.single).not.toMatch(/\bfailed\b/i);
     expect(settled.single).not.toMatch(/denied by approval engine/i);
     expect(settled.denial).toContain('Denied');
+    expect(settled.denial).toContain('The command was denied and was not executed.');
+    expect(settled.denial).not.toContain('The user approved the command and it completed.');
     expect(settled.denial).not.toMatch(/Could not verify required outcome|\bFailed\b|\bCancelled\b/i);
     expect(settled.cancel).toContain('Cancelled');
     expect(settled.cancel).not.toContain('Denied');
     expect(settled.none).toContain('Denied');
     expect(settled.retry).toMatch(/Partially completed|Verified/);
+    expect(settled.retry).toContain('Only the approved operations were executed; the remaining operations were denied.');
+    expect(settled.retry).not.toContain('All operations were approved and completed.');
+    expect(settled.allow).toContain('The command was approved and executed successfully.');
+    expect(settled.allow).not.toContain('No approval modal was triggered by the runtime.');
     await expect(fs.access(interruptedPath)).rejects.toThrow();
     await expect(fs.access(singleDeniedPath)).rejects.toThrow();
+    await expect(fs.readFile(singleAllowedPath, 'utf8')).resolves.toBe('ALLOWED');
     await expect(fs.readFile(approvedPath, 'utf8')).resolves.toBe('approved');
     await expect(fs.access(declinedPath)).rejects.toThrow();
     await expect(fs.access(cancelledPath)).rejects.toThrow();

@@ -86,6 +86,7 @@ import {
   type CommandRecord,
 } from './executionContract';
 import type { TaskOutcomePresentation } from './taskOutcomePresentation';
+import { projectApprovalFacts, reconcileApprovalResponse } from './approvalResponseConsistency';
 import {
   decideRecoveryAction,
   resolveRetryPolicyConfig,
@@ -1020,7 +1021,19 @@ export class AidenAgent {
     // Findings remain structured on the result. Presentation belongs to the
     // finalization owner, so model content stays clean for every consumer.
     let honestyFindings: HonestyFinding[] | undefined;
-    const finalContent = loopResult.finalContent;
+    const approvalFacts = projectApprovalFacts(loopResult.toolCallTrace);
+    const finalContent = reconcileApprovalResponse(loopResult.finalContent, approvalFacts);
+    const resultMessages = [...loopResult.messages];
+    if (finalContent !== loopResult.finalContent) {
+      for (let index = resultMessages.length - 1; index >= 0; index -= 1) {
+        const message = resultMessages[index];
+        if (message.role !== 'assistant' || message.toolCalls?.length) continue;
+        if (message.content === loopResult.finalContent) {
+          resultMessages[index] = { ...message, content: finalContent };
+        }
+        break;
+      }
+    }
     if (this.honestyEnforcement && loopResult.finishReason === 'stop') {
       try {
         const scan = await this.honestyEnforcement.check(
@@ -1125,7 +1138,7 @@ export class AidenAgent {
 
     return {
       finalContent,
-      messages:           loopResult.messages,
+      messages:           resultMessages,
       turnCount:          loopResult.turnCount,
       toolCallCount:      loopResult.toolCallCount,
       fallbackActivated:  loopResult.fallbackActivated,
@@ -1460,6 +1473,16 @@ export class AidenAgent {
       }
 
       let output: ProviderCallOutput;
+      // Once this turn has authoritative approval facts, hold subsequent
+      // streamed prose until the provider segment completes. Contradictory
+      // text cannot be repaired after it has already reached the terminal.
+      // No-approval turns retain token streaming unchanged.
+      const deferApprovalStream = runOptions.stream === true
+        && typeof this.provider.callStream === 'function'
+        && projectApprovalFacts(toolCallTrace).occurred === true;
+      const providerRunOptions = deferApprovalStream
+        ? { ...runOptions, onFirstDelta: undefined, onDelta: undefined }
+        : runOptions;
       const _llmStartedAt = _perfDiag ? Date.now() : 0;
       p2aDiag('provider.continuation.start', {
         iteration: turnCount,
@@ -1480,7 +1503,7 @@ export class AidenAgent {
             shim.db,
             { model: this.modelId ?? 'unknown', provider: this.providerId ?? 'unknown' },
             async (_ctx, patchAttrs) => {
-              const out = await this.callProvider(messages, effectiveTools, runOptions);
+              const out = await this.callProvider(messages, effectiveTools, providerRunOptions);
               patchAttrs({
                 input_tokens:        out.usage?.inputTokens ?? 0,
                 output_tokens:       out.usage?.outputTokens ?? 0,
@@ -1493,7 +1516,18 @@ export class AidenAgent {
             },
           );
         } else {
-          output = await this.callProvider(messages, effectiveTools, runOptions);
+          output = await this.callProvider(messages, effectiveTools, providerRunOptions);
+        }
+        if (deferApprovalStream && output.content) {
+          const safeContent = stripLeakedUiMarkup(output.content);
+          const reconciled = reconcileApprovalResponse(
+            safeContent,
+            projectApprovalFacts(toolCallTrace),
+          );
+          if (reconciled) {
+            runOptions.onFirstDelta?.();
+            runOptions.onDelta?.(reconciled);
+          }
         }
         p2aDiag('provider.continuation.complete', {
           iteration: turnCount,
