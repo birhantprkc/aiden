@@ -22,6 +22,11 @@
 import type { AidenAgent } from '../../core/v4/aidenAgent';
 import { buildTurnRuntimeContext } from '../../core/v4/turnRuntimeContext';
 import { computeTaskFinalization } from '../../core/v4/taskVerification';
+import {
+  mapTaskOutcomePresentation,
+  taskOutcomeInputFromFinalization,
+  type TaskOutcomePresentation,
+} from '../../core/v4/taskOutcomePresentation';
 import { recordTurnDivergence, projectLegacy } from '../../core/v4/verificationAudit';
 import {
   emitArtifactVerified, emitCostUpdated, emitAutonomyChanged, type PillarEventSink,
@@ -2338,6 +2343,7 @@ export class ChatSession implements ChatSessionLike {
           ? String((declaredTaskDone as Record<string, unknown>).status)
           : null;
       let _fin: ReturnType<typeof computeTaskFinalization> | undefined;
+      let _taskOutcome: TaskOutcomePresentation | undefined;
       try {
         _fin = computeTaskFinalization(
           {
@@ -2356,6 +2362,13 @@ export class ChatSession implements ChatSessionLike {
             },
           },
         );
+        _taskOutcome = mapTaskOutcomePresentation(taskOutcomeInputFromFinalization({
+          finalization: _fin,
+          trace: result.toolCallTrace,
+          finishReason: result.finishReason,
+          ...(replTaskId != null ? { taskId: String(replTaskId) } : {}),
+        }));
+        result.taskOutcome = _taskOutcome;
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn('[tasks] failed to compute finalization:',
@@ -2373,6 +2386,7 @@ export class ChatSession implements ChatSessionLike {
               outcome:  fin.outcome,
               handles:  fin.evidence.handles?.length ?? 0,
               taskId:   replTaskId != null ? String(replTaskId) : undefined,
+              presentation: _taskOutcome,
             });
           } catch { /* telemetry must never break finalization */ }
           // v4.14 Pillar 6 Slice B — grade the skills used this turn against the
@@ -2386,21 +2400,6 @@ export class ChatSession implements ChatSessionLike {
             replTaskStore.setStatus(replTaskId, 'pending_verification');
           }
           replTaskStore.finalizeVerification(replTaskId, fin.status, fin.evidence, fin.jobCard);
-          if (result.finishReason === 'stop' && !(declaredStatus && declaredStatus !== 'success')) {
-            if (fin.status === 'verification_failed') {
-              const what = fin.evidence.failures
-                .map((f) => `${f.tool} (${f.reason})`)
-                .join(', ');
-              this.opts.display.warn(
-                `Task verification failed — side effect claimed without evidence: ${what}. ` +
-                `See /tasks ${replTaskId}.`,
-              );
-            } else if (fin.status === 'completed_unverified') {
-              this.opts.display.dim(
-                `(task completed unverified — side effects lacked hard evidence; /tasks ${replTaskId})`,
-              );
-            }
-          }
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn('[tasks] failed to finalize REPL task row:',
@@ -2521,6 +2520,12 @@ export class ChatSession implements ChatSessionLike {
         // `emitToolReplySeparator`.
         emitToolReplySeparator();
         this.opts.display.write(this.opts.display.agentTurn(result.finalContent));
+      }
+
+      // Pure conversation stays conversational. Tool/task turns receive one
+      // concise post-reply outcome; activity rows remain execution-only.
+      if (_taskOutcome && (result.toolCallTrace?.length ?? 0) > 0) {
+        this.opts.display.taskOutcome(_taskOutcome);
       }
 
       // v4.1.6 Polish 2 — post-render skill-proposal handler.

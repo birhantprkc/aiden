@@ -41,6 +41,7 @@ import {
 import { VERSION as AIDEN_VERSION } from '../../core/version';
 import { renderCapabilityCard } from './display/capabilityCard';
 import type { CapabilityCardData } from '../../providers/v4/types';
+import type { TaskOutcomePresentation } from '../../core/v4/taskOutcomePresentation';
 // Phase v4.1-reply-formatting: skin-aware markdown renderer that
 // replaces marked-terminal's defaults with structured headers, lists,
 // code blocks, blockquotes, and links.
@@ -2124,6 +2125,15 @@ export class Display {
   /** Muted ("dim") line for low-priority diagnostics. */
   dim(text: string): void {
     this.out.write(`${this.skin.applyColors(text, 'muted')}\n`);
+  }
+
+  /** Render the single structured outcome owned by turn finalization. */
+  taskOutcome(outcome: TaskOutcomePresentation): void {
+    const details = outcome.taskId ? ` · Details: /tasks ${outcome.taskId}` : '';
+    const text = `${outcome.label}${outcome.summary ? ` · ${outcome.summary}` : ''}${details}`;
+    if (outcome.severity === 'success') this.success(text);
+    else if (outcome.severity === 'error' || outcome.severity === 'warning') this.warn(text);
+    else this.dim(text);
   }
 
   /**

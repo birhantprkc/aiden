@@ -105,6 +105,22 @@ describe('plan_approval — present + record, never execute', () => {
     expect(r.decidedVia).toBe('user');
   });
 
+  it('preserves required versus optional operation metadata without changing approval selection', async () => {
+    const engine = mkEngine();
+    const clarify = vi.fn(async () => '1');
+    const r = await planApprovalTool.execute({
+      title: 'Required plus courtesy',
+      operations: [
+        { tool: 'file_write', args: { path: 'required.txt' }, reason: 'requested' },
+        { tool: 'file_write', args: { path: 'courtesy.txt' }, reason: 'nice to have', required: false },
+      ],
+    }, ctx({ clarify, approvalEngine: engine as never })) as Record<string, unknown>;
+    expect(r.approvedCount).toBe(1);
+    expect(r.declinedCount).toBe(1);
+    expect(r.approved).toEqual([expect.objectContaining({ required: true })]);
+    expect(r.declined).toEqual([expect.objectContaining({ required: false })]);
+  });
+
   it('unparseable answer → one retry → still unparseable counts as NONE (never guess approval)', async () => {
     const engine = mkEngine();
     const clarify = vi.fn(async () => 'whatever');

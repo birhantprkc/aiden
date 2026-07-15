@@ -187,6 +187,29 @@ describe('Display', () => {
 });
 
 describe('Display Phase 14b helpers', () => {
+  it('renders one concise structured task outcome with an inspectability hint', () => {
+    const chunks: string[] = [];
+    const out = new Writable({
+      write(chunk, _enc, cb) { chunks.push(chunk.toString()); cb(); },
+    });
+    const d = new Display({
+      stdout: out as unknown as NodeJS.WriteStream,
+      skin: new SkinEngine({ forceMono: true }),
+    });
+    d.taskOutcome({
+      kind: 'unverified_required',
+      severity: 'error',
+      label: 'Could not verify required outcome',
+      taskId: '7',
+      evidenceCount: 0,
+      hasRequiredEvidenceGap: true,
+      executionStarted: true,
+      inspectable: true,
+      prominent: true,
+    });
+    expect(chunks.join('')).toContain('Could not verify required outcome · Details: /tasks 7');
+    expect(chunks.join('').match(/Could not verify required outcome/g)).toHaveLength(1);
+  });
   function captureDisplay() {
     const chunks: string[] = [];
     const out = new Writable({

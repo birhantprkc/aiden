@@ -43,6 +43,8 @@ interface PlannedOp {
   tool:   string;
   args:   Record<string, unknown>;
   reason: string;
+  /** False marks a courtesy operation that does not gate task completion. */
+  required?: boolean;
 }
 
 /** Parse "all" / "none" / "1,3-5" into approved indices (1-based input). */
@@ -98,6 +100,7 @@ export const planApprovalTool: ToolHandler = {
               tool:   { type: 'string', description: 'Exact tool to be called (e.g. file_delete, file_move).' },
               args:   { type: 'object', description: 'EXACT args the follow-up call will use.' },
               reason: { type: 'string', description: 'Why this operation is needed.' },
+              required: { type: 'boolean', description: 'False only for an optional courtesy operation; defaults to true.' },
             },
             required: ['tool', 'args', 'reason'],
           },
@@ -175,8 +178,8 @@ export const planApprovalTool: ToolHandler = {
       declinedCount: declined.length,
       // Echo the EXACT args so the model repeats them verbatim — the
       // session-allowlist match is signature-exact by design.
-      approved:  approved.map((op) => ({ tool: op.tool, args: op.args, reason: op.reason })),
-      declined:  declined.map((op) => ({ tool: op.tool, args: op.args, reason: op.reason })),
+      approved:  approved.map((op) => ({ tool: op.tool, args: op.args, reason: op.reason, required: op.required !== false })),
+      declined:  declined.map((op) => ({ tool: op.tool, args: op.args, reason: op.reason, required: op.required !== false })),
       instruction:
         approved.length > 0
           ? 'Execute ONLY the approved operations, calling each tool with EXACTLY the echoed args. Do not perform declined operations.'

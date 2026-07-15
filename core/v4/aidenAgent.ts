@@ -81,6 +81,7 @@ import {
   type CommandId,
   type CommandRecord,
 } from './executionContract';
+import type { TaskOutcomePresentation } from './taskOutcomePresentation';
 import {
   decideRecoveryAction,
   resolveRetryPolicyConfig,
@@ -426,6 +427,8 @@ export interface AidenAgentResult {
   totalUsage:          { inputTokens: number; outputTokens: number };
   toolCallTrace:       HonestyTraceEntry[];
   honestyFindings?:    HonestyFinding[];
+  /** Optional structured turn outcome, populated by a finalization owner. */
+  taskOutcome?:         TaskOutcomePresentation;
   skillCreated?:       string;
   /**
    * v4.1.6 Polish 2 — when SkillTeacher's `observeTurn` returns a
@@ -1002,11 +1005,10 @@ export class AidenAgent {
     // v4.7.0 Phase 2.3 — the verifier now records deterministic
     // outcome events from `toolCallTrace` (not regex over the
     // assistant's text). When `findings.length > 0` AND mode is
-    // `enforce`, it returns an append-only `footer` we concatenate
-    // to `finalContent`. The model's text is NEVER rewritten —
-    // that was the v4.6.x failure mode this verifier replaces.
+    // Findings remain structured on the result. Presentation belongs to the
+    // finalization owner, so model content stays clean for every consumer.
     let honestyFindings: HonestyFinding[] | undefined;
-    let finalContent = loopResult.finalContent;
+    const finalContent = loopResult.finalContent;
     if (this.honestyEnforcement && loopResult.finishReason === 'stop') {
       try {
         const scan = await this.honestyEnforcement.check(
@@ -1016,9 +1018,6 @@ export class AidenAgent {
           loopResult.uiClaims,
         );
         honestyFindings = scan.findings;
-        if (scan.footer) {
-          finalContent = `${finalContent}\n\n${scan.footer}`;
-        }
       } catch {
         /* honesty failures must not break the turn */
       }
