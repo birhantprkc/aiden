@@ -72,6 +72,15 @@ describe('parseApprovalSelection', () => {
   });
 });
 
+it('declares exclusive batch-approval metadata without changing its provider schema', () => {
+  expect(planApprovalTool.interaction).toEqual({
+    mode: 'exclusive_modal',
+    decision: 'batch_approval',
+    cancellation: 'cancelled',
+  });
+  expect(JSON.stringify(planApprovalTool.schema)).not.toContain('interaction');
+});
+
 describe('plan_approval — present + record, never execute', () => {
   it('NOTHING EXECUTES pre-approval: the tool only presents (clarify) and registers grants', async () => {
     const engine = mkEngine();

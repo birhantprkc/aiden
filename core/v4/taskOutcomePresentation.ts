@@ -13,6 +13,7 @@
  */
 
 import type { HonestyTraceEntry } from '../../moat/honestyEnforcement';
+import { isExclusiveToolInteraction } from './toolRegistry';
 import { deriveCommandAxes } from './executionContract';
 import type { VerificationOutcome } from './taskVerification';
 
@@ -214,7 +215,8 @@ export function taskOutcomeInputFromFinalization(args: {
   const timedOut = trace.some((entry) => entry.classification?.category === 'timeout');
   const cancelledInteraction = trace.some((entry) => {
     const status = resultStatus(entry);
-    return (entry.name === 'clarify' || entry.name === 'plan_approval')
+    return isExclusiveToolInteraction(entry.interaction)
+      && entry.interaction?.cancellation === 'cancelled'
       && (status === 'cancelled' || status === 'invalid');
   });
   const interruptedApproval = axes.some((record) => record.approval.state === 'interrupted');

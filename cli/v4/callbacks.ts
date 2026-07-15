@@ -30,6 +30,10 @@ import type { SkillProposal } from '../../moat/skillTeacher';
 import type { PlannerGuardDecision } from '../../moat/plannerGuard';
 import type { CompressionResult } from '../../core/v4/contextCompressor';
 import type { AuxiliaryClient } from '../../core/v4/auxiliaryClient';
+import {
+  isExclusiveToolInteraction,
+  type ToolInteraction,
+} from '../../core/v4/toolRegistry';
 import type {
   ToolActivityUpdate,
   ToolCallRequest,
@@ -67,6 +71,8 @@ export interface CliCallbacksOptions {
    * real SkillTeacher can omit it.
    */
   skillTeacher?: import('../../moat/skillTeacher').SkillTeacher;
+  /** Resolves runtime-only interaction metadata from the live registry. */
+  resolveToolInteraction?: (toolName: string) => ToolInteraction | undefined;
 }
 
 export interface PromptApi {
@@ -275,6 +281,7 @@ export class CliCallbacks {
   // `setSkillTeacher(...)` because the teacher is built AFTER the
   // CliCallbacks instance during boot.
   private skillTeacher?: import('../../moat/skillTeacher').SkillTeacher;
+  private readonly resolveToolInteraction?: CliCallbacksOptions['resolveToolInteraction'];
   private exclusiveInput?: <T>(owner: Exclude<InputOwner, 'during_turn'>, run: (stdin: ModalStdin) => Promise<T>) => Promise<T>;
 
   constructor(opts: CliCallbacksOptions) {
@@ -285,6 +292,7 @@ export class CliCallbacks {
       ? Promise.resolve(opts.promptModule)
       : defaultPrompts();
     this.skillTeacher = opts.skillTeacher;
+    this.resolveToolInteraction = opts.resolveToolInteraction;
     this.activities = new ActivityRegistry((name, args) => this.display.toolRow(name, args));
   }
 
@@ -477,7 +485,9 @@ export class CliCallbacks {
       const status = payload && typeof payload === 'object'
         ? (payload as { status?: unknown }).status
         : undefined;
-      const dismiss = call.name === 'clarify' || call.name === 'plan_approval';
+      const dismiss = isExclusiveToolInteraction(
+        this.resolveToolInteraction?.(call.name),
+      );
       settled = status === 'cancelled'
         ? this.activities.settle(call.id, { state: 'cancelled', dismiss, timing })
         : this.activities.settle(call.id, { state: 'completed', dismiss, timing });

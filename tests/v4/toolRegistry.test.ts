@@ -343,6 +343,31 @@ describe('ToolRegistry', () => {
       .toEqual(['a', 'u1', 'b', 'u2']);
   });
 
+  it('registers optional future interaction metadata without exposing it in provider schemas', () => {
+    const schema = makeSchema('plugin_prompt');
+    registry.register(makeHandler('plugin_prompt', {
+      schema,
+      mutates: false,
+      interaction: {
+        mode: 'exclusive_modal',
+        decision: 'future_plugin_decision',
+        cancellation: 'cancelled',
+        futureField: 'preserved internally',
+      },
+    } as never));
+    registry.register(makeHandler('ordinary_plugin', { mutates: false }));
+    registry.register(makeHandler('mutating_plugin', { mutates: true }));
+
+    expect(registry.get('plugin_prompt')?.interaction).toMatchObject({
+      mode: 'exclusive_modal',
+      decision: 'future_plugin_decision',
+    });
+    expect(registry.get('ordinary_plugin')?.interaction).toBeUndefined();
+    expect(registry.get('mutating_plugin')?.interaction).toBeUndefined();
+    expect(registry.getSchemas().find((item) => item.name === 'plugin_prompt')).toEqual(schema);
+    expect(JSON.stringify(registry.getSchemas())).not.toContain('interaction');
+  });
+
   it('9. byCategory returns handlers matching the requested category', () => {
     registry.register(makeHandler('r1', { category: 'read' }));
     registry.register(makeHandler('w1', { category: 'write', mutates: true }));

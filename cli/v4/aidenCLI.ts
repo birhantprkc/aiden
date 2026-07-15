@@ -1659,6 +1659,8 @@ export async function buildAgentRuntime(
   // Tool registry + executor.
   const toolRegistry = new ToolRegistry();
   registerAllTools(toolRegistry);
+  const resolveToolInteraction = (name: string) =>
+    toolRegistry.get(name)?.interaction;
 
   // v4.11 toolset grouping — resolve the active tool profile ONCE at
   // boot. The profile name comes from (env > config > 'standard')
@@ -1957,6 +1959,7 @@ export async function buildAgentRuntime(
     display,
     auxiliaryClient,
     verboseMode: 'normal',
+    resolveToolInteraction,
   });
   approvalEngine['callbacks'] = {
     promptUser: callbacks.promptApproval,
@@ -2582,6 +2585,7 @@ export async function buildAgentRuntime(
     resolveToolset,
     resolveMutates,
     resolveUiOnly,
+    resolveToolInteraction,
     providerId,
     modelId,
     // Phase 16b.4: wire PromptBuilder so SOUL.md actually reaches the LLM.
@@ -2727,6 +2731,7 @@ export async function buildAgentRuntime(
     resolveToolset,
     resolveMutates,
     resolveUiOnly,
+    resolveToolInteraction,
     // v4.7.0 Phase 2.4 — share the REPL's config-resolved honesty mode
     // with daemon-built agents so autonomous turns honour the same
     // setting interactive turns do.
@@ -2883,6 +2888,7 @@ export async function buildAgentRuntime(
       resolveToolset,
       resolveMutates,
       resolveUiOnly,
+      resolveToolInteraction,
       runStore:            replRunStore,
       instanceId:          replInstanceId,
       logger:              bootLogger.child('subagent'),

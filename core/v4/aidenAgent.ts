@@ -77,6 +77,10 @@ import type { PromptCaching } from './promptCaching';
 import { TurnState, type RecoveryDecision } from './turnState';
 import { handlerMutatesForCall } from './handlerMutates';
 import {
+  isExclusiveToolInteraction,
+  type ToolInteraction,
+} from './toolRegistry';
+import {
   buildCommandRecord,
   type CommandId,
   type CommandRecord,
@@ -368,6 +372,8 @@ export interface AidenAgentOptions {
    * Undefined means "treat as a normal executable tool" (default).
    */
   resolveUiOnly?:          (toolName: string) => boolean | undefined;
+  /** Resolves runtime-only interaction metadata from the live tool registry. */
+  resolveToolInteraction?: (toolName: string) => ToolInteraction | undefined;
   // ── Context layers ───────────────────────────────────────────────────
   promptBuilder?:          PromptBuilder;
   promptBuilderOptions?:   PromptBuilderOptions;
@@ -615,6 +621,7 @@ export class AidenAgent {
   private readonly resolveToolset?:             AidenAgentOptions['resolveToolset'];
   private readonly resolveMutates?:             AidenAgentOptions['resolveMutates'];
   private readonly resolveUiOnly?:              AidenAgentOptions['resolveUiOnly'];
+  private readonly resolveToolInteraction?:     AidenAgentOptions['resolveToolInteraction'];
   private readonly promptBuilder?:              PromptBuilder;
   private          promptBuilderOptions?:       PromptBuilderOptions;
   private readonly contextCompressor?:          ContextCompressor;
@@ -716,6 +723,7 @@ export class AidenAgent {
     this.resolveToolset           = opts.resolveToolset;
     this.resolveMutates           = opts.resolveMutates;
     this.resolveUiOnly            = opts.resolveUiOnly;
+    this.resolveToolInteraction   = opts.resolveToolInteraction;
     this.promptBuilder            = opts.promptBuilder;
     this.promptBuilderOptions     = opts.promptBuilderOptions;
     this.contextCompressor        = opts.contextCompressor;
@@ -1653,56 +1661,24 @@ export class AidenAgent {
       // ordering the model may have intended (we never reorder across
       // a mutating call).
       //
-      // Results land in `preComputedResults` keyed by call.id. The
-      // for-of loop checks this map at the toolExecutor dispatch site
-      // and uses the pre-computed result when available, falling
-      // through to live execution otherwise (mutating calls always,
-      // single-call read-only batches that we don't bother batching).
+      // Results land in `preComputedResults` keyed by call.id. A batch
+      // starts only when ordered dispatch reaches its first call, so a
+      // later read can never execute across an exclusive modal boundary.
+      // Mutating calls and single read calls stay on the live path.
       //
       // Errors caught per-call so one failure doesn't abort the
       // Promise.all — each cell of the batch returns a synthesized
       // error ToolCallResult that the downstream verifier path
       // handles identically to a live-execution error.
       const preComputedResults = new Map<string, ToolCallResult>();
-      {
-        const toolCalls = output.toolCalls;
-        const isReadOnly = (name: string): boolean =>
-          this.resolveMutates?.(name) !== true &&
-          this.resolveUiOnly?.(name) !== true;
-        // These read-only tools can open an exclusive terminal prompt. Keep
-        // them on the ordered live-dispatch path instead of Promise.all.
-        const isInteractive = (name: string): boolean =>
-          name === 'clarify' || name === 'plan_approval';
-        const isParallelRead = (name: string): boolean =>
-          isReadOnly(name) && !isInteractive(name);
-        let i = 0;
-        while (i < toolCalls.length) {
-          if (!isParallelRead(toolCalls[i].name)) { i += 1; continue; }
-          // Find the maximal consecutive read-only batch starting at i.
-          let j = i;
-          while (j < toolCalls.length && isParallelRead(toolCalls[j].name)) j += 1;
-          const batch = toolCalls.slice(i, j);
-          // Skip the parallel path for solo batches — no benefit, and
-          // keeps the live-execution path on the sequential loop where
-          // its existing timing instrumentation can still observe it.
-          if (batch.length > 1) {
-            const batchResults = await Promise.all(
-              batch.map((c) => invokeToolWithTiming(
-                this.toolExecutor,
-                c,
-                this._currentSignal,
-                (update) => {
-                  try { this.onToolActivity?.(c, update); } catch { /* observational */ }
-                },
-              )),
-            );
-            for (let k = 0; k < batch.length; k += 1) {
-              preComputedResults.set(batch[k].id, batchResults[k]);
-            }
-          }
-          i = j;
-        }
-      }
+      const toolCalls = output.toolCalls;
+      const isReadOnly = (name: string): boolean =>
+        this.resolveMutates?.(name) !== true &&
+        this.resolveUiOnly?.(name) !== true;
+      const isParallelRead = (name: string): boolean =>
+        isReadOnly(name) && !isExclusiveToolInteraction(
+          this.resolveToolInteraction?.(name),
+        );
       // v4.9.4 Slice 1 — `.entries()` so the surface + abort fill sites
       // can slice from `callIndex + 1` to compute the un-dispatched tail.
       for (const [callIndex, call] of output.toolCalls.entries()) {
@@ -1757,6 +1733,31 @@ export class AidenAgent {
         const blockedByRequiredClarification =
           this.pendingRequiredClarification !== null &&
           this.resolveMutates?.(call.name) === true;
+        // Start a read batch only when ordered dispatch reaches it. Adjacent
+        // reads still overlap, but never across an exclusive interaction.
+        if (isParallelRead(call.name) && !preComputedResults.has(call.id)) {
+          let batchEnd = callIndex;
+          while (
+            batchEnd < toolCalls.length &&
+            isParallelRead(toolCalls[batchEnd].name)
+          ) batchEnd += 1;
+          const batch = toolCalls.slice(callIndex, batchEnd);
+          if (batch.length > 1) {
+            const batchResults = await Promise.all(
+              batch.map((candidate) => invokeToolWithTiming(
+                this.toolExecutor,
+                candidate,
+                this._currentSignal,
+                (update) => {
+                  try { this.onToolActivity?.(candidate, update); } catch { /* observational */ }
+                },
+              )),
+            );
+            for (let index = 0; index < batch.length; index += 1) {
+              preComputedResults.set(batch[index].id, batchResults[index]);
+            }
+          }
+        }
         this.onToolCall?.(call, 'before');
         // v4.2 Phase 4 — mark any active checkpoints as containing a
         // mutating call BEFORE dispatch. Done pre-dispatch (not post)
@@ -2027,7 +2028,7 @@ export class AidenAgent {
               this.pendingRequiredClarification = null;
             }
           }
-          toolCallTrace.push({
+          const traceEntry: HonestyTraceEntry = {
             name:     call.name,
             result:   result.result,
             error:    result.error,
@@ -2054,7 +2055,15 @@ export class AidenAgent {
             // re-attempt (class, reason, backoff). Undefined when the call
             // went through on the first attempt.
             retries: retryNotes.length > 0 ? retryNotes : undefined,
-          });
+          };
+          const interaction = this.resolveToolInteraction?.(call.name);
+          if (interaction !== undefined) {
+            Object.defineProperty(traceEntry, 'interaction', {
+              value: interaction,
+              enumerable: false,
+            });
+          }
+          toolCallTrace.push(traceEntry);
           fullTrace.push({ name: call.name, args: call.arguments });
           // P1A shadow-collect (non-authoritative) — build a CommandRecord from
           // the signals already in hand and store it in the turn-local ledger

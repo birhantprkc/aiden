@@ -34,6 +34,12 @@ const userMsg = (content: string): Message => ({ role: 'user', content });
 const tc = (id: string, name: string): ToolCallRequest => ({
   id, name, arguments: { q: id },
 });
+const resolveBuiltInInteraction = (name: string) =>
+  name === 'clarify'
+    ? { mode: 'exclusive_modal' as const, decision: 'clarification', cancellation: 'cancelled' as const }
+    : name === 'plan_approval'
+      ? { mode: 'exclusive_modal' as const, decision: 'batch_approval', cancellation: 'cancelled' as const }
+      : undefined;
 
 /**
  * Scripted adapter: emits ONE response of N tool calls, then a
@@ -300,7 +306,12 @@ describe('AidenAgent — parallel pure-read tool dispatch (v4.11 perf)', () => {
       active -= 1;
       return { id: call.id, name: call.name, result: 'ok' };
     };
-    const agent = new AidenAgent({ provider: adapter, tools: NO_TOOLS, toolExecutor: exec });
+    const agent = new AidenAgent({
+      provider: adapter,
+      tools: NO_TOOLS,
+      toolExecutor: exec,
+      resolveToolInteraction: resolveBuiltInInteraction,
+    });
     await agent.runConversation([userMsg('ask twice')]);
     expect(peak).toBe(1);
     expect(order).toEqual(['first', 'second']);
@@ -313,10 +324,108 @@ describe('AidenAgent — parallel pure-read tool dispatch (v4.11 perf)', () => {
       usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'tool_calls',
     }]);
     const { exec, events } = makeTimedExecutor(30);
-    const agent = new AidenAgent({ provider: adapter, tools: NO_TOOLS, toolExecutor: exec });
+    const agent = new AidenAgent({
+      provider: adapter,
+      tools: NO_TOOLS,
+      toolExecutor: exec,
+      resolveToolInteraction: resolveBuiltInInteraction,
+    });
     await agent.runConversation([userMsg('search then ask')]);
     expect(maxOverlap(events)).toBe(1);
     expect(events.map((event) => event.id)).toEqual(['search', 'ask']);
+  });
+
+  it('uses interaction metadata to keep a read-only plugin modal ahead of later reads', async () => {
+    const adapter = new ScriptedAdapter([{
+      content: '',
+      toolCalls: [tc('prompt', 'plugin_prompt'), tc('read-1', 'web_search'), tc('read-2', 'web_search')],
+      usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'tool_calls',
+    }]);
+    const { exec, events } = makeTimedExecutor(30);
+    const agent = new AidenAgent({
+      provider: adapter,
+      tools: NO_TOOLS,
+      toolExecutor: exec,
+      resolveToolInteraction: (name: string) => name === 'plugin_prompt'
+        ? { mode: 'exclusive_modal', decision: 'future_plugin_decision', cancellation: 'cancelled' }
+        : undefined,
+    } as never);
+
+    const result = await agent.runConversation([userMsg('prompt then read twice')]);
+
+    const prompt = events.find((event) => event.id === 'prompt')!;
+    const reads = events.filter((event) => event.name === 'web_search');
+    expect(reads.every((event) => event.startedAt >= prompt.endedAt)).toBe(true);
+    expect(maxOverlap(reads)).toBe(2);
+    const promptTrace = result.toolCallTrace.find((entry) => entry.name === 'plugin_prompt')!;
+    expect(promptTrace.interaction?.decision).toBe('future_plugin_decision');
+    expect(JSON.stringify(promptTrace)).not.toContain('interaction');
+  });
+
+  it('keeps leading adjacent reads parallel before an interactive boundary', async () => {
+    const adapter = new ScriptedAdapter([{
+      content: '',
+      toolCalls: [tc('read-1', 'web_search'), tc('read-2', 'web_search'), tc('prompt', 'plugin_prompt')],
+      usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'tool_calls',
+    }]);
+    const { exec, events } = makeTimedExecutor(30);
+    const agent = new AidenAgent({
+      provider: adapter,
+      tools: NO_TOOLS,
+      toolExecutor: exec,
+      resolveToolInteraction: (name) => name === 'plugin_prompt'
+        ? { mode: 'exclusive_modal', decision: 'confirmation' }
+        : undefined,
+    });
+
+    await agent.runConversation([userMsg('read twice then prompt')]);
+
+    const reads = events.filter((event) => event.name === 'web_search');
+    const prompt = events.find((event) => event.id === 'prompt')!;
+    expect(maxOverlap(reads)).toBe(2);
+    expect(prompt.startedAt).toBeGreaterThanOrEqual(Math.max(...reads.map((event) => event.endedAt)));
+  });
+
+  it('does not precompute a read across an interactive metadata boundary', async () => {
+    const adapter = new ScriptedAdapter([{
+      content: '',
+      toolCalls: [tc('read-before', 'web_search'), tc('prompt', 'plugin_prompt'), tc('read-after', 'web_search')],
+      usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'tool_calls',
+    }]);
+    const { exec, events } = makeTimedExecutor(25);
+    const agent = new AidenAgent({
+      provider: adapter,
+      tools: NO_TOOLS,
+      toolExecutor: exec,
+      resolveToolInteraction: (name: string) => name === 'plugin_prompt'
+        ? { mode: 'exclusive_modal', decision: 'confirmation' }
+        : undefined,
+    } as never);
+
+    await agent.runConversation([userMsg('read, prompt, read')]);
+
+    expect(maxOverlap(events)).toBe(1);
+    expect(events.map((event) => event.id)).toEqual(['read-before', 'prompt', 'read-after']);
+  });
+
+  it('keeps multiple metadata-classified interactive tools sequential', async () => {
+    const adapter = new ScriptedAdapter([{
+      content: '',
+      toolCalls: [tc('prompt-1', 'plugin_prompt'), tc('prompt-2', 'plugin_prompt')],
+      usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'tool_calls',
+    }]);
+    const { exec, events } = makeTimedExecutor(20);
+    const agent = new AidenAgent({
+      provider: adapter,
+      tools: NO_TOOLS,
+      toolExecutor: exec,
+      resolveToolInteraction: () => ({ mode: 'exclusive_modal', decision: 'confirmation' }),
+    } as never);
+
+    await agent.runConversation([userMsg('prompt twice')]);
+
+    expect(maxOverlap(events)).toBe(1);
+    expect(events.map((event) => event.id)).toEqual(['prompt-1', 'prompt-2']);
   });
 });
 

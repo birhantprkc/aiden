@@ -210,6 +210,8 @@ export interface HonestyTraceEntry {
   error?: string;
   /** Structured approval outcome when the tool passed through an approval gate. */
   approvalDecision?: import('../providers/v4/types').ToolApprovalDecision;
+  /** Runtime-only interaction facts captured from the dispatched handler. */
+  interaction?: import('../core/v4/toolRegistry').ToolInteraction;
   /**
    * v4.7.0 Phase 2.3 — `handler.mutates` flag, stamped at dispatch
    * time so the verifier doesn't need a registry handle. Drives the

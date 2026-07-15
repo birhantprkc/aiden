@@ -174,6 +174,21 @@ export interface ToolContext {
  * wrappers SHOULD prefer returning a structured `{ error: ... }` object
  * (or rethrowing with a clear message) over silently absorbing failures.
  */
+export interface ToolInteraction {
+  mode: 'exclusive_modal';
+  decision: string;
+  cancellation?: 'cancelled';
+  /** Forward-compatible metadata for plugin-defined interaction facts. */
+  [key: string]: unknown;
+}
+
+/** Shared generic predicate for tools that exclusively own interactive input. */
+export function isExclusiveToolInteraction(
+  interaction: ToolInteraction | undefined,
+): boolean {
+  return interaction?.mode === 'exclusive_modal';
+}
+
 export interface ToolHandler {
   schema: ToolSchema;
   execute(args: Record<string, unknown>, context: ToolContext): Promise<unknown>;
@@ -182,6 +197,8 @@ export interface ToolHandler {
   mutates: boolean;
   /** Group label — `web`, `files`, `browser`, `sessions`, `skills`, etc. */
   toolset?: string;
+  /** Runtime-only interaction metadata; never included in provider schemas. */
+  interaction?: ToolInteraction;
   /**
    * v4.4 Phase 1 — per-tool risk tier. Optional for backward compat.
    * Tools without an explicit annotation default via

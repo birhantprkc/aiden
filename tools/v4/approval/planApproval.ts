@@ -82,6 +82,11 @@ function describeOp(op: PlannedOp): string {
 }
 
 export const planApprovalTool: ToolHandler = {
+  interaction: {
+    mode: 'exclusive_modal',
+    decision: 'batch_approval',
+    cancellation: 'cancelled',
+  },
   schema: {
     name: 'plan_approval',
     description:

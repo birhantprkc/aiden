@@ -53,6 +53,13 @@ function result(id: string, name: string, payload: unknown): ToolCallResult {
   return { id, name, result: payload };
 }
 
+const resolveBuiltInInteraction = (name: string) =>
+  name === 'clarify'
+    ? { mode: 'exclusive_modal' as const, decision: 'clarification', cancellation: 'cancelled' as const }
+    : name === 'plan_approval'
+      ? { mode: 'exclusive_modal' as const, decision: 'batch_approval', cancellation: 'cancelled' as const }
+      : undefined;
+
 describe('central CLI activity lifecycle', () => {
   it('replaces each timer frame with one atomic terminal write', () => {
     vi.useFakeTimers();
@@ -103,7 +110,7 @@ describe('central CLI activity lifecycle', () => {
     vi.spyOn(display, 'toolRow')
       .mockReturnValueOnce(completed)
       .mockReturnValueOnce(cancelled);
-    const callbacks = new CliCallbacks({ display });
+    const callbacks = new CliCallbacks({ display, resolveToolInteraction: resolveBuiltInInteraction });
 
     callbacks.onToolCall(call('q1', 'clarify'), 'before');
     callbacks.onToolCall(call('q1', 'clarify'), 'after', result('q1', 'clarify', { status: 'answered' }));
@@ -117,6 +124,30 @@ describe('central CLI activity lifecycle', () => {
     expect(callbacks.activeActivityCount()).toBe(0);
   });
 
+  it('dismisses a plugin-shaped exclusive interaction without a name exception', () => {
+    const display = makeDisplay();
+    const row = makeRow();
+    vi.spyOn(display, 'toolRow').mockReturnValue(row);
+    const callbacks = new CliCallbacks({
+      display,
+      resolveToolInteraction: (name: string) => name === 'plugin_prompt'
+        ? { mode: 'exclusive_modal', decision: 'future_plugin_decision', cancellation: 'cancelled' }
+        : undefined,
+    } as never);
+
+    callbacks.onToolCall(call('plugin-1', 'plugin_prompt'), 'before');
+    callbacks.onToolCall(
+      call('plugin-1', 'plugin_prompt'),
+      'after',
+      result('plugin-1', 'plugin_prompt', { status: 'cancelled' }),
+    );
+
+    expect(row.dismiss).toHaveBeenCalledTimes(1);
+    expect(row.cancel).not.toHaveBeenCalled();
+    expect(callbacks.activeActivityCount()).toBe(0);
+    expect(callbacks.activityModalPauseDepth()).toBe(0);
+  });
+
   it('runs one approval prompt while its activity row is paused', async () => {
     const display = makeDisplay();
     const row = makeRow();
@@ -127,7 +158,11 @@ describe('central CLI activity lifecycle', () => {
       confirm: vi.fn(async () => true),
       input: vi.fn(async () => ''),
     };
-    const callbacks = new CliCallbacks({ display, promptModule: prompts });
+    const callbacks = new CliCallbacks({
+      display,
+      promptModule: prompts,
+      resolveToolInteraction: resolveBuiltInInteraction,
+    });
     callbacks.onToolCall(call('a1', 'plan_approval'), 'before');
 
     await expect(callbacks.promptApproval({

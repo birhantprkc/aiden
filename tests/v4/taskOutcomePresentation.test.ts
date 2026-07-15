@@ -108,8 +108,14 @@ describe('task outcome presentation mapper', () => {
       handlerMutates: true,
       approvalDecision: { state: 'interrupted', approved: false },
     }]],
-    ['batch cancellation', 'cancelled', [{ name: 'plan_approval', result: { status: 'cancelled' }, handlerMutates: false }]],
-    ['batch invalid exhaustion', 'cancelled', [{ name: 'plan_approval', result: { status: 'invalid' }, handlerMutates: false }]],
+    ['batch cancellation', 'cancelled', [{ name: 'plan_approval', result: { status: 'cancelled' }, handlerMutates: false, interaction: { mode: 'exclusive_modal', decision: 'batch_approval', cancellation: 'cancelled' } }]],
+    ['batch invalid exhaustion', 'cancelled', [{ name: 'plan_approval', result: { status: 'invalid' }, handlerMutates: false, interaction: { mode: 'exclusive_modal', decision: 'batch_approval', cancellation: 'cancelled' } }]],
+    ['plugin interaction cancellation', 'cancelled', [{
+      name: 'plugin_prompt',
+      result: { status: 'cancelled' },
+      handlerMutates: false,
+      interaction: { mode: 'exclusive_modal', decision: 'future_plugin_decision', cancellation: 'cancelled' },
+    }]],
     ['hard security block', 'failed', [{
       name: 'shell_exec',
       result: null,
@@ -117,7 +123,7 @@ describe('task outcome presentation mapper', () => {
       handlerMutates: true,
       approvalDecision: { state: 'blocked', approved: false },
     }]],
-    ['clarification cancellation', 'cancelled', [{ name: 'clarify', result: { status: 'cancelled' }, handlerMutates: false }]],
+    ['clarification cancellation', 'cancelled', [{ name: 'clarify', result: { status: 'cancelled' }, handlerMutates: false, interaction: { mode: 'exclusive_modal', decision: 'clarification', cancellation: 'cancelled' } }]],
     ['structured timeout', 'timed_out', [{ name: 'shell_exec', result: null, error: 'stopped', handlerMutates: true, classification: { category: 'timeout', confidence: 1, recoverable: false } }]],
     ['execution failure', 'failed', [{ name: 'file_write', result: null, error: 'disk error', handlerMutates: true }]],
   ] as const)('derives %s without parsing assistant prose', (_name, expected, trace) => {
