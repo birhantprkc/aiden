@@ -94,7 +94,7 @@ Windows · Linux · WSL · macOS (API Mode)
 ![Built solo](https://img.shields.io/badge/Built-solo-B8A893?style=flat-square)
 ![By Taracod](https://img.shields.io/badge/By-Taracod-FF6B35?style=flat-square)
 ![White Lotus](https://img.shields.io/badge/Brand-White_Lotus-FFB088?style=flat-square)
-![v4.14.5](https://img.shields.io/badge/Latest-v4.14.5-4ADE80?style=flat-square)
+![v4.15.0](https://img.shields.io/badge/Latest-v4.15.0-4ADE80?style=flat-square)
 
 </div>
 
@@ -112,7 +112,7 @@ https://github.com/user-attachments/assets/1081e5c5-f1ec-4980-b710-1640981ec58b
 
 
 
-> A semi-autonomous AI agent that runs on your machine. Touches your files, browser, and shell. Remembers what matters. Built solo. Open source. Still rough in spots.
+> A semi-autonomous AI agent that runs on your machine. It can work with your files, browser, and shell, remember what matters, and keep going across longer tasks. Built solo. Open source. Still rough in spots.
 
 <br>
 
@@ -147,14 +147,18 @@ https://github.com/user-attachments/assets/7a66bc19-8b17-4b01-be85-3aa5945a1b3b
 
 <br>
 
-## What's new in v4.14.5
+## What's new in v4.15.0
 
-**A reliability release — the same Aiden, steadier under the hood.**
+**Aiden’s terminal interaction and runtime verification layer is now significantly more reliable.**
 
-- **Message delivery is sealed per turn.** Every channel — Telegram, Discord, Slack, Signal, iMessage, email, SMS, WhatsApp, webhook — now carries its own frozen destination, so concurrent replies can never cross-route. A permanently-dead target (bot blocked, chat deleted) is remembered and skipped instead of retried forever, and a transient failure mid-reply no longer abandons the rest of a long message.
-- **Honest providers.** A unified provider preflight plus a boot-decision trace explain which provider was chosen and why. Failures surface the real reason — no more "failed: failed" — and an explicitly-requested provider that fails says so plainly instead of quietly swapping.
-- **Trustworthy subagents.** Helper-agent claims are re-checked against real evidence: stub/empty files, combined-output leaks, and unverifiable remote claims are caught before Aiden trusts a result.
-- **Cleaner internals.** Retired dead v3 modules, corrected stale scaffolding comments, and fixed a background cache timer that was forcing every command to hard-quit instead of exiting cleanly.
+- **Single-owner terminal lifecycle.** Activity rows, timers, approval states, and the bottom input region now share one coordinated lifecycle, eliminating duplicate “running” rows, ghost timers, and UI collisions.
+- **Queue input while Aiden works.** Follow-up messages can be typed during tool execution and are preserved in exact FIFO order, without corrupting the active turn.
+- **Truthful approvals and outcomes.** Pending approvals, denials, interruptions, non-zero exits, verification results, and completed work are presented as distinct states instead of being collapsed into a generic success or running label.
+- **Stronger runtime verification.** Claims are checked against real evidence, with better handling for stale artifacts, retries, partial coverage, unrelated successful work, and uncertain producer attribution.
+- **Responsive startup and recovery UX.** The startup dashboard, help, model guidance, first-task hints, and recovery messaging now adapt more cleanly across terminal widths.
+- **Safer dependency paths.** Discord, email, Docker, and Telegram integrations were hardened, with the production dependency audit returning zero advisories.
+
+See the full [v4.15.0 release notes](https://github.com/taracodlabs/aiden/releases/tag/v4.15.0).
 
 ## What's new in v4.13
 
@@ -279,7 +283,7 @@ Full v4.5 internals: [`docs/v4.5/`](docs/v4.5/) (overview, triggers, architectur
 | **Channel adapters** | Discord, Slack, Telegram, WhatsApp, Email (IMAP+SMTP), Webhook, Twilio SMS, iMessage (macOS), Signal — any channel triggers the same agent loop. |
 | **Computer use** | Screenshot capture, screen-state vision loop, state-aware browser automation, accessibility-tree snapshots, stable element handles, act-by-reference click/type/fill, and partial mouse/keyboard automation. |
 | **v4.5 daemon mode (opt-in)** | File watcher / webhook / email IMAP / scheduled triggers route through a durable trigger bus consumed by the Phase 5a dispatcher. Triggers fire → real agent runs → tool calls execute → `run_events` captures the chain. **Off by default.** |
-| **v4.13 durable autonomy** | Job-cards, restart-safe task continuation, duplicate-action prevention, smart retries, evidence-required subagents, trust dial, and live operator dashboard. |
+| **v4.15 interaction reliability** | Single-owner activity/timer lifecycle, exact FIFO queued input, truthful approval and interruption states, responsive startup chrome, stronger claim verification, and clearer recovery guidance. |
 | **Plugins** | Two bundled plugins: Chrome DevTools Protocol bridge, ChatGPT Plus OAuth. Permission-state machine (pending-grant / loaded / suspended). |
 | **MCP** | Model Context Protocol bridge and client — stdio + Streamable HTTP transports, schema discovery, OAuth 2.0 flow, approval-gated external tools, and tool dispatch. |
 | **Security moat** | Tiered approval engine (`safe` / `caution` / `dangerous`), dangerous-command pattern classifier, outcome verification, artifact provenance, trust dial, memory guard, planner-guard tool narrowing, SSRF-safe URL fetcher, secret/PII pre-write scanner, exfiltration-aware browser guardrails, and skill-teacher. |
@@ -295,7 +299,7 @@ Full v4.5 internals: [`docs/v4.5/`](docs/v4.5/) (overview, triggers, architectur
 
 ## Architecture
 
-Aiden is a local-first agent loop: provider adapters feed a 90-turn ceiling, every tool call passes through verification + failure classification + recovery, and tool results stream back as structured envelopes the model can reason over. v4.5 added a SQLite daemon foundation alongside the REPL — file watchers and webhook endpoints write to a durable trigger bus, a single-worker dispatcher claims events, and each trigger fires a fresh agent turn keyed by a stable session id. v4.12 added outward MCP client support and deeper browser state; v4.13 added job-cards, restart-safe task continuation, evidence-required subagents, and a trust dial. Sandboxed execution (filesystem allow/deny + Docker session backend), state-aware browser observation, and continuous error recovery apply to daemon-fired turns identically to REPL turns.
+Aiden is a local-first agent loop: provider adapters feed a 90-turn ceiling, every tool call passes through verification + failure classification + recovery, and tool results stream back as structured envelopes the model can reason over. v4.5 added a SQLite daemon foundation alongside the REPL — file watchers and webhook endpoints write to a durable trigger bus, a single-worker dispatcher claims events, and each trigger fires a fresh agent turn keyed by a stable session id. v4.12 added outward MCP client support and deeper browser state; v4.13 added job-cards, restart-safe task continuation, evidence-required subagents, and a trust dial. v4.15 tightened the operator surface with a single-owner terminal lifecycle, exact FIFO queued input, truthful approval and interruption states, responsive startup layouts, and stronger claim/evidence verification. Sandboxed execution (filesystem allow/deny + Docker session backend), state-aware browser observation, and continuous error recovery apply to daemon-fired turns identically to REPL turns.
 
 Detailed diagrams + module map in [`docs/v4.5/architecture.md`](docs/v4.5/architecture.md).
 
@@ -653,7 +657,7 @@ The future `skills.taracod.com` marketplace will ship community skills under the
 | 📦 **npm** | [aiden-runtime](https://www.npmjs.com/package/aiden-runtime) |
 | 🐙 **Source** | [github.com/taracodlabs/aiden](https://github.com/taracodlabs/aiden) |
 | 📁 **Standalone releases** | [github.com/taracodlabs/aiden-releases](https://github.com/taracodlabs/aiden-releases) |
-| 🧾 **Release notes** | [v4.13.0](https://github.com/taracodlabs/aiden/releases/tag/v4.13.0) · [v4.12.0](https://github.com/taracodlabs/aiden/releases/tag/v4.12.0) · [v4.11.0](https://github.com/taracodlabs/aiden/releases/tag/v4.11.0) · [v4.10.0](https://github.com/taracodlabs/aiden/releases/tag/v4.10.0) |
+| 🧾 **Release notes** | [v4.15.0](https://github.com/taracodlabs/aiden/releases/tag/v4.15.0) · [v4.13.0](https://github.com/taracodlabs/aiden/releases/tag/v4.13.0) · [v4.12.0](https://github.com/taracodlabs/aiden/releases/tag/v4.12.0) · [v4.11.0](https://github.com/taracodlabs/aiden/releases/tag/v4.11.0) · [v4.10.0](https://github.com/taracodlabs/aiden/releases/tag/v4.10.0) |
 | 📖 **Book — Omega** | [Amazon](https://amzn.to/49ceO8l) |
 | 📚 **Docs** | [`docs/v4.5/`](docs/v4.5/) (in this repo) |
 | 💖 **Sponsor (Razorpay)** | [razorpay.me/@whitelotus9625](https://razorpay.me/@whitelotus9625) |
