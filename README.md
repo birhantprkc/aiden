@@ -20,7 +20,11 @@ Windows · Linux · WSL · macOS (API Mode)
 
 **Autonomous Work Engine — plans, acts, recovers, and proves the result**
 
+Give Aiden a goal. It can work across your files, terminal, browser, supported applications, APIs, and connected services to get the job done.
+
 *76 skills · 121 tools · 19 providers · 9 channels · AGPL-3.0*
+
+**Windows · Linux · WSL · macOS API mode**
 
 <br>
 
@@ -40,6 +44,11 @@ Windows · Linux · WSL · macOS (API Mode)
 [![Book: Omega](https://img.shields.io/badge/Book-Omega-FFB088?style=for-the-badge&logo=amazon&logoColor=white)](https://amzn.to/49ceO8l)
 [![Email](https://img.shields.io/badge/Contact-contact@taracod.com-4ADE80?style=for-the-badge&logo=gmail&logoColor=white)](mailto:contact@taracod.com)
 [![Sponsor via Razorpay](https://img.shields.io/badge/Sponsor-Razorpay-3395FF?style=for-the-badge&logo=razorpay&logoColor=white)](https://razorpay.me/@whitelotus9625)
+
+<br>
+
+<details>
+<summary><strong>Technology, platform, provider, channel, and runtime details</strong></summary>
 
 <br>
 
@@ -96,11 +105,17 @@ Windows · Linux · WSL · macOS (API Mode)
 ![White Lotus](https://img.shields.io/badge/Brand-White_Lotus-FFB088?style=flat-square)
 ![v4.15.0](https://img.shields.io/badge/Latest-v4.15.0-4ADE80?style=flat-square)
 
+</details>
+
+<br>
+
+**[Install](#try-it-in-60-seconds) · [Capabilities](#core-capabilities) · [Models](#switching-models) · [Skills](#skills) · [Commands](#cli-commands) · [Documentation](docs/v4.5/) · [Discord](https://discord.gg/CU5wshJW4F)**
+
 </div>
 
 <br>
 
-<img width="929" height="673" alt="image" src="https://github.com/user-attachments/assets/78224b1f-5517-4865-9142-48dd0a68fb46" />
+<img width="929" height="673" alt="Aiden terminal interface" src="https://github.com/user-attachments/assets/78224b1f-5517-4865-9142-48dd0a68fb46" />
 
 
 
@@ -112,7 +127,49 @@ https://github.com/user-attachments/assets/1081e5c5-f1ec-4980-b710-1640981ec58b
 
 
 
-> A semi-autonomous AI agent that runs on your machine. It can work with your files, browser, and shell, remember what matters, and keep going across longer tasks. Built solo. Open source. Still rough in spots.
+> **Aiden is an autonomous AI engine for real computer work.** It can plan multi-step jobs, use your files, terminal, browser, supported applications, APIs, and connected services, remember what matters, recover from failures, and check whether the requested result was actually produced. Built solo. Open source. Actively developed.
+
+<br>
+
+## Why Aiden is useful
+
+Most AI tools stop at advice. Aiden is built to move from a goal to real execution while keeping you in control.
+
+```text
+Goal → Plan → Tools → Permission → Execution → Recovery → Evidence → Result
+```
+
+- **Give it a job, not dozens of tiny prompts.** Aiden can plan and continue through longer, multi-step work.
+- **Let it use real tools.** It can work with files, shell commands, code, browser workflows, APIs, MCP servers, applications, and channels.
+- **Stay in control.** Risk-tiered approvals, trust levels, budgets, interruption, and scoped permissions keep consequential actions visible.
+- **See what happened.** Runs, events, tasks, artifacts, tests, and verification results make the work inspectable.
+- **Use the models you prefer.** Choose among 19 providers, subscription-backed sign-in where supported, custom endpoints, or Ollama.
+- **Run it across your setup.** Aiden supports Windows, Linux, WSL, and macOS API mode.
+
+### What you can use it for
+
+| Use case | Example |
+|---|---|
+| **Codebase work** | Inspect a repository, trace a bug, make focused changes, run tests, and report what changed. |
+| **Research and reports** | Search, compare sources, collect findings, and save a structured deliverable. |
+| **Browser workflows** | Navigate supported websites, fill forms, work with tabs and dialogs, and capture outcomes. |
+| **Background automation** | React to files, schedules, email, and webhooks through the opt-in daemon. |
+| **Personal operations** | Organize files, inspect system state, run repeatable procedures, and remember useful context. |
+| **Multi-agent work** | Delegate focused parts of a larger job to isolated sub-agents and combine the results. |
+
+### Good first prompts
+
+```text
+Inspect this repository, explain how it works, and identify the three highest-risk areas.
+```
+
+```text
+Find the cause of the failing tests, fix the root problem, rerun the relevant tests, and show me what changed.
+```
+
+```text
+Research this topic, compare the strongest findings, and save a structured Markdown report.
+```
 
 <br>
 
@@ -123,9 +180,9 @@ npm install -g aiden-runtime
 aiden
 ```
 
-That's it. Pick a provider (Groq is free + fastest), paste your key, and start chatting.
+That’s it. Choose a provider, complete the connection check, and give Aiden its first job.
 
-**Want autonomous triggers?**
+**Want Aiden to react to files, schedules, email, or webhooks? Enable autonomous triggers:**
 
 ```bash
 export AIDEN_DAEMON=1          # PowerShell: $env:AIDEN_DAEMON = "1"
@@ -151,6 +208,8 @@ https://github.com/user-attachments/assets/7a66bc19-8b17-4b01-be85-3aa5945a1b3b
 
 **Aiden’s terminal interaction and runtime verification layer is now significantly more reliable.**
 
+This release makes Aiden calmer to operate, easier to steer while it works, and more honest about approvals, failures, verification, and completion.
+
 - **Single-owner terminal lifecycle.** Activity rows, timers, approval states, and the bottom input region now share one coordinated lifecycle, eliminating duplicate “running” rows, ghost timers, and UI collisions.
 - **Queue input while Aiden works.** Follow-up messages can be typed during tool execution and are preserved in exact FIFO order, without corrupting the active turn.
 - **Truthful approvals and outcomes.** Pending approvals, denials, interruptions, non-zero exits, verification results, and completed work are presented as distinct states instead of being collapsed into a generic success or running label.
@@ -159,6 +218,11 @@ https://github.com/user-attachments/assets/7a66bc19-8b17-4b01-be85-3aa5945a1b3b
 - **Safer dependency paths.** Discord, email, Docker, and Telegram integrations were hardened, with the production dependency audit returning zero advisories.
 
 See the full [v4.15.0 release notes](https://github.com/taracodlabs/aiden/releases/tag/v4.15.0).
+
+<details>
+<summary><strong>Earlier v4 release highlights — v4.13 through v4.5</strong></summary>
+
+<br>
 
 ## What's new in v4.13
 
@@ -269,15 +333,17 @@ See [CHANGELOG.md](./CHANGELOG.md) for details.
 
 Full v4.5 internals: [`docs/v4.5/`](docs/v4.5/) (overview, triggers, architecture, daemon on Linux/macOS/Windows, troubleshooting).
 
+</details>
+
 <br>
 
 ## Core capabilities
 
 | Category | What Aiden does |
 |---|---|
-| **Inference & providers** | 18 providers: Anthropic, OpenAI, Groq, Gemini, OpenRouter, Together, NVIDIA NIM, DeepSeek, Mistral, Z.ai, Kimi, MiniMax, Hugging Face, Ollama (fully offline), Nous Portal, custom OpenAI-compatible endpoints. OAuth subscription routing for ChatGPT Plus. |
-| **60 built-in tools** | Web search & fetch, deep research, YouTube search, Playwright browser automation (10 tools), file ops, process control, shell exec, code execution, system info, screenshot, clipboard, app launch, media keys, MCP bridge, memory ops, session list/search/summary/recall, skill view/list/manage, `aiden_self_update`. |
-| **74 bundled skills** | Composable workflows each with a `SKILL.md` prompt, optional helper scripts, and tool requirements. GitHub PR/issue workflows, NSE / Upstox / Zerodha trading, Censys / Shodan / VirusTotal lookups, Windows Defender / Task Scheduler, Docker management, YouTube content tools, and more. |
+| **Inference & providers** | 19 providers: Anthropic, OpenAI, Groq, Gemini, OpenRouter, Together, NVIDIA NIM, DeepSeek, Mistral, Z.ai, Kimi, MiniMax, Hugging Face, Ollama (fully offline), Nous Portal, custom OpenAI-compatible endpoints. OAuth subscription routing for ChatGPT Plus. |
+| **121 built-in tools** | Web search & fetch, deep research, YouTube search, Playwright browser automation (10 tools), file ops, process control, shell exec, code execution, system info, screenshot, clipboard, app launch, media keys, MCP bridge, memory ops, session list/search/summary/recall, skill view/list/manage, `aiden_self_update`. |
+| **76 bundled skills** | Composable workflows each with a `SKILL.md` prompt, optional helper scripts, and tool requirements. GitHub PR/issue workflows, NSE / Upstox / Zerodha trading, Censys / Shodan / VirusTotal lookups, Windows Defender / Task Scheduler, Docker management, YouTube content tools, and more. |
 | **Self-promoting memory** | `USER.md` + `SOUL.md` identity, plus `MEMORY.md` split between durable facts (compression-protected) and recent-session distillations. Each session ends with a structured summary that graduates durable facts into the protected section. Semantic recall over past sessions via `recall_session`. |
 | **Voice** | Edge TTS / Windows SAPI text-to-speech, speech-to-text helpers. |
 | **Channel adapters** | Discord, Slack, Telegram, WhatsApp, Email (IMAP+SMTP), Webhook, Twilio SMS, iMessage (macOS), Signal — any channel triggers the same agent loop. |
@@ -299,7 +365,7 @@ Full v4.5 internals: [`docs/v4.5/`](docs/v4.5/) (overview, triggers, architectur
 
 ## Architecture
 
-Aiden is a local-first agent loop: provider adapters feed a 90-turn ceiling, every tool call passes through verification + failure classification + recovery, and tool results stream back as structured envelopes the model can reason over. v4.5 added a SQLite daemon foundation alongside the REPL — file watchers and webhook endpoints write to a durable trigger bus, a single-worker dispatcher claims events, and each trigger fires a fresh agent turn keyed by a stable session id. v4.12 added outward MCP client support and deeper browser state; v4.13 added job-cards, restart-safe task continuation, evidence-required subagents, and a trust dial. v4.15 tightened the operator surface with a single-owner terminal lifecycle, exact FIFO queued input, truthful approval and interruption states, responsive startup layouts, and stronger claim/evidence verification. Sandboxed execution (filesystem allow/deny + Docker session backend), state-aware browser observation, and continuous error recovery apply to daemon-fired turns identically to REPL turns.
+Aiden is a cross-platform autonomous runtime: provider adapters feed a 90-turn ceiling, every tool call passes through verification + failure classification + recovery, and tool results stream back as structured envelopes the model can reason over. v4.5 added a SQLite daemon foundation alongside the REPL — file watchers and webhook endpoints write to a durable trigger bus, a single-worker dispatcher claims events, and each trigger fires a fresh agent turn keyed by a stable session id. v4.12 added outward MCP client support and deeper browser state; v4.13 added job-cards, restart-safe task continuation, evidence-required subagents, and a trust dial. v4.15 tightened the operator surface with a single-owner terminal lifecycle, exact FIFO queued input, truthful approval and interruption states, responsive startup layouts, and stronger claim/evidence verification. Sandboxed execution (filesystem allow/deny + Docker session backend), state-aware browser observation, and continuous error recovery apply to daemon-fired turns identically to REPL turns.
 
 Detailed diagrams + module map in [`docs/v4.5/architecture.md`](docs/v4.5/architecture.md).
 
@@ -312,7 +378,7 @@ https://github.com/user-attachments/assets/323c9aa7-959a-425a-a5b3-4bae2b1a14bc
 
 
 
-## Install + first run
+## Install, update, and first run
 
 ### Linux / WSL / macOS (one-line)
 
@@ -343,7 +409,10 @@ npm install -g aiden-runtime@latest
 ```
 
 Or, from inside a running session, the slash command:
+
+```text
 /update install
+```
 
 (Aiden also prompts you on boot when a newer version is on npm — see `/update auto off` to silence.)
 
@@ -365,7 +434,7 @@ Remove-Item -Recurse -Force $env:LOCALAPPDATA\aiden
 
 <br>
 
-<img width="938" height="1049" alt="preview (3)" src="https://github.com/user-attachments/assets/4e32ae38-74ad-433d-b986-0a15bc2dffec" />
+<img width="938" height="1049" alt="Aiden setup and operator interface" src="https://github.com/user-attachments/assets/4e32ae38-74ad-433d-b986-0a15bc2dffec" />
 
 
 
@@ -412,7 +481,10 @@ aiden doctor
 ## Switching models
 
 Inside the REPL:
+
+```text
 /model
+```
 
 Picks a provider (with `✓ authed` badges next to ones you've configured), fetches the live model list, and saves your choice to `config.yaml`. Persists across sessions.
 
@@ -442,7 +514,7 @@ export AIDEN_DEFAULT_MODEL=llama-3.3-70b-versatile
 
 ## Skills
 
-Aiden ships with 74 bundled skills and supports installing more from the community registry.
+Aiden ships with 76 bundled skills and supports installing more from the community registry.
 
 ### What are skills?
 
@@ -667,9 +739,11 @@ The future `skills.taracod.com` marketplace will ship community skills under the
 
 ## Disclaimer
 
-Aiden can touch your files, run shell commands, and access the web. It's autonomous within the limits you set. Things will go wrong sometimes. Use at your own risk, read the code if you're nervous, and report what breaks.
+Aiden can read and write files, run shell commands, access the web, operate supported applications, and connect to external services. It is autonomous within the limits you set. Review permissions carefully, keep backups, use limited credentials, and test important workflows in a safe environment.
 
-**Built solo. Started as a hobby project. Still rough in spots. Getting better every week.**
+Aiden is actively developed, and some capabilities remain experimental or platform-dependent. Report reproducible problems so they can be fixed.
+
+**Built solo by Shiva Deore at Taracod. Started as a hobby project. Improving with every release.**
 
 ### Welcome
 
@@ -687,5 +761,5 @@ Aiden can touch your files, run shell commands, and access the web. It's autonom
 ---
 
 <p align="center">
-  <em>Local-first. Windows-native. Yours to own.</em>
+  <em>Give Aiden a job. Watch it work. See what actually happened.</em>
 </p>
